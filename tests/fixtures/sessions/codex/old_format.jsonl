@@ -1,0 +1,15 @@
+{"id":"a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d","timestamp":"2025-08-15T14:22:33.456Z","instructions":null}
+{"record_type":"state"}
+{"type":"message","id":null,"role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/Users/testuser/projects/myapp</cwd>\n  <approval_policy>on-request</approval_policy>\n  <sandbox_mode>read-only</sandbox_mode>\n  <network_access>restricted</network_access>\n  <shell>zsh</shell>\n</environment_context>"}]}
+{"record_type":"state"}
+{"type":"message","id":null,"role":"user","content":[{"type":"input_text","text":"What files are in the current directory?"}]}
+{"record_type":"state"}
+{"record_type":"state"}
+{"type":"reasoning","id":"rs_abc123def456789012345678901234567890abcd12345678","summary":[{"type":"summary_text","text":"**Listing directory contents**\n\nThe user wants to see what files are in their current directory. I should describe the typical approach of using ls or find to list files. Since I'm in read-only sandbox mode, I can suggest commands but need to be careful about execution."},{"type":"summary_text","text":"**Considering the environment**\n\nThe sandbox is read-only and network access is restricted. I'll provide a helpful response about listing files and suggest the appropriate command."}],"content":null,"encrypted_content":"gAAAAABkZXhhbXBsZV9lbmNyeXB0ZWRfY29udGVudF9mb3JfdGVzdGluZ19wdXJwb3Nlc19vbmx5X25vdF9yZWFsX2VuY3J5cHRpb24"}
+{"type":"message","id":"msg_abc123def456789012345678901234567890abcd12345678","role":"assistant","content":[{"type":"output_text","text":"Here are the files in your current directory:\n\n- `src/` - Source code directory\n- `Cargo.toml` - Rust project manifest\n- `Cargo.lock` - Dependency lock file\n- `README.md` - Project documentation\n- `tests/` - Test directory\n\nYou can run `ls -la` for a detailed listing including hidden files."}]}
+{"record_type":"state"}
+{"type":"message","id":null,"role":"user","content":[{"type":"input_text","text":"Show me the contents of Cargo.toml"}]}
+{"record_type":"state"}
+{"record_type":"state"}
+{"type":"reasoning","id":"rs_def456789012345678901234567890abcdef0123456789ab","summary":[{"type":"summary_text","text":"**Reading Cargo.toml**\n\nThe user wants to see the contents of their Cargo.toml file. I'll read and display the file contents for them."}],"content":null,"encrypted_content":"gAAAAABkZXhhbXBsZV9lbmNyeXB0ZWRfY29udGVudF9udW1iZXJfdHdvX2Zvcl90ZXN0aW5nX29ubHk"}
+{"type":"message","id":"msg_def456789012345678901234567890abcdef0123456789ab","role":"assistant","content":[{"type":"output_text","text":"Here are the contents of `Cargo.toml`:\n\n```toml\n[package]\nname = \"myapp\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nserde = { version = \"1.0\", features = [\"derive\"] }\ntokio = { version = \"1\", features = [\"full\"] }\n```\n\nThis is a standard Rust project with serde and tokio as dependencies."}]}

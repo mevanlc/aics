@@ -1,0 +1,5 @@
+{"timestamp":"2026-01-15T10:00:00.100Z","type":"session_meta","payload":{"id":"e5f6a7b8-c9d0-4e1f-2a3b-4c5d6e7f8a9b","timestamp":"2026-01-15T10:00:00.000Z","cwd":"/Users/testuser/projects/demo","originator":"codex_cli_rs","cli_version":"0.100.0","source":"cli","model_provider":"openai"}}
+{"timestamp":"2026-01-15T10:00:00.200Z","type":"turn_context","payload":{"cwd":"/Users/testuser/projects/demo","approval_policy":"suggest","sandbox_policy":{"type":"read-only"},"model":"o3","effort":"medium","summary":"auto"}}
+{"timestamp":"2026-01-15T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"What is 2 + 2?"}]}}
+{"timestamp":"2026-01-15T10:00:02.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Simple arithmetic question. The answer is 4."}],"content":null,"encrypted_content":"gAAAAABkbWluaW1hbF9yZWFzb25pbmdfZW5jcnlwdGVk"}}
+{"timestamp":"2026-01-15T10:00:02.500Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"4"}]}}
