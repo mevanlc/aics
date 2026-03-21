@@ -7,7 +7,7 @@ use ratatui::Frame;
 use crate::parse::{Agent, MessageRole, Session};
 use crate::tui::app::{App, Focus};
 use crate::tui::theme::Theme;
-use crate::tui::util::{highlight_spans, role_label};
+use crate::tui::util::{highlight_spans, role_label, wrapped_text_height};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let focused = matches!(app.focus, Focus::Preview);
@@ -25,6 +25,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
             Style::default().fg(theme.muted),
         )))
     };
+    let viewport_height = area.height.saturating_sub(2) as usize;
+    let viewport_width = area.width.saturating_sub(2);
+    let max_scroll = wrapped_text_height(&text, viewport_width).saturating_sub(viewport_height);
+    app.preview_scroll = app.preview_scroll.min(max_scroll);
 
     let paragraph = Paragraph::new(text)
         .block(block)

@@ -11,6 +11,7 @@ use crate::parse::Session;
 use crate::tui::layout;
 use crate::tui::preview::render_session_text;
 use crate::tui::theme::Theme;
+use crate::tui::util::wrapped_text_height;
 
 const VIEWER_PAGE_STEP: usize = 12;
 
@@ -103,11 +104,17 @@ impl ViewerState {
             .custom_title
             .clone()
             .unwrap_or_else(|| session.project.clone());
-        let body = Paragraph::new(render_session_text(
+        let text = render_session_text(
             session,
             theme,
             (!self.search.value().is_empty()).then_some(self.search.value()),
-        ))
+        );
+        let viewport_height = chunks[0].height.saturating_sub(2) as usize;
+        let viewport_width = chunks[0].width.saturating_sub(2);
+        let scroll = self
+            .scroll
+            .min(wrapped_text_height(&text, viewport_width).saturating_sub(viewport_height));
+        let body = Paragraph::new(text)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -116,7 +123,7 @@ impl ViewerState {
                 .title(format!("Viewer · {title}")),
         )
         .wrap(Wrap { trim: false })
-        .scroll((self.scroll.min(u16::MAX as usize) as u16, 0));
+        .scroll((scroll.min(u16::MAX as usize) as u16, 0));
         frame.render_widget(body, chunks[0]);
 
         let search_label = if self.editing_search {

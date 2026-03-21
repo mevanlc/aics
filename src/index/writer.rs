@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -7,7 +8,8 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
-use tantivy::{Index, TantivyDocument, Term};
+use tantivy::directory::error::LockError;
+use tantivy::{Index, TantivyDocument, TantivyError, Term};
 
 use crate::index::reader::SearchEngine;
 use crate::index::schema::IndexSchema;
@@ -66,6 +68,12 @@ pub struct SyncStats {
 }
 
 #[derive(Debug, Clone)]
+pub enum SyncOutcome {
+    Completed(SyncStats),
+    Busy,
+}
+
+#[derive(Debug, Clone)]
 pub struct IndexPaths {
     pub cache_root: PathBuf,
     pub index_dir: PathBuf,
@@ -74,6 +82,9 @@ pub struct IndexPaths {
 
 impl IndexPaths {
     pub fn discover() -> Result<Self> {
+        if let Some(cache_root) = env_override("AICS_CACHE_ROOT") {
+            return Ok(Self::from_root(cache_root));
+        }
         let project_dirs =
             ProjectDirs::from("", "", "aics").context("failed to locate cache directory")?;
         Ok(Self::from_root(project_dirs.cache_dir()))
@@ -110,17 +121,52 @@ impl IndexManager {
         self.sync_with_roots(&roots, rebuild)
     }
 
+    pub fn sync_best_effort(&self, rebuild: bool) -> Result<SyncOutcome> {
+        let roots = default_session_roots()?;
+        self.sync_with_roots_best_effort(&roots, rebuild)
+    }
+
+    pub fn sync_with_roots_best_effort(
+        &self,
+        roots: &SessionRoots,
+        rebuild: bool,
+    ) -> Result<SyncOutcome> {
+        match self.sync_with_roots(roots, rebuild) {
+            Ok(stats) => Ok(SyncOutcome::Completed(stats)),
+            Err(error) if !rebuild && is_lock_busy_error(&error) => {
+                warn!(
+                    "index sync skipped because another aics process holds the writer lock; \
+                     using the current on-disk snapshot"
+                );
+                Ok(SyncOutcome::Busy)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn sync_with_roots(&self, roots: &SessionRoots, rebuild: bool) -> Result<SyncStats> {
         fs::create_dir_all(&self.paths.cache_root)
             .with_context(|| format!("failed to create {}", self.paths.cache_root.display()))?;
 
-        if rebuild && self.paths.index_dir.exists() {
-            fs::remove_dir_all(&self.paths.index_dir)
-                .with_context(|| format!("failed to remove {}", self.paths.index_dir.display()))?;
+        if rebuild {
+            if self.paths.index_dir.exists() {
+                fs::remove_dir_all(&self.paths.index_dir).with_context(|| {
+                    format!("failed to remove {}", self.paths.index_dir.display())
+                })?;
+            }
+            if self.paths.state_file.exists() {
+                fs::remove_file(&self.paths.state_file).with_context(|| {
+                    format!("failed to remove {}", self.paths.state_file.display())
+                })?;
+            }
         }
 
         let (index, fields) = self.open_or_create_index()?;
-        let previous_state = load_state(&self.paths.state_file)?;
+        let previous_state = if rebuild {
+            IndexState::default()
+        } else {
+            load_state(&self.paths.state_file)?
+        };
         let scanned_files = scan_session_files(roots)?;
         let mut next_state = IndexState::default();
         let mut stats = SyncStats {
@@ -323,4 +369,19 @@ fn save_state(path: &Path, state: &IndexState) -> Result<()> {
 
 fn normalize_path_key(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn env_override(name: &str) -> Option<PathBuf> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn is_lock_busy_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<TantivyError>(),
+            Some(TantivyError::LockFailure(LockError::LockBusy, _))
+        )
+    })
 }

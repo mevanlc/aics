@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -27,9 +28,17 @@ pub fn default_session_roots() -> Result<SessionRoots> {
     let home = base_dirs.home_dir();
 
     Ok(SessionRoots {
-        claude_projects: home.join(".claude").join("projects"),
-        codex_sessions: home.join(".codex").join("sessions"),
+        claude_projects: env_override("AICS_CLAUDE_PROJECTS_DIR")
+            .unwrap_or_else(|| home.join(".claude").join("projects")),
+        codex_sessions: env_override("AICS_CODEX_SESSIONS_DIR")
+            .unwrap_or_else(|| home.join(".codex").join("sessions")),
     })
+}
+
+fn env_override(name: &str) -> Option<PathBuf> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 pub fn scan_default_session_files() -> Result<Vec<SessionFile>> {

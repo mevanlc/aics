@@ -7,7 +7,7 @@ use chrono::{Local, NaiveDate, TimeZone, Utc};
 use clap::Parser;
 use env_logger::Env;
 
-use aics::index::{IndexManager, Scope, SearchFilters, SearchRequest, SortMode};
+use aics::index::{IndexManager, Scope, SearchFilters, SearchRequest, SortMode, SyncOutcome};
 use aics::parse::Agent;
 use aics::tui::run_app;
 
@@ -54,7 +54,9 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("warn")).init();
     let cli = Cli::parse();
     let manager = IndexManager::new()?;
-    manager.sync(cli.rebuild_index)?;
+    match manager.sync_best_effort(cli.rebuild_index)? {
+        SyncOutcome::Completed(_) | SyncOutcome::Busy => {}
+    }
     let request = build_request(&cli)?;
     let search_engine = manager.open_search_engine()?;
 

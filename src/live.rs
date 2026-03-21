@@ -1,3 +1,4 @@
+use std::env;
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -13,7 +14,8 @@ pub struct LiveSessionTracker {
 impl LiveSessionTracker {
     pub fn discover() -> Self {
         Self {
-            claude_sessions_dir: BaseDirs::new().map(|dirs| dirs.home_dir().join(".claude/sessions")),
+            claude_sessions_dir: env_override("AICS_CLAUDE_SESSIONS_DIR")
+                .or_else(|| BaseDirs::new().map(|dirs| dirs.home_dir().join(".claude/sessions"))),
         }
     }
 
@@ -51,6 +53,12 @@ impl LiveSessionTracker {
 
         session_ids
     }
+}
+
+fn env_override(name: &str) -> Option<PathBuf> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 #[derive(Debug, Deserialize)]

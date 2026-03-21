@@ -1,7 +1,9 @@
 use chrono::{Local, TimeZone, Utc};
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_truncate::UnicodeTruncateStr;
+use unicode_width::UnicodeWidthStr;
 
 use crate::index::SearchHit;
 use crate::parse::{Agent, MessageRole};
@@ -121,7 +123,7 @@ pub fn highlight_spans(text: &str, query: &str, base: Style, highlight: Style) -
         }
 
         let next = text[index..]
-            .char_indices()
+            .grapheme_indices(true)
             .nth(1)
             .map(|(offset, _)| index + offset)
             .unwrap_or(text.len());
@@ -138,6 +140,30 @@ pub fn truncate_plain(value: &str, width: usize) -> String {
     truncated.to_owned()
 }
 
+pub fn wrapped_text_height(text: &Text<'_>, width: u16) -> usize {
+    let width = width as usize;
+    if width == 0 {
+        return 0;
+    }
+
+    text.lines
+        .iter()
+        .map(|line| {
+            let content = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            let display_width = UnicodeWidthStr::width(content.as_str());
+            if display_width == 0 {
+                1
+            } else {
+                ((display_width - 1) / width) + 1
+            }
+        })
+        .sum()
+}
+
 fn unescape_html(value: &str) -> String {
     value
         .replace("&lt;", "<")
@@ -150,8 +176,11 @@ fn unescape_html(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use ratatui::style::Style;
+    use unicode_segmentation::UnicodeSegmentation;
 
-    use super::parse_highlighted_html;
+    use ratatui::text::Text;
+
+    use super::{highlight_spans, parse_highlighted_html, truncate_plain, wrapped_text_height};
 
     #[test]
     fn highlight_parser_handles_literal_angle_brackets() {
@@ -168,5 +197,36 @@ mod tests {
             .collect::<String>();
 
         assert_eq!(rendered, "<environment_context> plain match");
+    }
+
+    #[test]
+    fn truncate_plain_stays_on_grapheme_boundaries() {
+        let value = "Plan 👨‍👩‍👧‍👦 sprint";
+        let truncated = truncate_plain(value, 7);
+        let graphemes = UnicodeSegmentation::graphemes(value, true).collect::<Vec<_>>();
+
+        assert!((0..=graphemes.len()).any(|count| graphemes[..count].concat() == truncated));
+    }
+
+    #[test]
+    fn highlight_spans_preserve_complex_unicode_text() {
+        let spans = highlight_spans(
+            "Ship 👨‍👩‍👧‍👦 plan 漢字",
+            "plan",
+            Style::default(),
+            Style::default(),
+        );
+        let rendered = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered, "Ship 👨‍👩‍👧‍👦 plan 漢字");
+    }
+
+    #[test]
+    fn wrapped_text_height_counts_wide_wrapped_lines() {
+        let text = Text::from("alpha\n漢字漢字\n");
+        assert_eq!(wrapped_text_height(&text, 4), 4);
     }
 }

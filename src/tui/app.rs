@@ -29,6 +29,7 @@ use tui_input::Input;
 
 use crate::index::{
     IndexManager, Scope, SearchEngine, SearchFilters, SearchHit, SearchRequest, SortMode,
+    SyncOutcome,
 };
 use crate::parse::{parse_session_file, Session};
 use crate::tui::actions::{ActionMenuState, ActionOutcome, SessionAction};
@@ -279,6 +280,7 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) {
         let theme = self.theme.clone();
+        frame.render_widget(Clear, frame.area());
         self.last_frame_area = frame.area();
         let areas = layout::split(frame.area(), self.preview_width_pct);
         self.last_layout = Some(areas);
@@ -753,10 +755,25 @@ impl App {
         };
         fs::remove_file(&hit.session.file_path)
             .with_context(|| format!("failed to delete {}", hit.session.file_path.display()))?;
+        self.results
+            .retain(|result| result.session.file_path != hit.session.file_path);
+        if self.selected >= self.results.len() {
+            self.selected = self.results.len().saturating_sub(1);
+        }
+        self.preview_scroll = 0;
         self.preview_cache.remove(&hit.session.file_path);
-        self.manager.sync(false)?;
-        self.status_message = Some(format!("deleted {}", hit.session.file_path.display()));
-        self.trigger_search_now()?;
+        match self.manager.sync_best_effort(false)? {
+            SyncOutcome::Completed(_) => {
+                self.status_message = Some(format!("deleted {}", hit.session.file_path.display()));
+                self.trigger_search_now()?;
+            }
+            SyncOutcome::Busy => {
+                self.status_message = Some(format!(
+                    "deleted {} · index refresh deferred",
+                    hit.session.file_path.display()
+                ));
+            }
+        }
         Ok(())
     }
 
