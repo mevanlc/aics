@@ -41,7 +41,8 @@ use crate::tui::{layout, list, preview, search};
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
 const SEARCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PAGE_STEP: usize = 8;
-const MOUSE_SCROLL_STEP: usize = 3;
+const LIST_MOUSE_SCROLL_STEP: isize = 1;
+const PANEL_MOUSE_SCROLL_STEP: usize = 3;
 const PREVIEW_WIDTH_DEFAULT: u16 = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,22 +491,26 @@ impl App {
             }
             MouseEventKind::ScrollDown => {
                 if contains(areas.list, mouse.column, mouse.row) {
-                    self.move_selection(MOUSE_SCROLL_STEP as isize);
+                    self.move_selection(LIST_MOUSE_SCROLL_STEP);
                 } else if areas
                     .preview
                     .is_some_and(|preview| contains(preview, mouse.column, mouse.row))
                 {
-                    self.preview_scroll = self.preview_scroll.saturating_add(MOUSE_SCROLL_STEP);
+                    self.preview_scroll = self
+                        .preview_scroll
+                        .saturating_add(PANEL_MOUSE_SCROLL_STEP);
                 }
             }
             MouseEventKind::ScrollUp => {
                 if contains(areas.list, mouse.column, mouse.row) {
-                    self.move_selection(-(MOUSE_SCROLL_STEP as isize));
+                    self.move_selection(-LIST_MOUSE_SCROLL_STEP);
                 } else if areas
                     .preview
                     .is_some_and(|preview| contains(preview, mouse.column, mouse.row))
                 {
-                    self.preview_scroll = self.preview_scroll.saturating_sub(MOUSE_SCROLL_STEP);
+                    self.preview_scroll = self
+                        .preview_scroll
+                        .saturating_sub(PANEL_MOUSE_SCROLL_STEP);
                 }
             }
             _ => {}
@@ -519,10 +524,10 @@ impl App {
             if contains(popup, mouse.column, mouse.row) {
                 match mouse.kind {
                     MouseEventKind::ScrollDown => {
-                        state.scroll = state.scroll.saturating_add(MOUSE_SCROLL_STEP);
+                        state.scroll = state.scroll.saturating_add(PANEL_MOUSE_SCROLL_STEP);
                     }
                     MouseEventKind::ScrollUp => {
-                        state.scroll = state.scroll.saturating_sub(MOUSE_SCROLL_STEP);
+                        state.scroll = state.scroll.saturating_sub(PANEL_MOUSE_SCROLL_STEP);
                     }
                     _ => {}
                 }
