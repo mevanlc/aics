@@ -32,7 +32,7 @@ pub fn split(area: Rect, preview_width_pct: u16) -> AppLayout {
     AppLayout {
         search: vertical[0],
         list: body[0],
-        preview: show_preview.then_some(body[1]),
+        preview: show_preview.then(|| body[1]),
         status: vertical[2],
     }
 }

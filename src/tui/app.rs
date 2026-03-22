@@ -283,7 +283,14 @@ impl App {
         let theme = self.theme.clone();
         frame.render_widget(Clear, frame.area());
         self.last_frame_area = frame.area();
-        let areas = layout::split(frame.area(), self.preview_width_pct);
+        let area = frame.area();
+        if area.height < 5 || area.width < 20 {
+            let msg = Paragraph::new("Terminal too small")
+                .style(Style::default().fg(theme.muted));
+            frame.render_widget(msg, area);
+            return;
+        }
+        let areas = layout::split(area, self.preview_width_pct);
         self.last_layout = Some(areas);
         self.preview_visible = areas.preview.is_some();
         self.clamp_scroll_state(areas);
@@ -294,16 +301,22 @@ impl App {
             preview::render(frame, self, preview_area, &theme);
         }
 
-        let status = Paragraph::new(format!(
-            "{}  |  Tab focus  |  Ctrl+F filters  |  Enter actions  |  Ctrl+H/L resize  |  Mouse scroll  |  Ctrl+C quit",
-            self.status_text()
-        ))
-        .block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_type(BorderType::Rounded),
-        )
-        .style(ratatui::style::Style::default().fg(theme.muted));
+        let status_base = self.status_text();
+        let w = areas.status.width as usize;
+        let status_str = if w >= 100 {
+            format!("{status_base}  |  Tab focus  |  Ctrl+F filters  |  Enter actions  |  Ctrl+H/L resize  |  Ctrl+C quit")
+        } else if w >= 60 {
+            format!("{status_base}  |  Tab  ^F  Enter  ^C")
+        } else {
+            status_base
+        };
+        let status = Paragraph::new(status_str)
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_type(BorderType::Rounded),
+            )
+            .style(ratatui::style::Style::default().fg(theme.muted));
         frame.render_widget(status, areas.status);
 
         match self.overlay.clone() {

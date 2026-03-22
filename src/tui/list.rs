@@ -13,6 +13,16 @@ use crate::tui::util::{agent_badge, list_title, parse_highlighted_html, relative
 const PREVIEW_LINES: usize = 3;
 pub const ITEM_HEIGHT: usize = PREVIEW_LINES + 2;
 
+/// Use compact 1-line items when the content area can't fit a single card.
+fn effective_item_height(area: Rect) -> usize {
+    let content_height = area.height.saturating_sub(2) as usize;
+    if content_height >= ITEM_HEIGHT {
+        ITEM_HEIGHT
+    } else {
+        1
+    }
+}
+
 pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let focused = matches!(app.focus, Focus::List);
     let block = Block::default()
@@ -21,6 +31,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         .border_style(theme.border_style(focused))
         .title("Sessions");
 
+    let compact = effective_item_height(area) == 1;
     let items = if app.results.is_empty() {
         let empty_state = if app.is_searching() {
             "Searching..."
@@ -35,10 +46,17 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         let visible_slots = visible_slots(area);
         let (visible_hits, _) = app.list_window(visible_slots);
         let content_width = area.width.saturating_sub(4) as usize;
-        visible_hits
-            .iter()
-            .map(|hit| render_item(hit, theme, content_width))
-            .collect::<Vec<_>>()
+        if compact {
+            visible_hits
+                .iter()
+                .map(|hit| render_item_compact(hit, theme, content_width))
+                .collect::<Vec<_>>()
+        } else {
+            visible_hits
+                .iter()
+                .map(|hit| render_item(hit, theme, content_width))
+                .collect::<Vec<_>>()
+        }
     };
 
     let list = List::new(items)
@@ -61,7 +79,8 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
 pub fn visible_slots(area: Rect) -> usize {
     let content_height = area.height.saturating_sub(2) as usize;
-    (content_height / ITEM_HEIGHT).max(1)
+    let ih = effective_item_height(area);
+    (content_height / ih).max(1)
 }
 
 pub fn slot_at_row(area: Rect, row: u16) -> Option<usize> {
@@ -71,7 +90,8 @@ pub fn slot_at_row(area: Rect, row: u16) -> Option<usize> {
         return None;
     }
 
-    Some(((row - inner_top) as usize) / ITEM_HEIGHT)
+    let ih = effective_item_height(area);
+    Some(((row - inner_top) as usize) / ih)
 }
 
 fn render_item(hit: &SearchHit, theme: &Theme, width: usize) -> ListItem<'static> {
@@ -119,6 +139,19 @@ fn render_item(hit: &SearchHit, theme: &Theme, width: usize) -> ListItem<'static
     );
     lines.push(Line::default());
     ListItem::new(lines)
+}
+
+fn render_item_compact(hit: &SearchHit, theme: &Theme, width: usize) -> ListItem<'static> {
+    let (badge, badge_color) = agent_badge(hit.session.agent, theme);
+    let time = relative_time(hit.session.modified_ts);
+    let prefix = format!("{{{badge}}} {time} ");
+    let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+    let title_budget = width.saturating_sub(prefix_width);
+    let title_text = truncate_with_ellipsis(&list_title(hit), title_budget);
+    ListItem::new(Line::from(vec![
+        Span::styled(prefix, Style::default().fg(badge_color)),
+        Span::styled(title_text, Style::default().fg(theme.text)),
+    ]))
 }
 
 fn format_line_count(lines: usize) -> String {
