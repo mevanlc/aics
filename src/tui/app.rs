@@ -817,10 +817,7 @@ impl App {
     }
 
     fn copy_to_clipboard(&mut self, value: &str, label: &str) -> Result<()> {
-        let mut clipboard = arboard::Clipboard::new().context("failed to access clipboard")?;
-        clipboard
-            .set_text(value.to_owned())
-            .context("failed to set clipboard contents")?;
+        crate::clipboard::set_text(value).context("failed to set clipboard contents")?;
         self.status_message = Some(format!("copied {label}"));
         Ok(())
     }

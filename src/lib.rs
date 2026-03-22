@@ -1,3 +1,4 @@
+pub mod clipboard;
 pub mod index;
 pub mod live;
 pub mod parse;
