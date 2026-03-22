@@ -296,8 +296,7 @@ impl App {
         self.last_frame_area = frame.area();
         let area = frame.area();
         if area.height < 5 || area.width < 20 {
-            let msg = Paragraph::new("Terminal too small")
-                .style(Style::default().fg(theme.muted));
+            let msg = Paragraph::new("Terminal too small").style(Style::default().fg(theme.muted));
             frame.render_widget(msg, area);
             return;
         }
@@ -315,9 +314,9 @@ impl App {
         let status_base = self.status_text();
         let w = areas.status.width as usize;
         let status_str = if w >= 110 {
-            format!("{status_base}  |  Tab focus  |  Ctrl+F filters  |  Ctrl+P settings  |  Enter actions  |  Ctrl+H/L resize  |  Ctrl+C quit")
+            format!("{status_base}  |  Tab focus  |  Ctrl+F filters  |  Ctrl+O settings  |  Enter actions  |  Ctrl+H/L resize  |  Ctrl+C quit")
         } else if w >= 60 {
-            format!("{status_base}  |  Tab  ^F  ^P  Enter  ^C")
+            format!("{status_base}  |  Tab  ^F  ^O  Enter  ^C")
         } else {
             status_base
         };
@@ -369,7 +368,7 @@ impl App {
 
     fn handle_search_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_settings()
             }
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -398,7 +397,7 @@ impl App {
 
     fn handle_list_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_settings()
             }
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -434,7 +433,7 @@ impl App {
 
     fn handle_preview_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_settings()
             }
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -465,6 +464,13 @@ impl App {
     }
 
     fn handle_overlay_key(&mut self, key: KeyEvent) -> Result<()> {
+        let viewer_area = self.last_frame_area;
+        let viewer_session = if matches!(self.overlay, Overlay::Viewer(_)) {
+            self.selected_preview().cloned()
+        } else {
+            None
+        };
+
         match &mut self.overlay {
             Overlay::Filters(state) => match state.handle_key(key, &self.local_scope)? {
                 FilterOutcome::Stay => {}
@@ -485,10 +491,12 @@ impl App {
                     self.run_session_action(action)?;
                 }
             },
-            Overlay::Viewer(state) => match state.handle_key(key) {
-                ViewerOutcome::Stay => {}
-                ViewerOutcome::Close => self.overlay = Overlay::None,
-            },
+            Overlay::Viewer(state) => {
+                match state.handle_key(key, viewer_area, viewer_session.as_ref()) {
+                    ViewerOutcome::Stay => {}
+                    ViewerOutcome::Close => self.overlay = Overlay::None,
+                }
+            }
             Overlay::Settings(state) => match state.handle_key(key) {
                 SettingsOutcome::Stay => {}
                 SettingsOutcome::Close => self.overlay = Overlay::None,
@@ -542,9 +550,8 @@ impl App {
                     .preview
                     .is_some_and(|preview| contains(preview, mouse.column, mouse.row))
                 {
-                    self.preview_scroll = self
-                        .preview_scroll
-                        .saturating_add(PANEL_MOUSE_SCROLL_STEP);
+                    self.preview_scroll =
+                        self.preview_scroll.saturating_add(PANEL_MOUSE_SCROLL_STEP);
                 }
             }
             MouseEventKind::ScrollUp => {
@@ -554,9 +561,8 @@ impl App {
                     .preview
                     .is_some_and(|preview| contains(preview, mouse.column, mouse.row))
                 {
-                    self.preview_scroll = self
-                        .preview_scroll
-                        .saturating_sub(PANEL_MOUSE_SCROLL_STEP);
+                    self.preview_scroll =
+                        self.preview_scroll.saturating_sub(PANEL_MOUSE_SCROLL_STEP);
                 }
             }
             _ => {}
@@ -566,8 +572,8 @@ impl App {
 
     fn handle_overlay_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
         if let Overlay::Viewer(state) = &mut self.overlay {
-            let popup = layout::centered_rect(self.last_frame_area, 88, 88);
-            if contains(popup, mouse.column, mouse.row) {
+            let body = ViewerState::body_area(self.last_frame_area);
+            if contains(body, mouse.column, mouse.row) {
                 match mouse.kind {
                     MouseEventKind::ScrollDown => {
                         state.scroll = state.scroll.saturating_add(PANEL_MOUSE_SCROLL_STEP);
@@ -728,7 +734,8 @@ impl App {
     }
 
     fn open_filters(&mut self) {
-        self.overlay = Overlay::Filters(FilterModalState::new(&self.scope, &self.filters, self.sort));
+        self.overlay =
+            Overlay::Filters(FilterModalState::new(&self.scope, &self.filters, self.sort));
     }
 
     fn open_viewer(&mut self) {
@@ -804,7 +811,10 @@ impl App {
                 let Some(hit) = self.selected_hit() else {
                     return Ok(());
                 };
-                self.copy_to_clipboard(&hit.session.file_path.display().to_string(), "session path")?;
+                self.copy_to_clipboard(
+                    &hit.session.file_path.display().to_string(),
+                    "session path",
+                )?;
             }
             SessionAction::CopyDir => {
                 let Some(hit) = self.selected_hit() else {
