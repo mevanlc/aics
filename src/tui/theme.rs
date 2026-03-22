@@ -1,5 +1,7 @@
 use ratatui::style::{Color, Modifier, Style};
 
+use crate::settings::ThemeName;
+
 #[derive(Debug, Clone)]
 pub struct Theme {
     pub border: Color,
@@ -22,6 +24,19 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
+        Self::aics()
+    }
+}
+
+impl Theme {
+    pub fn from_name(name: ThemeName) -> Self {
+        match name {
+            ThemeName::Aics => Self::aics(),
+            ThemeName::Lazygit => Self::lazygit(),
+        }
+    }
+
+    pub fn aics() -> Self {
         Self {
             border: Color::Rgb(70, 76, 86),
             focus_border: Color::Rgb(144, 191, 255),
@@ -41,9 +56,30 @@ impl Default for Theme {
             bubble_summary: Color::Rgb(60, 54, 32),
         }
     }
-}
 
-impl Theme {
+    /// Theme inspired by lazygit's default color scheme: green focused borders,
+    /// blue selection highlights, higher contrast, terminal-native feel.
+    pub fn lazygit() -> Self {
+        Self {
+            border: Color::Rgb(68, 68, 68),
+            focus_border: Color::Rgb(50, 205, 50),
+            text: Color::Rgb(241, 241, 241),
+            muted: Color::Rgb(140, 140, 140),
+            accent: Color::Rgb(50, 205, 50),
+            selection: Color::Rgb(0, 0, 128),
+            highlight: Color::Rgb(255, 255, 0),
+            list_header_bg: Color::Rgb(30, 30, 30),
+            list_body_bg: Color::Rgb(20, 20, 20),
+            claude: Color::Rgb(242, 153, 74),
+            codex: Color::Rgb(86, 194, 131),
+            bubble_user: Color::Rgb(20, 20, 50),
+            bubble_claude: Color::Rgb(50, 35, 15),
+            bubble_codex: Color::Rgb(15, 40, 30),
+            bubble_system: Color::Rgb(35, 35, 35),
+            bubble_summary: Color::Rgb(45, 40, 20),
+        }
+    }
+
     pub fn border_style(&self, focused: bool) -> Style {
         Style::default().fg(if focused {
             self.focus_border

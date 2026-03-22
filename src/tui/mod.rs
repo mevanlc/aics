@@ -5,6 +5,7 @@ pub mod layout;
 pub mod list;
 pub mod preview;
 pub mod search;
+pub mod settings;
 pub mod theme;
 pub mod util;
 pub mod viewer;

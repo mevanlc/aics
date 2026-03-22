@@ -9,6 +9,7 @@ use env_logger::Env;
 
 use aics::index::{IndexManager, Scope, SearchFilters, SearchRequest, SortMode, SyncOutcome};
 use aics::parse::Agent;
+use aics::settings::Settings;
 use aics::tui::run_app;
 
 #[derive(Debug, Parser)]
@@ -53,6 +54,7 @@ struct Cli {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("warn")).init();
     let cli = Cli::parse();
+    let settings = Settings::load().unwrap_or_default();
     let manager = IndexManager::new()?;
     match manager.sync_best_effort(cli.rebuild_index)? {
         SyncOutcome::Completed(_) | SyncOutcome::Busy => {}
@@ -71,7 +73,7 @@ fn main() -> Result<()> {
         bail!("stdout is not a terminal; use --json for non-interactive output");
     }
 
-    run_app(manager, search_engine, request)
+    run_app(manager, search_engine, request, settings)
 }
 
 fn build_request(cli: &Cli) -> Result<SearchRequest> {

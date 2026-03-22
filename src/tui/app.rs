@@ -32,8 +32,10 @@ use crate::index::{
     SyncOutcome,
 };
 use crate::parse::{parse_session_file, Session};
+use crate::settings::Settings;
 use crate::tui::actions::{ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::filter::{FilterModalState, FilterOutcome};
+use crate::tui::settings::{SettingsModalState, SettingsOutcome};
 use crate::tui::theme::Theme;
 use crate::tui::viewer::{ViewerOutcome, ViewerState};
 use crate::tui::{layout, list, preview, search};
@@ -58,6 +60,7 @@ enum Overlay {
     Filters(FilterModalState),
     Actions(ActionMenuState),
     Viewer(ViewerState),
+    Settings(SettingsModalState),
     ConfirmDelete,
 }
 
@@ -78,9 +81,10 @@ pub fn run_app(
     manager: IndexManager,
     search_engine: SearchEngine,
     initial_request: SearchRequest,
+    settings: Settings,
 ) -> Result<()> {
     let worker = SearchWorker::spawn(search_engine)?;
-    let mut app = App::new(manager, worker, initial_request);
+    let mut app = App::new(manager, worker, initial_request, settings);
     match app.run()? {
         AppExit::Normal => Ok(()),
         AppExit::Handoff(command) => execute_handoff(command),
@@ -149,11 +153,17 @@ pub struct App {
     overlay: Overlay,
     status_message: Option<String>,
     handoff: Option<ExternalCommand>,
+    settings: Settings,
     theme: Theme,
 }
 
 impl App {
-    fn new(manager: IndexManager, worker: SearchWorker, initial_request: SearchRequest) -> Self {
+    fn new(
+        manager: IndexManager,
+        worker: SearchWorker,
+        initial_request: SearchRequest,
+        settings: Settings,
+    ) -> Self {
         let local_scope = match &initial_request.scope {
             Scope::CurrentDir(path) => Scope::CurrentDir(path.clone()),
             Scope::Global => env::current_dir()
@@ -189,7 +199,8 @@ impl App {
             overlay: Overlay::None,
             status_message: None,
             handoff: None,
-            theme: Theme::default(),
+            theme: Theme::from_name(settings.theme),
+            settings,
         }
     }
 
@@ -303,10 +314,10 @@ impl App {
 
         let status_base = self.status_text();
         let w = areas.status.width as usize;
-        let status_str = if w >= 100 {
-            format!("{status_base}  |  Tab focus  |  Ctrl+F filters  |  Enter actions  |  Ctrl+H/L resize  |  Ctrl+C quit")
+        let status_str = if w >= 110 {
+            format!("{status_base}  |  Tab focus  |  Ctrl+F filters  |  Ctrl+P settings  |  Enter actions  |  Ctrl+H/L resize  |  Ctrl+C quit")
         } else if w >= 60 {
-            format!("{status_base}  |  Tab  ^F  Enter  ^C")
+            format!("{status_base}  |  Tab  ^F  ^P  Enter  ^C")
         } else {
             status_base
         };
@@ -329,6 +340,11 @@ impl App {
                 if let Some(session) = self.selected_preview() {
                     viewer_state.render(frame, frame.area(), session, &theme);
                 }
+            }
+            Overlay::Settings(settings_state) => {
+                // Render settings modal with a live preview of the selected theme.
+                let preview_theme = Theme::from_name(settings_state.current_theme());
+                settings_state.render(frame, frame.area(), &preview_theme);
             }
             Overlay::ConfirmDelete => self.render_delete_confirm(frame, frame.area(), &theme),
         }
@@ -353,6 +369,9 @@ impl App {
 
     fn handle_search_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_settings()
+            }
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_filters()
             }
@@ -379,6 +398,9 @@ impl App {
 
     fn handle_list_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_settings()
+            }
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_filters()
             }
@@ -412,6 +434,9 @@ impl App {
 
     fn handle_preview_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_settings()
+            }
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_filters()
             }
@@ -463,6 +488,14 @@ impl App {
             Overlay::Viewer(state) => match state.handle_key(key) {
                 ViewerOutcome::Stay => {}
                 ViewerOutcome::Close => self.overlay = Overlay::None,
+            },
+            Overlay::Settings(state) => match state.handle_key(key) {
+                SettingsOutcome::Stay => {}
+                SettingsOutcome::Close => self.overlay = Overlay::None,
+                SettingsOutcome::Apply(new_settings) => {
+                    self.apply_settings(new_settings)?;
+                    self.overlay = Overlay::None;
+                }
             },
             Overlay::ConfirmDelete => match key.code {
                 KeyCode::Esc | KeyCode::Char('n') => self.overlay = Overlay::None,
@@ -679,6 +712,21 @@ impl App {
         self.dispatch_search()
     }
 
+    fn open_settings(&mut self) {
+        self.overlay = Overlay::Settings(SettingsModalState::new(&self.settings));
+    }
+
+    fn apply_settings(&mut self, new_settings: Settings) -> Result<()> {
+        self.theme = Theme::from_name(new_settings.theme);
+        self.settings = new_settings;
+        if let Err(err) = self.settings.save() {
+            self.status_message = Some(format!("settings error: {err:#}"));
+        } else {
+            self.status_message = Some("settings saved".to_owned());
+        }
+        Ok(())
+    }
+
     fn open_filters(&mut self) {
         self.overlay = Overlay::Filters(FilterModalState::new(&self.scope, &self.filters, self.sort));
     }
@@ -775,14 +823,14 @@ impl App {
                 let Some(hit) = self.selected_hit() else {
                     return Ok(());
                 };
-                self.handoff = Some(build_resume_command(&hit)?);
+                self.handoff = Some(build_resume_command(&hit, &self.settings)?);
                 self.should_quit = true;
             }
             SessionAction::Fork => {
                 let Some(hit) = self.selected_hit() else {
                     return Ok(());
                 };
-                self.handoff = Some(build_fork_command(&hit)?);
+                self.handoff = Some(build_fork_command(&hit, &self.settings)?);
                 self.should_quit = true;
             }
         }
@@ -968,7 +1016,7 @@ fn contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
 }
 
-fn build_resume_command(hit: &SearchHit) -> Result<ExternalCommand> {
+fn build_resume_command(hit: &SearchHit, settings: &Settings) -> Result<ExternalCommand> {
     let cwd = hit
         .session
         .cwd
@@ -977,21 +1025,21 @@ fn build_resume_command(hit: &SearchHit) -> Result<ExternalCommand> {
         .or_else(|| hit.session.file_path.parent().map(Path::to_path_buf));
 
     let command = match hit.session.agent {
-        crate::parse::Agent::Claude => ExternalCommand {
-            program: "claude".to_owned(),
-            args: vec!["--resume".to_owned(), hit.session.session_id.clone()],
-            cwd,
-        },
-        crate::parse::Agent::Codex => ExternalCommand {
-            program: "codex".to_owned(),
-            args: vec!["resume".to_owned(), hit.session.session_id.clone()],
-            cwd,
-        },
+        crate::parse::Agent::Claude => {
+            let (program, mut args) = settings.claude_program_and_args();
+            args.extend(["--resume".to_owned(), hit.session.session_id.clone()]);
+            ExternalCommand { program, args, cwd }
+        }
+        crate::parse::Agent::Codex => {
+            let (program, mut args) = settings.codex_program_and_args();
+            args.extend(["resume".to_owned(), hit.session.session_id.clone()]);
+            ExternalCommand { program, args, cwd }
+        }
     };
     Ok(command)
 }
 
-fn build_fork_command(hit: &SearchHit) -> Result<ExternalCommand> {
+fn build_fork_command(hit: &SearchHit, settings: &Settings) -> Result<ExternalCommand> {
     let cwd = hit
         .session
         .cwd
@@ -1000,20 +1048,20 @@ fn build_fork_command(hit: &SearchHit) -> Result<ExternalCommand> {
         .or_else(|| hit.session.file_path.parent().map(Path::to_path_buf));
 
     let command = match hit.session.agent {
-        crate::parse::Agent::Claude => ExternalCommand {
-            program: "claude".to_owned(),
-            args: vec![
+        crate::parse::Agent::Claude => {
+            let (program, mut args) = settings.claude_program_and_args();
+            args.extend([
                 "--resume".to_owned(),
                 hit.session.session_id.clone(),
                 "--fork-session".to_owned(),
-            ],
-            cwd,
-        },
-        crate::parse::Agent::Codex => ExternalCommand {
-            program: "codex".to_owned(),
-            args: vec!["fork".to_owned(), hit.session.session_id.clone()],
-            cwd,
-        },
+            ]);
+            ExternalCommand { program, args, cwd }
+        }
+        crate::parse::Agent::Codex => {
+            let (program, mut args) = settings.codex_program_and_args();
+            args.extend(["fork".to_owned(), hit.session.session_id.clone()]);
+            ExternalCommand { program, args, cwd }
+        }
     };
     Ok(command)
 }
@@ -1104,30 +1152,52 @@ mod tests {
     use crate::index::writer::StoredSession;
     use crate::index::SearchHit;
     use crate::parse::{Agent, DerivationType};
+    use crate::settings::Settings;
 
     use super::{build_fork_command, build_resume_command};
 
     #[test]
     fn builds_resume_commands_for_both_agents() {
-        let claude = build_resume_command(&sample_hit(Agent::Claude)).unwrap();
+        let settings = Settings::default();
+        let claude = build_resume_command(&sample_hit(Agent::Claude), &settings).unwrap();
         assert_eq!(claude.program, "claude");
         assert_eq!(claude.args, vec!["--resume", "session-123"]);
 
-        let codex = build_resume_command(&sample_hit(Agent::Codex)).unwrap();
+        let codex = build_resume_command(&sample_hit(Agent::Codex), &settings).unwrap();
         assert_eq!(codex.program, "codex");
         assert_eq!(codex.args, vec!["resume", "session-123"]);
     }
 
     #[test]
     fn builds_fork_commands_for_both_agents() {
-        let claude = build_fork_command(&sample_hit(Agent::Claude)).unwrap();
+        let settings = Settings::default();
+        let claude = build_fork_command(&sample_hit(Agent::Claude), &settings).unwrap();
         assert_eq!(
             claude.args,
             vec!["--resume", "session-123", "--fork-session"]
         );
 
-        let codex = build_fork_command(&sample_hit(Agent::Codex)).unwrap();
+        let codex = build_fork_command(&sample_hit(Agent::Codex), &settings).unwrap();
         assert_eq!(codex.args, vec!["fork", "session-123"]);
+    }
+
+    #[test]
+    fn custom_command_prepends_args() {
+        let settings = Settings {
+            claude_command: "claude --profile work".to_owned(),
+            codex_command: "/usr/local/bin/codex".to_owned(),
+            ..Settings::default()
+        };
+        let claude = build_resume_command(&sample_hit(Agent::Claude), &settings).unwrap();
+        assert_eq!(claude.program, "claude");
+        assert_eq!(
+            claude.args,
+            vec!["--profile", "work", "--resume", "session-123"]
+        );
+
+        let codex = build_resume_command(&sample_hit(Agent::Codex), &settings).unwrap();
+        assert_eq!(codex.program, "/usr/local/bin/codex");
+        assert_eq!(codex.args, vec!["resume", "session-123"]);
     }
 
     fn sample_hit(agent: Agent) -> SearchHit {
