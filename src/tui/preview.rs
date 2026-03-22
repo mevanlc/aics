@@ -25,9 +25,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
             Style::default().fg(theme.muted),
         )))
     };
-    let viewport_height = area.height.saturating_sub(2) as usize;
-    let viewport_width = area.width.saturating_sub(2);
-    let max_scroll = wrapped_text_height(&text, viewport_width).saturating_sub(viewport_height);
+    let max_scroll = scroll_limit_for_text(&text, area);
     app.preview_scroll = app.preview_scroll.min(max_scroll);
 
     let paragraph = Paragraph::new(text)
@@ -35,6 +33,15 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         .wrap(Wrap { trim: false })
         .scroll((app.preview_scroll as u16, 0));
     frame.render_widget(paragraph, area);
+}
+
+pub fn max_scroll(area: Rect, session: Option<&Session>, theme: &Theme) -> usize {
+    let text = if let Some(session) = session {
+        render_session_text(session, theme, None)
+    } else {
+        Text::from(Line::default())
+    };
+    scroll_limit_for_text(&text, area)
 }
 
 pub fn render_session_text(session: &Session, theme: &Theme, highlight_query: Option<&str>) -> Text<'static> {
@@ -83,4 +90,10 @@ fn message_colors(agent: Agent, role: MessageRole, theme: &Theme) -> (ratatui::s
         MessageRole::System => (theme.muted, theme.bubble_system),
         MessageRole::Summary => (theme.highlight, theme.bubble_summary),
     }
+}
+
+fn scroll_limit_for_text(text: &Text<'_>, area: Rect) -> usize {
+    let viewport_height = area.height.saturating_sub(2) as usize;
+    let viewport_width = area.width.saturating_sub(2);
+    wrapped_text_height(text, viewport_width).saturating_sub(viewport_height)
 }

@@ -109,11 +109,7 @@ impl ViewerState {
             theme,
             (!self.search.value().is_empty()).then_some(self.search.value()),
         );
-        let viewport_height = chunks[0].height.saturating_sub(2) as usize;
-        let viewport_width = chunks[0].width.saturating_sub(2);
-        let scroll = self
-            .scroll
-            .min(wrapped_text_height(&text, viewport_width).saturating_sub(viewport_height));
+        let scroll = self.scroll.min(self.max_scroll(area, session, theme));
         let body = Paragraph::new(text)
         .block(
             Block::default()
@@ -157,5 +153,18 @@ impl ViewerState {
                 .min(chunks[1].right().saturating_sub(1));
             frame.set_cursor_position((cursor_x, chunks[1].y.saturating_add(1)));
         }
+    }
+
+    pub fn max_scroll(&self, area: Rect, session: &Session, theme: &Theme) -> usize {
+        let popup = layout::centered_rect(area, 88, 88);
+        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(popup);
+        let text = render_session_text(
+            session,
+            theme,
+            (!self.search.value().is_empty()).then_some(self.search.value()),
+        );
+        let viewport_height = chunks[0].height.saturating_sub(2) as usize;
+        let viewport_width = chunks[0].width.saturating_sub(2);
+        wrapped_text_height(&text, viewport_width).saturating_sub(viewport_height)
     }
 }

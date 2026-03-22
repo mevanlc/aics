@@ -285,6 +285,7 @@ impl App {
         let areas = layout::split(frame.area(), self.preview_width_pct);
         self.last_layout = Some(areas);
         self.preview_visible = areas.preview.is_some();
+        self.clamp_scroll_state(areas);
         search::render(frame, self, areas.search, &theme);
         list::render(frame, self, areas.list, &theme);
 
@@ -673,6 +674,39 @@ impl App {
     fn resize_preview(&mut self, delta: i16) {
         let next = (self.preview_width_pct as i16 + delta).clamp(25, 60);
         self.preview_width_pct = next as u16;
+    }
+
+    fn clamp_scroll_state(&mut self, areas: layout::AppLayout) {
+        if let Some(preview_area) = areas.preview {
+            let theme = self.theme.clone();
+            let max_scroll = {
+                let session = self.selected_preview();
+                preview::max_scroll(preview_area, session, &theme)
+            };
+            self.preview_scroll = self.preview_scroll.min(max_scroll);
+        } else {
+            self.preview_scroll = 0;
+        }
+
+        let viewer_snapshot = match &self.overlay {
+            Overlay::Viewer(state) => Some(state.clone()),
+            _ => None,
+        };
+        let Some(viewer_state) = viewer_snapshot else {
+            return;
+        };
+
+        let theme = self.theme.clone();
+        let frame_area = self.last_frame_area;
+        let max_scroll = {
+            let session = self.selected_preview();
+            session
+                .map(|session| viewer_state.max_scroll(frame_area, session, &theme))
+                .unwrap_or(0)
+        };
+        if let Overlay::Viewer(state) = &mut self.overlay {
+            state.scroll = state.scroll.min(max_scroll);
+        }
     }
 
     fn selected_hit(&self) -> Option<SearchHit> {
