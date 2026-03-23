@@ -45,7 +45,10 @@ fn search_filters_respect_agent_date_and_min_lines() -> Result<()> {
         },
     })?;
     assert_eq!(recent_hits.len(), 1);
-    assert_eq!(recent_hits[0].session.session_id, "c0d1e2f3-a4b5-4c6d-8e7f-9a0b1c2d3e4f");
+    assert_eq!(
+        recent_hits[0].session.session_id,
+        "c0d1e2f3-a4b5-4c6d-8e7f-9a0b1c2d3e4f"
+    );
 
     let long_hits = engine.search(&SearchRequest {
         query: String::new(),
@@ -92,8 +95,12 @@ fn sub_agent_sessions_are_hidden_unless_requested() -> Result<()> {
         sort: SortMode::Relevance,
         filters: SearchFilters::default(),
     })?;
-    assert!(default_hits.iter().any(|hit| hit.session.file_path == original));
-    assert!(default_hits.iter().all(|hit| hit.session.file_path != sub_agent));
+    assert!(default_hits
+        .iter()
+        .any(|hit| hit.session.file_path == original));
+    assert!(default_hits
+        .iter()
+        .all(|hit| hit.session.file_path != sub_agent));
 
     let all_hits = engine.search(&SearchRequest {
         query: String::new(),
@@ -105,8 +112,12 @@ fn sub_agent_sessions_are_hidden_unless_requested() -> Result<()> {
             ..SearchFilters::default()
         },
     })?;
-    assert!(all_hits.iter().any(|hit| hit.session.file_path == sub_agent));
-    assert!(all_hits.iter().any(|hit| hit.session.derivation_type == DerivationType::SubAgent));
+    assert!(all_hits
+        .iter()
+        .any(|hit| hit.session.file_path == sub_agent));
+    assert!(all_hits
+        .iter()
+        .any(|hit| hit.session.derivation_type == DerivationType::SubAgent));
 
     Ok(())
 }
@@ -143,7 +154,10 @@ fn live_only_filter_uses_live_session_markers() -> Result<()> {
 
     assert_eq!(hits.len(), 1);
     assert!(hits[0].is_live);
-    assert_eq!(hits[0].session.session_id, "c0d1e2f3-a4b5-4c6d-8e7f-9a0b1c2d3e4f");
+    assert_eq!(
+        hits[0].session.session_id,
+        "c0d1e2f3-a4b5-4c6d-8e7f-9a0b1c2d3e4f"
+    );
     Ok(())
 }
 

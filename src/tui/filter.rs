@@ -155,11 +155,7 @@ impl FilterModalState {
             horizontal: 1,
             vertical: 1,
         });
-        let chunks = Layout::vertical([
-            Constraint::Min(0),
-            Constraint::Length(2),
-        ])
-        .split(inner);
+        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(inner);
 
         let mut rows = Vec::new();
         for field in FIELD_ORDER {
@@ -263,7 +259,9 @@ impl FilterModalState {
     }
 
     fn cursor_position(&self, rows_area: Rect) -> Option<(u16, u16)> {
-        let row_index = FIELD_ORDER.iter().position(|field| *field == self.selected)? as u16;
+        let row_index = FIELD_ORDER
+            .iter()
+            .position(|field| *field == self.selected)? as u16;
         let input = match self.selected {
             FilterField::Branch => &self.branch,
             FilterField::After => &self.after,
@@ -273,7 +271,9 @@ impl FilterModalState {
         };
 
         Some((
-            rows_area.x.saturating_add(17 + input.visual_cursor() as u16),
+            rows_area
+                .x
+                .saturating_add(17 + input.visual_cursor() as u16),
             rows_area.y.saturating_add(row_index),
         ))
     }

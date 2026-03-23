@@ -78,7 +78,9 @@ impl ActionMenuState {
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("{} ", item.key),
-                        Style::default().fg(theme.highlight).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme.highlight)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(item.label, Style::default().fg(theme.text)),
                 ]))

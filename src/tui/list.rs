@@ -8,7 +8,9 @@ use unicode_width::UnicodeWidthStr;
 use crate::index::SearchHit;
 use crate::tui::app::{App, Focus};
 use crate::tui::theme::Theme;
-use crate::tui::util::{agent_badge, list_title, parse_highlighted_html, relative_time, truncate_plain};
+use crate::tui::util::{
+    agent_badge, list_title, parse_highlighted_html, relative_time, truncate_plain,
+};
 
 const PREVIEW_LINES: usize = 3;
 pub const ITEM_HEIGHT: usize = PREVIEW_LINES + 2;
@@ -105,15 +107,20 @@ fn render_item(hit: &SearchHit, theme: &Theme, width: usize) -> ListItem<'static
     if hit.is_live {
         meta_suffix.push_str(" · live");
     }
-    let meta_width = UnicodeWidthStr::width(meta_prefix.as_str())
-        + UnicodeWidthStr::width(meta_suffix.as_str());
+    let meta_width =
+        UnicodeWidthStr::width(meta_prefix.as_str()) + UnicodeWidthStr::width(meta_suffix.as_str());
 
     let title_budget = width.saturating_sub(meta_width.saturating_add(1));
     let title_text = truncate_with_ellipsis(&list_title(hit), title_budget);
     let title_width = UnicodeWidthStr::width(title_text.as_str());
     let padding = " ".repeat(width.saturating_sub(meta_width + title_width).max(1));
     let header = Line::from(vec![
-        Span::styled(meta_prefix, Style::default().fg(badge_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            meta_prefix,
+            Style::default()
+                .fg(badge_color)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(meta_suffix, Style::default().fg(theme.muted)),
         Span::raw(padding),
         Span::styled(title_text, Style::default().fg(theme.text)),
@@ -223,7 +230,10 @@ fn wrap_line(line: Line<'static>, width: usize, max_lines: usize) -> Vec<Line<'s
             }
 
             if segment_width > width {
-                rows[row_index].push(Span::styled(truncate_with_ellipsis(&segment, width), span.style));
+                rows[row_index].push(Span::styled(
+                    truncate_with_ellipsis(&segment, width),
+                    span.style,
+                ));
                 row_widths[row_index] = width;
                 truncated = true;
                 break;
@@ -252,7 +262,8 @@ fn split_segments(value: &str) -> Vec<(String, bool)> {
 
     for ch in value.chars() {
         let is_whitespace = ch.is_whitespace();
-        if current_is_whitespace.is_some_and(|state| state != is_whitespace) && !current.is_empty() {
+        if current_is_whitespace.is_some_and(|state| state != is_whitespace) && !current.is_empty()
+        {
             segments.push((current.clone(), current_is_whitespace.unwrap_or(false)));
             current.clear();
         }
@@ -279,10 +290,14 @@ fn append_ellipsis(rows: &mut [Vec<Span<'static>>], row_widths: &mut [usize], wi
         let Some(last_span) = last_row.last_mut() else {
             break;
         };
-        let next = truncate_plain(last_span.content.as_ref(), UnicodeWidthStr::width(last_span.content.as_ref()).saturating_sub(1));
+        let next = truncate_plain(
+            last_span.content.as_ref(),
+            UnicodeWidthStr::width(last_span.content.as_ref()).saturating_sub(1),
+        );
         if next.is_empty() {
             let removed = last_row.pop().expect("last span should exist");
-            *last_width = last_width.saturating_sub(UnicodeWidthStr::width(removed.content.as_ref()));
+            *last_width =
+                last_width.saturating_sub(UnicodeWidthStr::width(removed.content.as_ref()));
             continue;
         }
         *last_width = last_width.saturating_sub(UnicodeWidthStr::width(last_span.content.as_ref()));
@@ -313,7 +328,10 @@ mod tests {
 
     #[test]
     fn truncates_with_ellipsis_when_needed() {
-        assert_eq!(truncate_with_ellipsis("cozy-sleeping-quasar", 8), "cozy-sl…");
+        assert_eq!(
+            truncate_with_ellipsis("cozy-sleeping-quasar", 8),
+            "cozy-sl…"
+        );
     }
 
     #[test]

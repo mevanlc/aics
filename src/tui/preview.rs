@@ -44,7 +44,11 @@ pub fn max_scroll(area: Rect, session: Option<&Session>, theme: &Theme) -> usize
     scroll_limit_for_text(&text, area)
 }
 
-pub fn render_session_text(session: &Session, theme: &Theme, highlight_query: Option<&str>) -> Text<'static> {
+pub fn render_session_text(
+    session: &Session,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) -> Text<'static> {
     let mut lines = Vec::new();
     for message in &session.messages {
         let (label_color, bubble_bg) = message_colors(session.agent, message.role, theme);
@@ -80,7 +84,11 @@ pub fn render_session_text(session: &Session, theme: &Theme, highlight_query: Op
     Text::from(lines)
 }
 
-fn message_colors(agent: Agent, role: MessageRole, theme: &Theme) -> (ratatui::style::Color, ratatui::style::Color) {
+fn message_colors(
+    agent: Agent,
+    role: MessageRole,
+    theme: &Theme,
+) -> (ratatui::style::Color, ratatui::style::Color) {
     match role {
         MessageRole::User => (theme.accent, theme.bubble_user),
         MessageRole::Assistant => match agent {

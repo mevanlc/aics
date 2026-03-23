@@ -60,7 +60,11 @@ pub fn list_title(hit: &SearchHit) -> String {
 }
 
 pub fn list_meta(hit: &SearchHit) -> String {
-    let mut meta = format!("{} lines · {}", hit.session.lines, relative_time(hit.session.modified_ts));
+    let mut meta = format!(
+        "{} lines · {}",
+        hit.session.lines,
+        relative_time(hit.session.modified_ts)
+    );
     if hit.is_live {
         meta.push_str(" · live");
     }
@@ -92,7 +96,12 @@ pub fn role_label(role: MessageRole) -> &'static str {
     }
 }
 
-pub fn highlight_spans(text: &str, query: &str, base: Style, highlight: Style) -> Vec<Span<'static>> {
+pub fn highlight_spans(
+    text: &str,
+    query: &str,
+    base: Style,
+    highlight: Style,
+) -> Vec<Span<'static>> {
     let terms = query
         .split_whitespace()
         .filter(|term| !term.is_empty())
@@ -135,7 +144,10 @@ pub fn highlight_spans(text: &str, query: &str, base: Style, highlight: Style) -
 }
 
 pub fn truncate_plain(value: &str, width: usize) -> String {
-    let filtered = value.chars().filter(|ch| !ch.is_control()).collect::<String>();
+    let filtered = value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>();
     let (truncated, _) = filtered.unicode_truncate(width);
     truncated.to_owned()
 }

@@ -131,7 +131,7 @@ impl SettingsModalState {
             Constraint::Length(1), // codex input
             Constraint::Length(1), // spacing
             Constraint::Length(1), // hint
-            Constraint::Min(0),   // fill
+            Constraint::Min(0),    // fill
         ])
         .split(inner);
 
@@ -208,23 +208,15 @@ impl SettingsModalState {
                     .bg(theme.selection)
                     .add_modifier(Modifier::BOLD)
             } else if is_selected {
-                Style::default()
-                    .fg(theme.text)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.muted)
             };
             let marker = if is_selected { "● " } else { "○ " };
-            spans.push(Span::styled(
-                format!("{marker}{}", name.label()),
-                style,
-            ));
+            spans.push(Span::styled(format!("{marker}{}", name.label()), style));
         }
         if focused {
-            spans.push(Span::styled(
-                "  ◂▸",
-                Style::default().fg(theme.muted),
-            ));
+            spans.push(Span::styled("  ◂▸", Style::default().fg(theme.muted)));
         }
         Line::from(spans)
     }

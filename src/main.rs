@@ -98,16 +98,8 @@ fn build_request(cli: &Cli) -> Result<SearchRequest> {
         filters: SearchFilters {
             agent: cli.agent.as_deref().and_then(parse_agent_arg),
             branch,
-            after_ts: cli
-                .after
-                .as_deref()
-                .map(parse_after_date)
-                .transpose()?,
-            before_ts: cli
-                .before
-                .as_deref()
-                .map(parse_before_date)
-                .transpose()?,
+            after_ts: cli.after.as_deref().map(parse_after_date).transpose()?,
+            before_ts: cli.before.as_deref().map(parse_before_date).transpose()?,
             min_lines: cli.min_lines,
             include_original: !cli.no_original,
             include_trimmed: !cli.no_trimmed,
