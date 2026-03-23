@@ -368,6 +368,7 @@ impl App {
 
     fn handle_search_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
+            KeyCode::Esc => self.clear_query(),
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_settings()
             }
@@ -397,6 +398,7 @@ impl App {
 
     fn handle_list_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
+            KeyCode::Esc => self.focus = Focus::Search,
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_settings()
             }
@@ -433,6 +435,7 @@ impl App {
 
     fn handle_preview_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
+            KeyCode::Esc => self.focus = Focus::Search,
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_settings()
             }
@@ -742,6 +745,16 @@ impl App {
         if self.selected_index().is_some() {
             self.overlay = Overlay::Viewer(ViewerState::new());
         }
+    }
+
+    fn clear_query(&mut self) {
+        if self.query.value().is_empty() {
+            return;
+        }
+
+        self.query = Input::default();
+        self.pending_search = true;
+        self.last_edit_at = Some(Instant::now());
     }
 
     fn resize_preview(&mut self, delta: i16) {

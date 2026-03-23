@@ -63,7 +63,7 @@ impl ViewerState {
     ) -> ViewerOutcome {
         if self.editing_search {
             match key.code {
-                KeyCode::Esc => ViewerOutcome::Close,
+                KeyCode::Esc => self.handle_escape(),
                 KeyCode::Enter => {
                     self.editing_search = false;
                     ViewerOutcome::Stay
@@ -79,7 +79,7 @@ impl ViewerState {
             }
         } else {
             match key.code {
-                KeyCode::Esc => ViewerOutcome::Close,
+                KeyCode::Esc => self.handle_escape(),
                 KeyCode::Char('/') if key.modifiers.is_empty() => {
                     self.editing_search = true;
                     ViewerOutcome::Stay
@@ -196,6 +196,17 @@ impl ViewerState {
 
     pub fn body_area(area: Rect) -> Rect {
         split_viewer(area)[0]
+    }
+
+    fn handle_escape(&mut self) -> ViewerOutcome {
+        if self.search.value().is_empty() {
+            return ViewerOutcome::Close;
+        }
+
+        self.search = Input::default();
+        self.editing_search = false;
+        self.active_match = None;
+        ViewerOutcome::Stay
     }
 
     fn jump_to_match(&mut self, direction: MatchDirection, area: Rect, session: Option<&Session>) {
@@ -340,7 +351,9 @@ mod tests {
 
     use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionMessage};
 
-    use super::{collect_match_rows, next_match_index, previous_match_index, ViewerState};
+    use super::{
+        collect_match_rows, next_match_index, previous_match_index, ViewerOutcome, ViewerState,
+    };
 
     #[test]
     fn collect_match_rows_tracks_wrapped_content_lines() {
@@ -368,6 +381,48 @@ mod tests {
         let state = ViewerState::new();
 
         assert!(state.active_match.is_none());
+    }
+
+    #[test]
+    fn escape_clears_search_before_closing_viewer() {
+        let area = Rect::new(0, 0, 80, 20);
+        let session = sample_session();
+        let mut state = ViewerState::new();
+        state.search = Input::default().with_value("alpha".to_owned());
+
+        let outcome = state.handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            area,
+            Some(&session),
+        );
+        assert_eq!(outcome, ViewerOutcome::Stay);
+        assert!(state.search_query().is_empty());
+        assert!(!state.is_editing_search());
+
+        let outcome = state.handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            area,
+            Some(&session),
+        );
+        assert_eq!(outcome, ViewerOutcome::Close);
+    }
+
+    #[test]
+    fn escape_while_editing_clears_search_and_stops_editing() {
+        let area = Rect::new(0, 0, 80, 20);
+        let session = sample_session();
+        let mut state = ViewerState::new();
+        state.search = Input::default().with_value("alpha".to_owned());
+        state.editing_search = true;
+
+        let outcome = state.handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            area,
+            Some(&session),
+        );
+        assert_eq!(outcome, ViewerOutcome::Stay);
+        assert!(state.search_query().is_empty());
+        assert!(!state.is_editing_search());
     }
 
     #[test]
