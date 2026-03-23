@@ -376,10 +376,7 @@ impl App {
                 self.open_filters()
             }
             KeyCode::Tab => self.focus = next_focus(self.focus, self.preview_available()),
-            KeyCode::Down => {
-                self.focus = Focus::List;
-                self.move_selection(1);
-            }
+            KeyCode::Down | KeyCode::Enter => self.focus_list(),
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.resize_preview(5)
             }
@@ -689,6 +686,10 @@ impl App {
             self.selected = next as usize;
             self.preview_scroll = 0;
         }
+    }
+
+    fn focus_list(&mut self) {
+        self.focus = Focus::List;
     }
 
     fn select_absolute(&mut self, index: usize) {
@@ -1170,14 +1171,19 @@ fn execute_handoff(command: ExternalCommand) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
     use std::path::PathBuf;
 
+    use ratatui::crossterm::event::KeyCode;
+    use tempfile::TempDir;
+
+    use crate::index::{IndexManager, IndexPaths, Scope, SearchFilters, SearchRequest, SortMode};
     use crate::index::writer::StoredSession;
     use crate::index::SearchHit;
     use crate::parse::{Agent, DerivationType};
     use crate::settings::Settings;
 
-    use super::{build_fork_command, build_resume_command};
+    use super::{build_fork_command, build_resume_command, App, Focus, SearchWorker};
 
     #[test]
     fn builds_resume_commands_for_both_agents() {
@@ -1221,6 +1227,58 @@ mod tests {
         let codex = build_resume_command(&sample_hit(Agent::Codex), &settings).unwrap();
         assert_eq!(codex.program, "/usr/local/bin/codex");
         assert_eq!(codex.args, vec!["resume", "session-123"]);
+    }
+
+    #[test]
+    fn down_from_search_focuses_list_without_skipping_first_result() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude), sample_hit(Agent::Codex)];
+        app.selected = 0;
+
+        app.handle_search_key(crossterm_key(KeyCode::Down)).unwrap();
+
+        assert_eq!(app.focus, Focus::List);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn enter_from_search_focuses_list_without_skipping_first_result() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude), sample_hit(Agent::Codex)];
+        app.selected = 0;
+
+        app.handle_search_key(crossterm_key(KeyCode::Enter)).unwrap();
+
+        assert_eq!(app.focus, Focus::List);
+        assert_eq!(app.selected, 0);
+    }
+
+    fn test_app() -> App {
+        let temp = TempDir::new().unwrap();
+        let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path()));
+        let (request_tx, _request_rx) = mpsc::channel();
+        let (_response_tx, response_rx) = mpsc::channel();
+        let worker = SearchWorker {
+            request_tx,
+            response_rx,
+        };
+
+        App::new(
+            manager,
+            worker,
+            SearchRequest {
+                query: String::new(),
+                scope: Scope::Global,
+                limit: 10,
+                sort: SortMode::Time,
+                filters: SearchFilters::default(),
+            },
+            Settings::default(),
+        )
+    }
+
+    fn crossterm_key(code: KeyCode) -> ratatui::crossterm::event::KeyEvent {
+        ratatui::crossterm::event::KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE)
     }
 
     fn sample_hit(agent: Agent) -> SearchHit {

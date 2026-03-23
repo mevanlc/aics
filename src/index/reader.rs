@@ -169,7 +169,7 @@ impl SearchEngine {
             );
         }
 
-        let query_parser = QueryParser::for_index(&self.index, vec![self.fields.content]);
+        let query_parser = self.default_query_parser();
         let (base_query, _) = query_parser.parse_query_lenient(query_text);
         let final_query = build_phrase_boosted_query(&query_parser, query_text, base_query);
 
@@ -276,7 +276,7 @@ impl SearchEngine {
         live_ids: &HashSet<String>,
         session_cache: &mut HashMap<DocAddress, StoredSession>,
     ) -> Result<Vec<SearchHit>> {
-        let query_parser = QueryParser::for_index(&self.index, vec![self.fields.content]);
+        let query_parser = self.default_query_parser();
         let (base_query, _) = query_parser.parse_query_lenient(query_text);
         let final_query = build_phrase_boosted_query(&query_parser, query_text, base_query);
         let modified_ts_field = self.fields.schema.get_field_name(self.fields.modified_ts);
@@ -322,6 +322,12 @@ impl SearchEngine {
         }
 
         Ok(hits)
+    }
+
+    fn default_query_parser(&self) -> QueryParser {
+        let mut query_parser = QueryParser::for_index(&self.index, vec![self.fields.content]);
+        query_parser.set_conjunction_by_default();
+        query_parser
     }
 
     fn collect_candidates(

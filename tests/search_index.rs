@@ -53,6 +53,52 @@ fn search_query_returns_matching_sessions() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn multi_word_queries_default_to_and() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+
+    let hits = engine.search(&SearchRequest {
+        query: "Express git".to_owned(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Relevance,
+        filters: SearchFilters::default(),
+    })?;
+
+    assert!(hits.is_empty());
+    Ok(())
+}
+
+#[test]
+fn explicit_or_operator_broadens_query() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+
+    let hits = engine.search(&SearchRequest {
+        query: "Express OR git".to_owned(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Relevance,
+        filters: SearchFilters::default(),
+    })?;
+
+    assert!(hits.len() >= 2);
+    assert!(hits
+        .iter()
+        .any(|hit| hit.session.first_user_msg_content.contains("Express server")));
+    assert!(hits
+        .iter()
+        .any(|hit| hit.session.first_user_msg_content.contains("current git status")));
+    Ok(())
+}
+
 fn fixture_roots(temp: &TempDir) -> Result<SessionRoots> {
     copy_fixture(
         temp,
