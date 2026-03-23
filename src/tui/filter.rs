@@ -105,7 +105,7 @@ impl FilterModalState {
             return Ok(FilterOutcome::Close);
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
-            *self = Self::new(local_scope, &SearchFilters::default(), SortMode::Relevance);
+            *self = Self::new(local_scope, &SearchFilters::default(), SortMode::Time);
             return Ok(FilterOutcome::Stay);
         }
 
@@ -404,4 +404,32 @@ fn format_optional_date(value: Option<u64>) -> String {
         .and_then(|timestamp| Local.timestamp_opt(timestamp as i64, 0).single())
         .map(|date| date.format("%Y-%m-%d").to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::FilterModalState;
+    use crate::index::{Scope, SearchFilters, SortMode};
+
+    #[test]
+    fn ctrl_r_resets_sort_to_time() {
+        let scope = Scope::CurrentDir(PathBuf::from("/tmp/demo"));
+        let mut state = FilterModalState::new(&scope, &SearchFilters::default(), SortMode::Relevance);
+
+        let outcome = state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                &scope,
+            )
+            .unwrap();
+
+        assert!(matches!(outcome, super::FilterOutcome::Stay));
+
+        let update = state.build_update(&scope).unwrap();
+        assert_eq!(update.sort, SortMode::Time);
+    }
 }

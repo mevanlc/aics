@@ -12,7 +12,7 @@ pub fn split(area: Rect, preview_width_pct: u16) -> AppLayout {
     let vertical = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(0),
-        Constraint::Length(1),
+        Constraint::Length(2),
     ])
     .split(area);
 

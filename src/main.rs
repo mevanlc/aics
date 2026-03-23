@@ -90,11 +90,7 @@ fn build_request(cli: &Cli) -> Result<SearchRequest> {
         query: cli.query.clone().unwrap_or_default(),
         scope,
         limit: cli.num_results.max(1),
-        sort: if cli.by_time {
-            SortMode::Time
-        } else {
-            SortMode::Relevance
-        },
+        sort: SortMode::Time,
         filters: SearchFilters {
             agent: cli.agent.as_deref().and_then(parse_agent_arg),
             branch,
@@ -220,6 +216,16 @@ mod tests {
         assert!(request.filters.live_only);
         assert!(request.filters.after_ts.is_some());
         assert!(request.filters.before_ts.is_some());
+    }
+
+    #[test]
+    fn defaults_to_time_sort_without_flag() {
+        let cli = Cli::parse_from(["aics", "deploy"]);
+
+        let request = build_request(&cli).unwrap();
+
+        assert_eq!(request.query, "deploy");
+        assert_eq!(request.sort, SortMode::Time);
     }
 
     #[test]
