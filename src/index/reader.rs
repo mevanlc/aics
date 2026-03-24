@@ -445,12 +445,12 @@ fn matches_scope(scope: &Scope, session: &StoredSession) -> bool {
             let candidates = [
                 Some(session.project.as_str()),
                 session.cwd.as_deref(),
-                session.file_path.to_str(),
             ];
 
-            candidates.into_iter().flatten().any(|candidate| {
-                candidate.starts_with(current.as_ref()) || current.starts_with(candidate)
-            })
+            candidates
+                .into_iter()
+                .flatten()
+                .any(|candidate| candidate == current.as_ref())
         }
     }
 }

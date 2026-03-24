@@ -174,9 +174,10 @@ impl ViewerState {
         frame.render_widget(footer, chunks[1]);
 
         if self.editing_search {
+            // border(1) + "Search (/): "(12) = 13
             let cursor_x = chunks[1]
                 .x
-                .saturating_add(11 + self.search.visual_cursor() as u16)
+                .saturating_add(13 + self.search.visual_cursor() as u16)
                 .min(chunks[1].right().saturating_sub(1));
             frame.set_cursor_position((cursor_x, chunks[1].y.saturating_add(1)));
         }

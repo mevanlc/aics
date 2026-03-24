@@ -375,13 +375,14 @@ impl App {
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_filters()
             }
-            KeyCode::Tab => self.focus = next_focus(self.focus, self.preview_available()),
-            KeyCode::Down | KeyCode::Enter => self.focus_list(),
+            KeyCode::Tab | KeyCode::Enter => self.focus_list(),
+            KeyCode::Down => self.move_selection(1),
+            KeyCode::Up => self.move_selection(-1),
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.resize_preview(5)
+                self.resize_preview(-5)
             }
             KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.resize_preview(-5)
+                self.resize_preview(5)
             }
             _ => {
                 if self.query.handle_event(&Event::Key(key)).is_some() {
@@ -412,10 +413,10 @@ impl App {
             KeyCode::PageDown => self.move_selection(PAGE_STEP as isize),
             KeyCode::PageUp => self.move_selection(-(PAGE_STEP as isize)),
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.resize_preview(5)
+                self.resize_preview(-5)
             }
             KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.resize_preview(-5)
+                self.resize_preview(5)
             }
             KeyCode::Backspace | KeyCode::Delete => {
                 self.focus = Focus::Search;
@@ -453,10 +454,10 @@ impl App {
             }
             KeyCode::PageUp => self.preview_scroll = self.preview_scroll.saturating_sub(PAGE_STEP),
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.resize_preview(5)
+                self.resize_preview(-5)
             }
             KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.resize_preview(-5)
+                self.resize_preview(5)
             }
             _ => {}
         }
@@ -1230,15 +1231,15 @@ mod tests {
     }
 
     #[test]
-    fn down_from_search_focuses_list_without_skipping_first_result() {
+    fn down_from_search_moves_selection_without_changing_focus() {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude), sample_hit(Agent::Codex)];
         app.selected = 0;
 
         app.handle_search_key(crossterm_key(KeyCode::Down)).unwrap();
 
-        assert_eq!(app.focus, Focus::List);
-        assert_eq!(app.selected, 0);
+        assert_eq!(app.focus, Focus::Search);
+        assert_eq!(app.selected, 1);
     }
 
     #[test]
