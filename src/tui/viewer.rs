@@ -10,6 +10,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::parse::Session;
+use crate::search_query::extract_highlight_terms;
 use crate::tui::preview::render_session_text;
 use crate::tui::theme::Theme;
 use crate::tui::util::wrapped_text_height;
@@ -243,11 +244,7 @@ fn split_viewer(area: Rect) -> [Rect; 2] {
 }
 
 fn collect_match_rows(session: &Session, query: &str, width: u16) -> Vec<usize> {
-    let terms = query
-        .split_whitespace()
-        .filter(|term| !term.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
+    let terms = extract_highlight_terms(query);
     if terms.is_empty() || width == 0 {
         return Vec::new();
     }

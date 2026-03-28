@@ -24,15 +24,16 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::aics()
+        Self::lazygit()
     }
 }
 
 impl Theme {
     pub fn from_name(name: ThemeName) -> Self {
         match name {
-            ThemeName::Aics => Self::aics(),
             ThemeName::Lazygit => Self::lazygit(),
+            ThemeName::Aics => Self::aics(),
+            ThemeName::Sunset => Self::sunset(),
         }
     }
 
@@ -77,6 +78,29 @@ impl Theme {
             bubble_codex: Color::Rgb(15, 40, 30),
             bubble_system: Color::Rgb(35, 35, 35),
             bubble_summary: Color::Rgb(45, 40, 20),
+        }
+    }
+
+    /// Warm dusk palette with coral accents and deep indigo surfaces for a
+    /// more cinematic contrast than the default terminal-style themes.
+    pub fn sunset() -> Self {
+        Self {
+            border: Color::Rgb(94, 78, 112),
+            focus_border: Color::Rgb(255, 122, 89),
+            text: Color::Rgb(248, 239, 234),
+            muted: Color::Rgb(175, 155, 171),
+            accent: Color::Rgb(255, 122, 89),
+            selection: Color::Rgb(81, 46, 86),
+            highlight: Color::Rgb(255, 209, 102),
+            list_header_bg: Color::Rgb(54, 32, 61),
+            list_body_bg: Color::Rgb(29, 21, 38),
+            claude: Color::Rgb(255, 170, 110),
+            codex: Color::Rgb(108, 210, 196),
+            bubble_user: Color::Rgb(63, 35, 74),
+            bubble_claude: Color::Rgb(87, 49, 31),
+            bubble_codex: Color::Rgb(24, 73, 73),
+            bubble_system: Color::Rgb(49, 39, 60),
+            bubble_summary: Color::Rgb(92, 67, 31),
         }
     }
 

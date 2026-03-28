@@ -8,35 +8,42 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeName {
-    Aics,
     Lazygit,
+    Aics,
+    Sunset,
 }
 
 impl ThemeName {
-    pub const ALL: [ThemeName; 2] = [ThemeName::Aics, ThemeName::Lazygit];
+    pub const ALL: [ThemeName; 3] = [ThemeName::Lazygit, ThemeName::Aics, ThemeName::Sunset];
 
     pub fn label(self) -> &'static str {
         match self {
-            ThemeName::Aics => "aics",
             ThemeName::Lazygit => "lazygit",
+            ThemeName::Aics => "aics",
+            ThemeName::Sunset => "sunset",
         }
     }
 
     pub fn next(self) -> Self {
         match self {
-            ThemeName::Aics => ThemeName::Lazygit,
             ThemeName::Lazygit => ThemeName::Aics,
+            ThemeName::Aics => ThemeName::Sunset,
+            ThemeName::Sunset => ThemeName::Lazygit,
         }
     }
 
     pub fn prev(self) -> Self {
-        self.next()
+        match self {
+            ThemeName::Lazygit => ThemeName::Sunset,
+            ThemeName::Aics => ThemeName::Lazygit,
+            ThemeName::Sunset => ThemeName::Aics,
+        }
     }
 }
 
 impl Default for ThemeName {
     fn default() -> Self {
-        ThemeName::Aics
+        ThemeName::Lazygit
     }
 }
 
@@ -131,7 +138,7 @@ mod tests {
         let settings = Settings::default();
         let json = serde_json::to_string(&settings).unwrap();
         let parsed: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.theme, ThemeName::Aics);
+        assert_eq!(parsed.theme, ThemeName::Lazygit);
         assert_eq!(parsed.claude_command, "claude");
         assert_eq!(parsed.codex_command, "codex");
     }
@@ -153,8 +160,11 @@ mod tests {
 
     #[test]
     fn theme_name_cycles() {
-        assert_eq!(ThemeName::Aics.next(), ThemeName::Lazygit);
         assert_eq!(ThemeName::Lazygit.next(), ThemeName::Aics);
+        assert_eq!(ThemeName::Aics.next(), ThemeName::Sunset);
+        assert_eq!(ThemeName::Sunset.next(), ThemeName::Lazygit);
+        assert_eq!(ThemeName::Lazygit.prev(), ThemeName::Sunset);
+        assert_eq!(ThemeName::Sunset.prev(), ThemeName::Aics);
     }
 
     #[test]

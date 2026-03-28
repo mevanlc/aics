@@ -13,6 +13,7 @@ use crate::index::schema::IndexSchema;
 use crate::index::writer::{IndexPaths, StoredSession};
 use crate::live::LiveSessionTracker;
 use crate::parse::{Agent, DerivationType};
+use crate::search_query::{extract_highlight_terms, has_explicit_boolean_operators};
 
 #[derive(Debug, Clone)]
 pub enum Scope {
@@ -414,7 +415,7 @@ fn build_phrase_boosted_query(
     query_text: &str,
     base_query: Box<dyn Query>,
 ) -> Box<dyn Query> {
-    if query_text.split_whitespace().count() < 2 {
+    if extract_highlight_terms(query_text).len() < 2 || has_explicit_boolean_operators(query_text) {
         return base_query;
     }
 
@@ -529,8 +530,8 @@ fn fallback_snippet(session: &StoredSession, query: &str) -> String {
 
 fn emphasize_terms(text: &str, query: &str) -> String {
     let mut result = text.to_owned();
-    for term in query.split_whitespace().filter(|term| !term.is_empty()) {
-        result = replace_case_insensitive(&result, term, &format!("<b>{term}</b>"));
+    for term in extract_highlight_terms(query) {
+        result = replace_case_insensitive(&result, &term, &format!("<b>{term}</b>"));
     }
     result
 }

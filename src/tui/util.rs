@@ -7,6 +7,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::index::SearchHit;
 use crate::parse::{Agent, MessageRole};
+use crate::search_query::extract_highlight_terms;
 use crate::tui::theme::Theme;
 
 pub fn agent_badge(agent: Agent, theme: &Theme) -> (&'static str, Color) {
@@ -102,11 +103,7 @@ pub fn highlight_spans(
     base: Style,
     highlight: Style,
 ) -> Vec<Span<'static>> {
-    let terms = query
-        .split_whitespace()
-        .filter(|term| !term.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
+    let terms = extract_highlight_terms(query);
     if terms.is_empty() {
         return vec![Span::styled(text.to_owned(), base)];
     }

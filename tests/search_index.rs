@@ -96,6 +96,12 @@ fn explicit_or_operator_broadens_query() -> Result<()> {
     assert!(hits
         .iter()
         .any(|hit| hit.session.first_user_msg_content.contains("current git status")));
+    assert!(hits
+        .iter()
+        .all(|hit| !hit.snippet_html.contains("<b>OR</b>")));
+    assert!(hits
+        .iter()
+        .any(|hit| hit.snippet_html.contains("<b>express</b>")));
     Ok(())
 }
 
