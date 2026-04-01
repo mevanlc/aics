@@ -183,7 +183,7 @@ mod tests {
             .style
             .add_modifier
             .contains(ratatui::style::Modifier::BOLD));
-        assert_eq!(alpha.style.fg, Some(theme.highlight));
-        assert_eq!(alpha.style.bg, Some(theme.bubble_claude));
+        assert_eq!(alpha.style.fg, Some(theme.text));
+        assert_eq!(alpha.style.bg, Some(theme.search_match_bg));
     }
 }

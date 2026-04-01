@@ -62,7 +62,7 @@ impl<'a> MarkdownRenderer<'a> {
         Self {
             theme,
             base_style,
-            search_highlight: base_style.patch(theme.highlight_style()),
+            search_highlight: theme.search_match_style(),
             terms: extract_highlight_terms(highlight_query.unwrap_or_default()),
             lines: Vec::new(),
             current_line: Vec::new(),
@@ -488,8 +488,8 @@ mod tests {
             .expect("alpha span");
 
         assert!(alpha.style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(alpha.style.fg, Some(theme.highlight));
-        assert_eq!(alpha.style.bg, Some(theme.bubble_user));
+        assert_eq!(alpha.style.fg, Some(theme.text));
+        assert_eq!(alpha.style.bg, Some(theme.search_match_bg));
     }
 
     #[test]
@@ -506,7 +506,7 @@ mod tests {
             .find(|span| span.content.as_ref() == "alpha")
             .expect("alpha span");
 
-        assert_eq!(alpha.style.fg, Some(theme.highlight));
-        assert_eq!(alpha.style.bg, Some(theme.bubble_claude));
+        assert_eq!(alpha.style.fg, Some(theme.text));
+        assert_eq!(alpha.style.bg, Some(theme.search_match_bg));
     }
 }

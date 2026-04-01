@@ -24,7 +24,7 @@ pub fn parse_highlighted_html(html: &str, base: Style, highlight: Style) -> Line
 
     while !remaining.is_empty() {
         if let Some(rest) = remaining.strip_prefix("<b>") {
-            current = highlight;
+            current = base.patch(highlight);
             remaining = rest;
             continue;
         }
@@ -216,7 +216,7 @@ fn unescape_html(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::Style;
+    use ratatui::style::{Color, Style};
     use unicode_segmentation::UnicodeSegmentation;
 
     use ratatui::text::Text;
@@ -266,6 +266,17 @@ mod tests {
             .collect::<String>();
 
         assert_eq!(rendered, "Ship 👨‍👩‍👧‍👦 plan 漢字");
+    }
+
+    #[test]
+    fn highlighted_html_preserves_base_foreground_when_overlay_only_sets_background() {
+        let base = Style::default().fg(Color::Green);
+        let overlay = Style::default().bg(Color::Blue);
+        let line = parse_highlighted_html("plain <b>match</b>", base, overlay);
+
+        assert_eq!(line.spans[1].content.as_ref(), "match");
+        assert_eq!(line.spans[1].style.fg, Some(Color::Green));
+        assert_eq!(line.spans[1].style.bg, Some(Color::Blue));
     }
 
     #[test]

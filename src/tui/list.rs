@@ -130,7 +130,7 @@ fn render_item(hit: &SearchHit, theme: &Theme, width: usize) -> ListItem<'static
     let snippet = parse_highlighted_html(
         &hit.snippet_html,
         Style::default().fg(theme.text),
-        theme.highlight_style(),
+        theme.search_match_style(),
     );
     let mut snippet_lines = wrap_line(snippet, width, PREVIEW_LINES);
     while snippet_lines.len() < PREVIEW_LINES {
@@ -317,7 +317,7 @@ fn append_ellipsis(rows: &mut [Vec<Span<'static>>], row_widths: &mut [usize], wi
 #[cfg(test)]
 mod tests {
     use ratatui::layout::Rect;
-    use ratatui::style::Style;
+    use ratatui::style::{Color, Style};
 
     use super::{format_line_count, slot_at_row, truncate_with_ellipsis, wrap_line, PREVIEW_LINES};
 
@@ -350,6 +350,19 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<String>();
         assert!(last.ends_with('…'));
+    }
+
+    #[test]
+    fn snippet_highlight_preserves_base_text_color() {
+        let line = crate::tui::util::parse_highlighted_html(
+            "plain <b>match</b>",
+            Style::default().fg(Color::White),
+            Style::default().bg(Color::Blue),
+        );
+
+        assert_eq!(line.spans[1].content.as_ref(), "match");
+        assert_eq!(line.spans[1].style.fg, Some(Color::White));
+        assert_eq!(line.spans[1].style.bg, Some(Color::Blue));
     }
 
     #[test]

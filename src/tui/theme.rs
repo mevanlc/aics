@@ -11,6 +11,7 @@ pub struct Theme {
     pub accent: Color,
     pub selection: Color,
     pub highlight: Color,
+    pub search_match_bg: Color,
     pub list_header_bg: Color,
     pub list_body_bg: Color,
     pub claude: Color,
@@ -46,6 +47,7 @@ impl Theme {
             accent: Color::Rgb(144, 191, 255),
             selection: Color::Rgb(34, 40, 50),
             highlight: Color::Rgb(255, 215, 90),
+            search_match_bg: Color::Rgb(92, 72, 20),
             list_header_bg: Color::Rgb(32, 36, 43),
             list_body_bg: Color::Rgb(24, 27, 33),
             claude: Color::Rgb(242, 153, 74),
@@ -69,6 +71,7 @@ impl Theme {
             accent: Color::Rgb(50, 205, 50),
             selection: Color::Rgb(0, 0, 128),
             highlight: Color::Rgb(255, 255, 0),
+            search_match_bg: Color::Rgb(96, 96, 0),
             list_header_bg: Color::Rgb(30, 30, 30),
             list_body_bg: Color::Rgb(20, 20, 20),
             claude: Color::Rgb(242, 153, 74),
@@ -92,6 +95,7 @@ impl Theme {
             accent: Color::Rgb(255, 122, 89),
             selection: Color::Rgb(81, 46, 86),
             highlight: Color::Rgb(255, 209, 102),
+            search_match_bg: Color::Rgb(122, 78, 24),
             list_header_bg: Color::Rgb(54, 32, 61),
             list_body_bg: Color::Rgb(29, 21, 38),
             claude: Color::Rgb(255, 170, 110),
@@ -115,6 +119,12 @@ impl Theme {
     pub fn highlight_style(&self) -> Style {
         Style::default()
             .fg(self.highlight)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn search_match_style(&self) -> Style {
+        Style::default()
+            .bg(self.search_match_bg)
             .add_modifier(Modifier::BOLD)
     }
 }
