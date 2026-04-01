@@ -1,23 +1,27 @@
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::tui::app::{App, Focus};
+use crate::tui::app::App;
 use crate::tui::theme::Theme;
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
-    let focused = matches!(app.focus, Focus::Search);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(theme.border_style(focused))
+        .border_style(theme.border_style(false))
         .title(Line::from(vec![
             Span::styled("Search", Style::default().fg(theme.text)),
             Span::styled(
                 format!(" · {}", app.scope_label()),
                 Style::default().fg(theme.muted),
+            ),
+            Span::styled(" · ", Style::default().fg(theme.muted)),
+            Span::styled(
+                app.title_status_text(),
+                Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
             ),
         ]));
 
@@ -26,7 +30,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         .block(block);
     frame.render_widget(widget, area);
 
-    if focused {
+    if app.show_search_cursor() {
         let cursor_x = area
             .x
             .saturating_add(1 + app.query.visual_cursor() as u16)

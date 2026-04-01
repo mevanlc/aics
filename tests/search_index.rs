@@ -90,12 +90,14 @@ fn explicit_or_operator_broadens_query() -> Result<()> {
     })?;
 
     assert!(hits.len() >= 2);
-    assert!(hits
-        .iter()
-        .any(|hit| hit.session.first_user_msg_content.contains("Express server")));
-    assert!(hits
-        .iter()
-        .any(|hit| hit.session.first_user_msg_content.contains("current git status")));
+    assert!(hits.iter().any(|hit| hit
+        .session
+        .first_user_msg_content
+        .contains("Express server")));
+    assert!(hits.iter().any(|hit| hit
+        .session
+        .first_user_msg_content
+        .contains("current git status")));
     assert!(hits
         .iter()
         .all(|hit| !hit.snippet_html.contains("<b>OR</b>")));

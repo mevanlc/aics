@@ -6,7 +6,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::index::SearchHit;
-use crate::tui::app::{App, Focus};
+use crate::tui::app::App;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
     agent_badge, list_title, parse_highlighted_html, relative_time, truncate_plain,
@@ -26,11 +26,10 @@ fn effective_item_height(area: Rect) -> usize {
 }
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
-    let focused = matches!(app.focus, Focus::List);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(theme.border_style(focused))
+        .border_style(theme.border_style(false))
         .title("Sessions");
 
     let compact = effective_item_height(area) == 1;

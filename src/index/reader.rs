@@ -443,10 +443,7 @@ fn matches_scope(scope: &Scope, session: &StoredSession) -> bool {
         Scope::Global => true,
         Scope::CurrentDir(current_dir) => {
             let current = current_dir.to_string_lossy();
-            let candidates = [
-                Some(session.project.as_str()),
-                session.cwd.as_deref(),
-            ];
+            let candidates = [Some(session.project.as_str()), session.cwd.as_deref()];
 
             candidates
                 .into_iter()
@@ -570,7 +567,10 @@ mod tests {
 
     #[test]
     fn emphasize_terms_preserves_original_match_casing() {
-        let highlighted = emphasize_terms("INSTRUCTIONS You are running on Android.", "running on android");
+        let highlighted = emphasize_terms(
+            "INSTRUCTIONS You are running on Android.",
+            "running on android",
+        );
         assert!(highlighted.contains("INSTRUCTI<b>ON</b>S"));
         assert!(highlighted.contains("<b>running</b>"));
         assert!(highlighted.contains("<b>Android</b>"));

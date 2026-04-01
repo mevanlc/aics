@@ -21,7 +21,7 @@ use ratatui::crossterm::terminal::{
 };
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 use tui_input::backend::crossterm::EventHandler;
@@ -35,8 +35,10 @@ use crate::parse::{parse_session_file, Session};
 use crate::settings::Settings;
 use crate::tui::actions::{ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::filter::{FilterModalState, FilterOutcome};
+use crate::tui::profile;
 use crate::tui::settings::{SettingsModalState, SettingsOutcome};
 use crate::tui::theme::Theme;
+use crate::tui::util::wrapped_text_height;
 use crate::tui::viewer::{ViewerOutcome, ViewerState};
 use crate::tui::{layout, list, preview, search};
 
@@ -69,6 +71,19 @@ struct ExternalCommand {
     program: String,
     args: Vec<String>,
     cwd: Option<PathBuf>,
+}
+
+struct PreviewRenderCache {
+    path: PathBuf,
+    query: String,
+    width: u16,
+    wrapped_height: Option<usize>,
+    text: Text<'static>,
+}
+
+pub struct PreviewRenderState<'a> {
+    pub text: &'a Text<'static>,
+    pub max_scroll: usize,
 }
 
 #[derive(Debug)]
@@ -139,6 +154,8 @@ pub struct App {
     result_limit: usize,
     selected: usize,
     preview_cache: HashMap<PathBuf, Option<Session>>,
+    preview_render_cache: Option<PreviewRenderCache>,
+    committed_query: String,
     pending_search: bool,
     last_edit_at: Option<Instant>,
     next_search_id: u64,
@@ -173,7 +190,7 @@ impl App {
 
         Self {
             focus: Focus::Search,
-            query: Input::default().with_value(initial_request.query),
+            query: Input::default().with_value(initial_request.query.clone()),
             results: Vec::new(),
             preview_scroll: 0,
             manager,
@@ -185,6 +202,8 @@ impl App {
             result_limit: initial_request.limit.max(1),
             selected: 0,
             preview_cache: HashMap::new(),
+            preview_render_cache: None,
+            committed_query: initial_request.query,
             pending_search: true,
             last_edit_at: None,
             next_search_id: 0,
@@ -220,6 +239,7 @@ impl App {
                 }
 
                 if needs_redraw {
+                    let _draw_profile = profile::scope("terminal.draw");
                     terminal.draw(|frame| self.draw(frame))?;
                     needs_redraw = false;
                 }
@@ -264,8 +284,28 @@ impl App {
         (!self.results.is_empty()).then_some(self.selected)
     }
 
+    pub fn committed_query(&self) -> &str {
+        &self.committed_query
+    }
+
+    pub fn title_status_text(&self) -> String {
+        let mut text = format!("{} results", self.results.len());
+        let filter_count = self.filters.active_count();
+        if filter_count > 0 {
+            text.push_str(&format!(" · {filter_count} filters"));
+        }
+        if matches!(self.sort, SortMode::Time) {
+            text.push_str(" · time sort");
+        }
+        text
+    }
+
     pub fn is_searching(&self) -> bool {
         self.pending_search || self.search_in_flight
+    }
+
+    pub fn show_search_cursor(&self) -> bool {
+        matches!(self.overlay, Overlay::None)
     }
 
     pub fn selected_preview(&mut self) -> Option<&Session> {
@@ -282,6 +322,65 @@ impl App {
             .and_then(|session| session.as_ref())
     }
 
+    pub fn preview_render_state<'a>(
+        &'a mut self,
+        area: Rect,
+        theme: &Theme,
+    ) -> Option<PreviewRenderState<'a>> {
+        let hit = self.results.get(self.selected)?;
+        let path = hit.session.file_path.clone();
+        let query = self.committed_query.clone();
+        let width = area.width.saturating_sub(2);
+
+        let cache_miss = self
+            .preview_render_cache
+            .as_ref()
+            .is_none_or(|cache| cache.path != path || cache.query != query || cache.width != width);
+        if cache_miss {
+            profile::event("preview.cache.miss");
+            let highlight_query = (!query.is_empty()).then_some(query.as_str());
+            let text = {
+                let session = self.selected_preview()?;
+                preview::render_session_text(session, theme, highlight_query)
+            };
+            self.preview_render_cache = Some(PreviewRenderCache {
+                path: path.clone(),
+                query: query.clone(),
+                width,
+                wrapped_height: None,
+                text,
+            });
+        } else {
+            profile::event("preview.cache.hit");
+        }
+
+        if self.preview_scroll > 0
+            && self
+                .preview_render_cache
+                .as_ref()
+                .is_some_and(|cache| cache.wrapped_height.is_none())
+        {
+            if let Some(cache) = self.preview_render_cache.as_mut() {
+                cache.wrapped_height = Some(wrapped_text_height(&cache.text, cache.width));
+            }
+        }
+
+        let cache = self.preview_render_cache.as_ref()?;
+        let max_scroll = if self.preview_scroll == 0 {
+            0
+        } else {
+            let viewport_height = area.height.saturating_sub(2) as usize;
+            cache
+                .wrapped_height
+                .unwrap_or_default()
+                .saturating_sub(viewport_height)
+        };
+        Some(PreviewRenderState {
+            text: &cache.text,
+            max_scroll,
+        })
+    }
+
     pub fn list_window(&self, max_items: usize) -> (&[SearchHit], Option<usize>) {
         if self.results.is_empty() {
             return (&[], None);
@@ -294,6 +393,7 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
+        let _draw_profile = profile::scope("app.draw");
         let theme = self.theme.clone();
         frame.render_widget(Clear, frame.area());
         self.last_frame_area = frame.area();
@@ -317,9 +417,17 @@ impl App {
         let status_base = self.status_text();
         let w = areas.status.width as usize;
         let status_str = if w >= 110 {
-            format!("{status_base}  |  Tab focus  |  Ctrl+F filters  |  Ctrl+O settings  |  Enter actions  |  Ctrl+H/L resize  |  Ctrl+C quit")
+            if status_base.is_empty() {
+                "↑↓ select | PgUp/PgDn preview | Home/End preview | ^F filters | ^O settings | Enter actions | ^H/^L resize | ^C quit".to_owned()
+            } else {
+                format!("{status_base} | ↑↓ select | PgUp/PgDn preview | Home/End preview | ^F filters | ^O settings | Enter actions | ^H/^L resize | ^C quit")
+            }
         } else if w >= 60 {
-            format!("{status_base}  |  Tab  ^F  ^O  Enter  ^C")
+            if status_base.is_empty() {
+                "↑↓ select Pg/Home preview Enter ^C".to_owned()
+            } else {
+                format!("{status_base} | ↑↓ select Pg/Home preview Enter ^C")
+            }
         } else {
             status_base
         };
@@ -384,9 +492,41 @@ impl App {
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_filters()
             }
-            KeyCode::Tab | KeyCode::Enter => self.focus_list(),
             KeyCode::Down => self.move_selection(1),
             KeyCode::Up => self.move_selection(-1),
+            KeyCode::PageDown => {
+                if self.preview_available() {
+                    self.preview_scroll = self.preview_scroll.saturating_add(PAGE_STEP);
+                } else {
+                    self.move_selection(PAGE_STEP as isize);
+                }
+            }
+            KeyCode::PageUp => {
+                if self.preview_available() {
+                    self.preview_scroll = self.preview_scroll.saturating_sub(PAGE_STEP);
+                } else {
+                    self.move_selection(-(PAGE_STEP as isize));
+                }
+            }
+            KeyCode::Home => {
+                if self.preview_available() {
+                    self.preview_scroll = 0;
+                } else {
+                    self.select_absolute(0);
+                }
+            }
+            KeyCode::End => {
+                if self.preview_available() {
+                    self.preview_scroll = usize::MAX / 4;
+                } else {
+                    self.select_absolute(self.results.len().saturating_sub(1));
+                }
+            }
+            KeyCode::Enter => {
+                if self.selected_index().is_some() {
+                    self.overlay = Overlay::Actions(ActionMenuState::new());
+                }
+            }
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.resize_preview(-5)
             }
@@ -394,7 +534,9 @@ impl App {
                 self.resize_preview(5)
             }
             _ => {
-                if self.query.handle_event(&Event::Key(key)).is_some() {
+                let before = self.query.value().to_owned();
+                if self.query.handle_event(&Event::Key(key)).is_some() && self.query.value() != before
+                {
                     self.pending_search = true;
                     self.last_edit_at = Some(Instant::now());
                 }
@@ -404,79 +546,11 @@ impl App {
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Esc => {
-                if self.query.value().is_empty() {
-                    self.should_quit = true;
-                } else {
-                    self.focus = Focus::Search;
-                }
-            }
-            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.open_settings()
-            }
-            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.open_filters()
-            }
-            KeyCode::Tab => self.focus = next_focus(self.focus, self.preview_available()),
-            KeyCode::Enter => self.overlay = Overlay::Actions(ActionMenuState::new()),
-            KeyCode::Char('v') if key.modifiers.is_empty() => self.open_viewer(),
-            KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
-            KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
-            KeyCode::Home => self.select_absolute(0),
-            KeyCode::End => self.select_absolute(self.results.len().saturating_sub(1)),
-            KeyCode::PageDown => self.move_selection(PAGE_STEP as isize),
-            KeyCode::PageUp => self.move_selection(-(PAGE_STEP as isize)),
-            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.resize_preview(-5)
-            }
-            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.resize_preview(5)
-            }
-            KeyCode::Backspace | KeyCode::Delete => {
-                self.focus = Focus::Search;
-                self.handle_search_key(key)?;
-            }
-            KeyCode::Char(_) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.focus = Focus::Search;
-                self.handle_search_key(key)?;
-            }
-            _ => {}
-        }
-        Ok(())
+        self.handle_search_key(key)
     }
 
     fn handle_preview_key(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Esc => self.focus = Focus::Search,
-            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.open_settings()
-            }
-            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.open_filters()
-            }
-            KeyCode::Tab => self.focus = next_focus(self.focus, self.preview_available()),
-            KeyCode::Enter => self.overlay = Overlay::Actions(ActionMenuState::new()),
-            KeyCode::Char('v') if key.modifiers.is_empty() => self.open_viewer(),
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.preview_scroll = self.preview_scroll.saturating_add(1)
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.preview_scroll = self.preview_scroll.saturating_sub(1)
-            }
-            KeyCode::PageDown => {
-                self.preview_scroll = self.preview_scroll.saturating_add(PAGE_STEP)
-            }
-            KeyCode::PageUp => self.preview_scroll = self.preview_scroll.saturating_sub(PAGE_STEP),
-            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.resize_preview(-5)
-            }
-            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.resize_preview(5)
-            }
-            _ => {}
-        }
-        Ok(())
+        self.handle_search_key(key)
     }
 
     fn handle_overlay_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -549,18 +623,10 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if contains(areas.search, mouse.column, mouse.row) {
-                    self.focus = Focus::Search;
-                } else if contains(areas.list, mouse.column, mouse.row) {
-                    self.focus = Focus::List;
+                if contains(areas.list, mouse.column, mouse.row) {
                     if let Some(index) = self.list_index_at(areas.list, mouse.row) {
                         self.select_absolute(index);
                     }
-                } else if areas
-                    .preview
-                    .is_some_and(|preview| contains(preview, mouse.column, mouse.row))
-                {
-                    self.focus = Focus::Preview;
                 }
             }
             MouseEventKind::ScrollDown => {
@@ -623,12 +689,13 @@ impl App {
     fn dispatch_search(&mut self) -> Result<()> {
         let request_id = self.next_search_id;
         self.next_search_id = self.next_search_id.saturating_add(1);
+        self.committed_query = self.query.value().to_owned();
         self.worker
             .request_tx
             .send(SearchCommand {
                 request_id,
                 request: SearchRequest {
-                    query: self.query.value().to_owned(),
+                    query: self.committed_query.clone(),
                     scope: self.scope.clone(),
                     limit: self.result_limit.max(1),
                     sort: self.sort,
@@ -659,6 +726,7 @@ impl App {
                     match response.result {
                         Ok(results) => {
                             self.results = results;
+                            self.preview_render_cache = None;
                             if self.results.is_empty() {
                                 self.selected = 0;
                             } else {
@@ -708,10 +776,6 @@ impl App {
         }
     }
 
-    fn focus_list(&mut self) {
-        self.focus = Focus::List;
-    }
-
     fn select_absolute(&mut self, index: usize) {
         if self.results.is_empty() {
             return;
@@ -748,6 +812,7 @@ impl App {
 
     fn apply_settings(&mut self, new_settings: Settings) -> Result<()> {
         self.theme = Theme::from_name(new_settings.theme);
+        self.preview_render_cache = None;
         self.settings = new_settings;
         if let Err(err) = self.settings.save() {
             self.status_message = Some(format!("settings error: {err:#}"));
@@ -784,15 +849,7 @@ impl App {
     }
 
     fn clamp_scroll_state(&mut self, areas: layout::AppLayout) {
-        if let Some(preview_area) = areas.preview {
-            let theme = self.theme.clone();
-            let query = self.query.value().to_owned();
-            let max_scroll = {
-                let session = self.selected_preview();
-                preview::max_scroll(preview_area, session, &theme, &query)
-            };
-            self.preview_scroll = self.preview_scroll.min(max_scroll);
-        } else {
+        if areas.preview.is_none() {
             self.preview_scroll = 0;
         }
 
@@ -902,8 +959,9 @@ impl App {
             Ok(()) => false,
             Err(error) if error.kind() == io::ErrorKind::NotFound => true,
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to delete {}", hit.session.file_path.display()));
+                return Err(error).with_context(|| {
+                    format!("failed to delete {}", hit.session.file_path.display())
+                });
             }
         };
         self.results
@@ -913,6 +971,7 @@ impl App {
         }
         self.preview_scroll = 0;
         self.preview_cache.remove(&hit.session.file_path);
+        self.preview_render_cache = None;
         match self.manager.sync_best_effort(false)? {
             SyncOutcome::Completed(_) => {
                 self.status_message = Some(if file_already_missing {
@@ -986,25 +1045,22 @@ impl App {
     }
 
     fn status_text(&self) -> String {
-        let mut text = format!("{} results", self.results.len());
-        let filter_count = self.filters.active_count();
-        if filter_count > 0 {
-            text.push_str(&format!(" · {filter_count} filters"));
-        }
-        if matches!(self.sort, SortMode::Time) {
-            text.push_str(" · time sort");
-        }
+        let mut text = String::new();
         if self.pending_search {
-            text.push_str(" · pending");
+            text.push_str("pending");
         } else if self.search_in_flight {
-            text.push_str(" · searching");
+            text.push_str("searching");
         }
         if let Some(error) = &self.search_error {
-            text.push_str(" · ");
+            if !text.is_empty() {
+                text.push_str(" · ");
+            }
             text.push_str(error);
         }
         if let Some(message) = &self.status_message {
-            text.push_str(" · ");
+            if !text.is_empty() {
+                text.push_str(" · ");
+            }
             text.push_str(message);
         }
         text
@@ -1033,15 +1089,6 @@ fn search_worker_loop(
         {
             break;
         }
-    }
-}
-
-fn next_focus(current: Focus, preview_available: bool) -> Focus {
-    match (current, preview_available) {
-        (Focus::Search, _) => Focus::List,
-        (Focus::List, true) => Focus::Preview,
-        (Focus::List, false) => Focus::Search,
-        (Focus::Preview, _) => Focus::Search,
     }
 }
 
@@ -1223,23 +1270,23 @@ fn execute_handoff(command: ExternalCommand) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
     use std::path::PathBuf;
+    use std::sync::mpsc;
 
     use anyhow::anyhow;
     use ratatui::crossterm::event::KeyCode;
     use tempfile::TempDir;
     use tui_input::Input;
 
-    use crate::index::{IndexManager, IndexPaths, Scope, SearchFilters, SearchRequest, SortMode};
     use crate::index::writer::StoredSession;
     use crate::index::SearchHit;
+    use crate::index::{IndexManager, IndexPaths, Scope, SearchFilters, SearchRequest, SortMode};
     use crate::parse::{Agent, DerivationType};
     use crate::settings::Settings;
 
     use super::{
-        build_fork_command, build_resume_command, finalize_run_result, App, AppExit, Focus,
-        SearchWorker,
+        build_fork_command, build_resume_command, finalize_run_result, App, AppExit, SearchWorker,
+        PAGE_STEP,
     };
 
     #[test]
@@ -1287,78 +1334,105 @@ mod tests {
     }
 
     #[test]
-    fn down_from_search_moves_selection_without_changing_focus() {
+    fn down_moves_selection_on_main_screen() {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude), sample_hit(Agent::Codex)];
         app.selected = 0;
 
         app.handle_search_key(crossterm_key(KeyCode::Down)).unwrap();
 
-        assert_eq!(app.focus, Focus::Search);
         assert_eq!(app.selected, 1);
     }
 
     #[test]
-    fn enter_from_search_focuses_list_without_skipping_first_result() {
+    fn enter_opens_actions_from_main_screen_without_skipping_first_result() {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude), sample_hit(Agent::Codex)];
         app.selected = 0;
 
-        app.handle_search_key(crossterm_key(KeyCode::Enter)).unwrap();
+        app.handle_search_key(crossterm_key(KeyCode::Enter))
+            .unwrap();
 
-        assert_eq!(app.focus, Focus::List);
         assert_eq!(app.selected, 0);
+        assert!(matches!(app.overlay, super::Overlay::Actions(_)));
     }
 
     #[test]
-    fn escape_from_search_quits_when_query_is_empty() {
+    fn action_shortcuts_do_not_run_when_actions_overlay_is_closed() {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude)];
-        app.focus = Focus::Search;
+
+        app.handle_search_key(crossterm_key(KeyCode::Char('v')))
+            .unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::None));
+    }
+
+    #[test]
+    fn cursor_motion_in_search_does_not_trigger_new_search() {
+        let mut app = test_app();
+        app.query = Input::default().with_value("alpha".to_owned());
+        app.pending_search = false;
+        app.last_edit_at = None;
+
+        app.handle_search_key(crossterm_key(KeyCode::Left)).unwrap();
+
+        assert!(!app.pending_search);
+        assert!(app.last_edit_at.is_none());
+        assert_eq!(app.query.value(), "alpha");
+    }
+
+    #[test]
+    fn escape_on_main_screen_quits_when_query_is_empty() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
 
         app.handle_search_key(crossterm_key(KeyCode::Esc)).unwrap();
 
         assert!(app.should_quit);
-        assert_eq!(app.focus, Focus::Search);
     }
 
     #[test]
-    fn escape_from_search_clears_query_when_query_exists() {
+    fn escape_on_main_screen_clears_query_when_query_exists() {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude)];
-        app.focus = Focus::Search;
         app.query = Input::default().with_value("alpha".to_owned());
 
         app.handle_search_key(crossterm_key(KeyCode::Esc)).unwrap();
 
         assert!(!app.should_quit);
         assert_eq!(app.query.value(), "");
-        assert_eq!(app.focus, Focus::Search);
     }
 
     #[test]
-    fn escape_from_list_quits_when_search_query_is_empty() {
+    fn page_down_scrolls_preview_without_changing_selected_session() {
         let mut app = test_app();
-        app.results = vec![sample_hit(Agent::Claude)];
-        app.focus = Focus::List;
+        app.results = vec![sample_hit(Agent::Claude), sample_hit(Agent::Codex)];
+        app.selected = 0;
 
-        app.handle_list_key(crossterm_key(KeyCode::Esc)).unwrap();
+        app.handle_search_key(crossterm_key(KeyCode::PageDown))
+            .unwrap();
 
-        assert!(app.should_quit);
-        assert_eq!(app.focus, Focus::List);
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.preview_scroll, PAGE_STEP);
     }
 
     #[test]
-    fn escape_from_list_returns_to_search_when_query_exists() {
+    fn home_and_end_fall_back_to_list_when_preview_is_hidden() {
         let mut app = test_app();
-        app.results = vec![sample_hit(Agent::Claude)];
-        app.focus = Focus::List;
-        app.query = Input::default().with_value("alpha".to_owned());
+        app.results = vec![
+            sample_hit(Agent::Claude),
+            sample_hit(Agent::Codex),
+            sample_hit(Agent::Claude),
+        ];
+        app.preview_visible = false;
+        app.selected = 1;
 
-        app.handle_list_key(crossterm_key(KeyCode::Esc)).unwrap();
+        app.handle_search_key(crossterm_key(KeyCode::End)).unwrap();
+        assert_eq!(app.selected, 2);
 
-        assert!(!app.should_quit);
-        assert_eq!(app.focus, Focus::Search);
+        app.handle_search_key(crossterm_key(KeyCode::Home)).unwrap();
+        assert_eq!(app.selected, 0);
     }
 
     #[test]
@@ -1445,7 +1519,10 @@ mod tests {
     }
 
     fn crossterm_key(code: KeyCode) -> ratatui::crossterm::event::KeyEvent {
-        ratatui::crossterm::event::KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE)
+        ratatui::crossterm::event::KeyEvent::new(
+            code,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        )
     }
 
     fn sample_hit(agent: Agent) -> SearchHit {

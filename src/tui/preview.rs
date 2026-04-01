@@ -5,30 +5,31 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::parse::{Agent, MessageRole, Session};
-use crate::tui::app::{App, Focus};
+use crate::tui::app::App;
 use crate::tui::markdown::render_markdown_message;
+use crate::tui::profile;
 use crate::tui::theme::Theme;
 use crate::tui::util::{role_label, wrapped_text_height};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
-    let focused = matches!(app.focus, Focus::Preview);
+    let _profile = profile::scope("preview.render");
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(theme.border_style(focused))
+        .border_style(theme.border_style(false))
         .title("Preview");
 
-    let query = app.query.value().to_owned();
-    let highlight_query = normalize_highlight_query(&query);
-    let text = if let Some(session) = app.selected_preview() {
-        render_session_text(session, theme, highlight_query)
+    let (text, max_scroll) = if let Some(state) = app.preview_render_state(area, theme) {
+        (state.text.clone(), state.max_scroll)
     } else {
-        Text::from(Line::from(Span::styled(
-            "Select a session to preview",
-            Style::default().fg(theme.muted),
-        )))
+        (
+            Text::from(Line::from(Span::styled(
+                "Select a session to preview",
+                Style::default().fg(theme.muted),
+            ))),
+            0,
+        )
     };
-    let max_scroll = scroll_limit_for_text(&text, area);
     app.preview_scroll = app.preview_scroll.min(max_scroll);
 
     let paragraph = Paragraph::new(text)
@@ -38,12 +39,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     frame.render_widget(paragraph, area);
 }
 
-pub fn max_scroll(
-    area: Rect,
-    session: Option<&Session>,
-    theme: &Theme,
-    query: &str,
-) -> usize {
+pub fn max_scroll(area: Rect, session: Option<&Session>, theme: &Theme, query: &str) -> usize {
     let highlight_query = normalize_highlight_query(query);
     let text = if let Some(session) = session {
         render_session_text(session, theme, highlight_query)
@@ -58,6 +54,7 @@ pub fn render_session_text(
     theme: &Theme,
     highlight_query: Option<&str>,
 ) -> Text<'static> {
+    let _profile = profile::scope("preview.render_session_text");
     let mut lines = Vec::new();
     for message in &session.messages {
         let (label_color, _) = message_colors(session.agent, message.role, theme);
