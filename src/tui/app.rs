@@ -371,7 +371,13 @@ impl App {
 
     fn handle_search_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Esc => self.clear_query(),
+            KeyCode::Esc => {
+                if self.query.value().is_empty() {
+                    self.should_quit = true;
+                } else {
+                    self.clear_query();
+                }
+            }
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_settings()
             }
@@ -399,7 +405,13 @@ impl App {
 
     fn handle_list_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Esc => self.focus = Focus::Search,
+            KeyCode::Esc => {
+                if self.query.value().is_empty() {
+                    self.should_quit = true;
+                } else {
+                    self.focus = Focus::Search;
+                }
+            }
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_settings()
             }
@@ -774,9 +786,10 @@ impl App {
     fn clamp_scroll_state(&mut self, areas: layout::AppLayout) {
         if let Some(preview_area) = areas.preview {
             let theme = self.theme.clone();
+            let query = self.query.value().to_owned();
             let max_scroll = {
                 let session = self.selected_preview();
-                preview::max_scroll(preview_area, session, &theme)
+                preview::max_scroll(preview_area, session, &theme, &query)
             };
             self.preview_scroll = self.preview_scroll.min(max_scroll);
         } else {
@@ -1216,6 +1229,7 @@ mod tests {
     use anyhow::anyhow;
     use ratatui::crossterm::event::KeyCode;
     use tempfile::TempDir;
+    use tui_input::Input;
 
     use crate::index::{IndexManager, IndexPaths, Scope, SearchFilters, SearchRequest, SortMode};
     use crate::index::writer::StoredSession;
@@ -1294,6 +1308,57 @@ mod tests {
 
         assert_eq!(app.focus, Focus::List);
         assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn escape_from_search_quits_when_query_is_empty() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.focus = Focus::Search;
+
+        app.handle_search_key(crossterm_key(KeyCode::Esc)).unwrap();
+
+        assert!(app.should_quit);
+        assert_eq!(app.focus, Focus::Search);
+    }
+
+    #[test]
+    fn escape_from_search_clears_query_when_query_exists() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.focus = Focus::Search;
+        app.query = Input::default().with_value("alpha".to_owned());
+
+        app.handle_search_key(crossterm_key(KeyCode::Esc)).unwrap();
+
+        assert!(!app.should_quit);
+        assert_eq!(app.query.value(), "");
+        assert_eq!(app.focus, Focus::Search);
+    }
+
+    #[test]
+    fn escape_from_list_quits_when_search_query_is_empty() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.focus = Focus::List;
+
+        app.handle_list_key(crossterm_key(KeyCode::Esc)).unwrap();
+
+        assert!(app.should_quit);
+        assert_eq!(app.focus, Focus::List);
+    }
+
+    #[test]
+    fn escape_from_list_returns_to_search_when_query_exists() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.focus = Focus::List;
+        app.query = Input::default().with_value("alpha".to_owned());
+
+        app.handle_list_key(crossterm_key(KeyCode::Esc)).unwrap();
+
+        assert!(!app.should_quit);
+        assert_eq!(app.focus, Focus::Search);
     }
 
     #[test]

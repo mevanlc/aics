@@ -531,12 +531,12 @@ fn fallback_snippet(session: &StoredSession, query: &str) -> String {
 fn emphasize_terms(text: &str, query: &str) -> String {
     let mut result = text.to_owned();
     for term in extract_highlight_terms(query) {
-        result = replace_case_insensitive(&result, &term, &format!("<b>{term}</b>"));
+        result = replace_case_insensitive(&result, &term);
     }
     result
 }
 
-fn replace_case_insensitive(haystack: &str, needle: &str, replacement: &str) -> String {
+fn replace_case_insensitive(haystack: &str, needle: &str) -> String {
     let lower_haystack = haystack.to_ascii_lowercase();
     let lower_needle = needle.to_ascii_lowercase();
     if lower_needle.is_empty() {
@@ -547,11 +547,32 @@ fn replace_case_insensitive(haystack: &str, needle: &str, replacement: &str) -> 
     let mut index = 0usize;
     while let Some(found) = lower_haystack[index..].find(&lower_needle) {
         let start = index + found;
-        let end = start + needle.len();
+        let end = start + lower_needle.len();
         output.push_str(&haystack[index..start]);
-        output.push_str(replacement);
+        output.push_str("<b>");
+        output.push_str(&haystack[start..end]);
+        output.push_str("</b>");
         index = end;
     }
     output.push_str(&haystack[index..]);
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{emphasize_terms, replace_case_insensitive};
+
+    #[test]
+    fn replace_case_insensitive_preserves_original_match_casing() {
+        let highlighted = replace_case_insensitive("INSTRUCTIONS", "on");
+        assert_eq!(highlighted, "INSTRUCTI<b>ON</b>S");
+    }
+
+    #[test]
+    fn emphasize_terms_preserves_original_match_casing() {
+        let highlighted = emphasize_terms("INSTRUCTIONS You are running on Android.", "running on android");
+        assert!(highlighted.contains("INSTRUCTI<b>ON</b>S"));
+        assert!(highlighted.contains("<b>running</b>"));
+        assert!(highlighted.contains("<b>Android</b>"));
+    }
 }

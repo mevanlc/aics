@@ -18,8 +18,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         .border_style(theme.border_style(focused))
         .title("Preview");
 
+    let query = app.query.value().to_owned();
+    let highlight_query = normalize_highlight_query(&query);
     let text = if let Some(session) = app.selected_preview() {
-        render_session_text(session, theme, None)
+        render_session_text(session, theme, highlight_query)
     } else {
         Text::from(Line::from(Span::styled(
             "Select a session to preview",
@@ -36,9 +38,15 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     frame.render_widget(paragraph, area);
 }
 
-pub fn max_scroll(area: Rect, session: Option<&Session>, theme: &Theme) -> usize {
+pub fn max_scroll(
+    area: Rect,
+    session: Option<&Session>,
+    theme: &Theme,
+    query: &str,
+) -> usize {
+    let highlight_query = normalize_highlight_query(query);
     let text = if let Some(session) = session {
-        render_session_text(session, theme, None)
+        render_session_text(session, theme, highlight_query)
     } else {
         Text::from(Line::default())
     };
@@ -111,6 +119,10 @@ fn message_colors(
     }
 }
 
+fn normalize_highlight_query(query: &str) -> Option<&str> {
+    (!query.is_empty()).then_some(query)
+}
+
 fn scroll_limit_for_text(text: &Text<'_>, area: Rect) -> usize {
     let viewport_height = area.height.saturating_sub(2) as usize;
     let viewport_width = area.width.saturating_sub(2);
@@ -125,7 +137,7 @@ mod tests {
 
     use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionMessage};
 
-    use super::render_session_text;
+    use super::{normalize_highlight_query, render_session_text};
     use crate::tui::theme::Theme;
 
     #[test]
@@ -185,5 +197,11 @@ mod tests {
             .contains(ratatui::style::Modifier::BOLD));
         assert_eq!(alpha.style.fg, Some(theme.text));
         assert_eq!(alpha.style.bg, Some(theme.search_match_bg));
+    }
+
+    #[test]
+    fn normalize_highlight_query_uses_non_empty_search_text() {
+        assert_eq!(normalize_highlight_query("alpha"), Some("alpha"));
+        assert_eq!(normalize_highlight_query(""), None);
     }
 }

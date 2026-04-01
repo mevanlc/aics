@@ -101,7 +101,7 @@ fn explicit_or_operator_broadens_query() -> Result<()> {
         .all(|hit| !hit.snippet_html.contains("<b>OR</b>")));
     assert!(hits
         .iter()
-        .any(|hit| hit.snippet_html.contains("<b>express</b>")));
+        .any(|hit| hit.snippet_html.contains("<b>Express</b>")));
     Ok(())
 }
 
