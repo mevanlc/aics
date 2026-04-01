@@ -104,6 +104,15 @@ pub fn highlight_spans(
     highlight: Style,
 ) -> Vec<Span<'static>> {
     let terms = extract_highlight_terms(query);
+    highlight_spans_with_terms(text, &terms, base, highlight)
+}
+
+pub fn highlight_spans_with_terms(
+    text: &str,
+    terms: &[String],
+    base: Style,
+    highlight: Style,
+) -> Vec<Span<'static>> {
     if terms.is_empty() {
         return vec![Span::styled(text.to_owned(), base)];
     }
@@ -113,7 +122,7 @@ pub fn highlight_spans(
     let mut index = 0usize;
     while index < text.len() {
         let mut matched_len = 0usize;
-        for term in &terms {
+        for term in terms {
             if lower[index..].starts_with(term) {
                 matched_len = matched_len.max(term.len());
             }
@@ -138,6 +147,29 @@ pub fn highlight_spans(
     }
 
     spans
+}
+
+pub fn highlight_styled_spans(
+    spans: Vec<Span<'static>>,
+    terms: &[String],
+    overlay: Style,
+) -> Vec<Span<'static>> {
+    if terms.is_empty() {
+        return spans;
+    }
+
+    let mut highlighted = Vec::new();
+    for span in spans {
+        let style = span.style;
+        highlighted.extend(highlight_spans_with_terms(
+            span.content.as_ref(),
+            terms,
+            style,
+            style.patch(overlay),
+        ));
+    }
+
+    highlighted
 }
 
 pub fn truncate_plain(value: &str, width: usize) -> String {
@@ -189,7 +221,10 @@ mod tests {
 
     use ratatui::text::Text;
 
-    use super::{highlight_spans, parse_highlighted_html, truncate_plain, wrapped_text_height};
+    use super::{
+        highlight_spans, highlight_styled_spans, parse_highlighted_html, truncate_plain,
+        wrapped_text_height,
+    };
 
     #[test]
     fn highlight_parser_handles_literal_angle_brackets() {
@@ -231,6 +266,28 @@ mod tests {
             .collect::<String>();
 
         assert_eq!(rendered, "Ship 👨‍👩‍👧‍👦 plan 漢字");
+    }
+
+    #[test]
+    fn highlight_styled_spans_preserves_existing_modifiers() {
+        let spans = highlight_styled_spans(
+            vec![ratatui::text::Span::styled(
+                "alpha beta",
+                Style::default().add_modifier(ratatui::style::Modifier::ITALIC),
+            )],
+            &[String::from("alpha")],
+            Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+        );
+
+        assert_eq!(spans[0].content.as_ref(), "alpha");
+        assert!(spans[0]
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::ITALIC));
+        assert!(spans[0]
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD));
     }
 
     #[test]

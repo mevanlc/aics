@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::parse::Session;
 use crate::search_query::extract_highlight_terms;
-use crate::tui::preview::render_session_text;
+use crate::tui::preview::{render_message_body, render_session_text};
 use crate::tui::theme::Theme;
 use crate::tui::util::wrapped_text_height;
 
@@ -61,6 +61,7 @@ impl ViewerState {
         key: KeyEvent,
         area: Rect,
         session: Option<&Session>,
+        theme: &Theme,
     ) -> ViewerOutcome {
         if self.editing_search {
             match key.code {
@@ -86,11 +87,11 @@ impl ViewerState {
                     ViewerOutcome::Stay
                 }
                 KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.jump_to_match(MatchDirection::Next, area, session);
+                    self.jump_to_match(MatchDirection::Next, area, session, theme);
                     ViewerOutcome::Stay
                 }
                 KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.jump_to_match(MatchDirection::Previous, area, session);
+                    self.jump_to_match(MatchDirection::Previous, area, session, theme);
                     ViewerOutcome::Stay
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -211,7 +212,13 @@ impl ViewerState {
         ViewerOutcome::Stay
     }
 
-    fn jump_to_match(&mut self, direction: MatchDirection, area: Rect, session: Option<&Session>) {
+    fn jump_to_match(
+        &mut self,
+        direction: MatchDirection,
+        area: Rect,
+        session: Option<&Session>,
+        theme: &Theme,
+    ) {
         let Some(session) = session else {
             self.active_match = None;
             return;
@@ -219,7 +226,7 @@ impl ViewerState {
 
         let query = self.search.value();
         let viewport_width = Self::body_area(area).width.saturating_sub(2);
-        let matches = collect_match_rows(session, query, viewport_width);
+        let matches = collect_match_rows(session, theme, query, viewport_width);
         if matches.is_empty() {
             self.active_match = None;
             return;
@@ -243,7 +250,7 @@ fn split_viewer(area: Rect) -> [Rect; 2] {
     [chunks[0], chunks[1]]
 }
 
-fn collect_match_rows(session: &Session, query: &str, width: u16) -> Vec<usize> {
+fn collect_match_rows(session: &Session, theme: &Theme, query: &str, width: u16) -> Vec<usize> {
     let terms = extract_highlight_terms(query);
     if terms.is_empty() || width == 0 {
         return Vec::new();
@@ -255,14 +262,26 @@ fn collect_match_rows(session: &Session, query: &str, width: u16) -> Vec<usize> 
 
     for message in &session.messages {
         row_offset += 1;
-        for content_line in message.content.lines() {
-            for relative_row in collect_line_match_rows(content_line, width, &terms) {
+        let rendered = render_message_body(
+            session.agent,
+            message.role,
+            message.content.as_str(),
+            theme,
+            Some(query),
+        );
+        for line in &rendered.lines {
+            let content_line = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            for relative_row in collect_line_match_rows(&content_line, width, &terms) {
                 let absolute_row = row_offset + relative_row;
                 if rows.last().copied() != Some(absolute_row) {
                     rows.push(absolute_row);
                 }
             }
-            row_offset += wrapped_line_height(content_line, width);
+            row_offset += wrapped_rendered_line_height(line, width);
         }
         row_offset += 1;
     }
@@ -315,6 +334,15 @@ fn wrapped_line_height(line: &str, width: usize) -> usize {
     }
 }
 
+fn wrapped_rendered_line_height(line: &Line<'_>, width: usize) -> usize {
+    let content = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    wrapped_line_height(&content, width)
+}
+
 fn next_match_index(matches: &[usize], active_match: Option<usize>, scroll: usize) -> usize {
     if let Some(index) = active_match.filter(|index| *index < matches.len()) {
         return (index + 1) % matches.len();
@@ -348,6 +376,7 @@ mod tests {
     use tui_input::Input;
 
     use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionMessage};
+    use crate::tui::theme::Theme;
 
     use super::{
         collect_match_rows, next_match_index, previous_match_index, ViewerOutcome, ViewerState,
@@ -356,9 +385,17 @@ mod tests {
     #[test]
     fn collect_match_rows_tracks_wrapped_content_lines() {
         let session = sample_session();
-        let rows = collect_match_rows(&session, "alpha", 12);
+        let rows = collect_match_rows(&session, &Theme::default(), "alpha", 12);
 
         assert_eq!(rows, vec![1, 2, 6]);
+    }
+
+    #[test]
+    fn collect_match_rows_follow_rendered_markdown_instead_of_raw_source() {
+        let session = markdown_code_session();
+        let rows = collect_match_rows(&session, &Theme::default(), "alpha", 80);
+
+        assert_eq!(rows, vec![1]);
     }
 
     #[test]
@@ -392,6 +429,7 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             area,
             Some(&session),
+            &Theme::default(),
         );
         assert_eq!(outcome, ViewerOutcome::Stay);
         assert!(state.search_query().is_empty());
@@ -401,6 +439,7 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             area,
             Some(&session),
+            &Theme::default(),
         );
         assert_eq!(outcome, ViewerOutcome::Close);
     }
@@ -417,6 +456,7 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             area,
             Some(&session),
+            &Theme::default(),
         );
         assert_eq!(outcome, ViewerOutcome::Stay);
         assert!(state.search_query().is_empty());
@@ -433,15 +473,15 @@ mod tests {
         let next = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
         let previous = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
 
-        state.handle_key(next, area, Some(&session));
+        state.handle_key(next, area, Some(&session), &Theme::default());
         assert_eq!(state.active_match, Some(0));
         assert_eq!(state.scroll, 1);
 
-        state.handle_key(next, area, Some(&session));
+        state.handle_key(next, area, Some(&session), &Theme::default());
         assert_eq!(state.active_match, Some(1));
         assert_eq!(state.scroll, 4);
 
-        state.handle_key(previous, area, Some(&session));
+        state.handle_key(previous, area, Some(&session), &Theme::default());
         assert_eq!(state.active_match, Some(0));
         assert_eq!(state.scroll, 1);
     }
@@ -479,6 +519,35 @@ mod tests {
                 },
             ],
             content: "alpha beta gamma delta alpha\nomega alpha".to_owned(),
+        }
+    }
+
+    fn markdown_code_session() -> Session {
+        Session {
+            session_id: "session-md".to_owned(),
+            agent: Agent::Claude,
+            project: "/tmp/demo".to_owned(),
+            branch: Some("main".to_owned()),
+            cwd: Some("/tmp/demo".to_owned()),
+            created: Some(Utc::now()),
+            modified: Some(Utc::now()),
+            modified_ts: 0,
+            lines: 3,
+            file_path: PathBuf::from("/tmp/demo/session-md.jsonl"),
+            first_msg_role: Some(MessageRole::Assistant),
+            first_msg_content: "```rust\nfn alpha() {}\n```".to_owned(),
+            last_msg_role: Some(MessageRole::Assistant),
+            last_msg_content: "```rust\nfn alpha() {}\n```".to_owned(),
+            first_user_msg_content: String::new(),
+            derivation_type: DerivationType::Original,
+            is_sidechain: false,
+            custom_title: Some("demo markdown".to_owned()),
+            messages: vec![SessionMessage {
+                role: MessageRole::Assistant,
+                content: "```rust\nfn alpha() {}\n```".to_owned(),
+                timestamp: Some(Utc::now()),
+            }],
+            content: "```rust\nfn alpha() {}\n```".to_owned(),
         }
     }
 }

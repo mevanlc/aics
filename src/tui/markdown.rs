@@ -1,0 +1,512 @@
+use std::sync::LazyLock;
+
+use pulldown_cmark::{
+    CodeBlockKind, Event, HeadingLevel, Options as ParseOptions, Parser, Tag, TagEnd,
+};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Color as SyntectColor, FontStyle, ThemeSet};
+use syntect::parsing::SyntaxSet;
+use syntect::util::LinesWithEndings;
+
+use crate::search_query::extract_highlight_terms;
+use crate::tui::theme::Theme;
+use crate::tui::util::{highlight_spans_with_terms, highlight_styled_spans};
+
+static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+const SYNTECT_THEME: &str = "base16-ocean.dark";
+
+pub fn render_markdown_message(
+    content: &str,
+    theme: &Theme,
+    base_style: Style,
+    highlight_query: Option<&str>,
+) -> Text<'static> {
+    let mut options = ParseOptions::empty();
+    options.insert(ParseOptions::ENABLE_STRIKETHROUGH);
+    options.insert(ParseOptions::ENABLE_TASKLISTS);
+    options.insert(ParseOptions::ENABLE_SUPERSCRIPT);
+    options.insert(ParseOptions::ENABLE_SUBSCRIPT);
+
+    let parser = Parser::new_ext(content, options);
+    MarkdownRenderer::new(theme, base_style, highlight_query).render(parser)
+}
+
+struct MarkdownRenderer<'a> {
+    theme: &'a Theme,
+    base_style: Style,
+    search_highlight: Style,
+    terms: Vec<String>,
+    lines: Vec<Line<'static>>,
+    current_line: Vec<Span<'static>>,
+    inline_styles: Vec<Style>,
+    list_stack: Vec<ListState>,
+    blockquote_depth: usize,
+    code_block: Option<CodeBlockState>,
+}
+
+#[derive(Clone, Copy)]
+struct ListState {
+    next_index: Option<u64>,
+}
+
+struct CodeBlockState {
+    highlighter: Option<HighlightLines<'static>>,
+    base_style: Style,
+}
+
+impl<'a> MarkdownRenderer<'a> {
+    fn new(theme: &'a Theme, base_style: Style, highlight_query: Option<&str>) -> Self {
+        Self {
+            theme,
+            base_style,
+            search_highlight: base_style.patch(theme.highlight_style()),
+            terms: extract_highlight_terms(highlight_query.unwrap_or_default()),
+            lines: Vec::new(),
+            current_line: Vec::new(),
+            inline_styles: vec![base_style],
+            list_stack: Vec::new(),
+            blockquote_depth: 0,
+            code_block: None,
+        }
+    }
+
+    fn render<'b>(mut self, parser: Parser<'b>) -> Text<'static> {
+        for event in parser {
+            self.handle_event(event);
+        }
+
+        self.finish_line();
+        if self.lines.last().is_some_and(|line| line.spans.is_empty()) {
+            self.lines.pop();
+        }
+
+        Text::from(self.lines)
+    }
+
+    fn handle_event<'b>(&mut self, event: Event<'b>) {
+        if self.code_block.is_some() {
+            match event {
+                Event::Text(text) => self.push_code_text(text.as_ref()),
+                Event::End(TagEnd::CodeBlock) => {
+                    self.code_block = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match event {
+            Event::Start(tag) => self.start_tag(tag),
+            Event::End(tag) => self.end_tag(tag),
+            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
+                self.push_text(text.as_ref(), self.current_style())
+            }
+            Event::Code(code) => self.push_text(code.as_ref(), self.inline_code_style()),
+            Event::SoftBreak | Event::HardBreak => self.finish_line(),
+            Event::Rule => self.push_rule(),
+            Event::TaskListMarker(checked) => {
+                let marker = if checked { "[x] " } else { "[ ] " };
+                self.push_text(marker, self.current_style());
+            }
+            Event::FootnoteReference(label) => {
+                let text = format!("[^{label}]");
+                self.push_text(&text, self.base_style.add_modifier(Modifier::DIM));
+            }
+            Event::InlineMath(text) | Event::DisplayMath(text) => {
+                self.push_text(text.as_ref(), self.inline_code_style());
+            }
+        }
+    }
+
+    fn start_tag<'b>(&mut self, tag: Tag<'b>) {
+        match tag {
+            Tag::Paragraph => self.start_block(),
+            Tag::Heading { level, .. } => {
+                self.start_block();
+                self.inline_styles.push(self.heading_style(level));
+            }
+            Tag::BlockQuote(_) => {
+                self.start_block();
+                self.blockquote_depth += 1;
+            }
+            Tag::CodeBlock(kind) => self.start_code_block(kind),
+            Tag::List(start_index) => self.list_stack.push(ListState {
+                next_index: start_index,
+            }),
+            Tag::Item => self.start_item(),
+            Tag::Emphasis => {
+                self.push_inline_style(Style::default().add_modifier(Modifier::ITALIC))
+            }
+            Tag::Strong => self.push_inline_style(Style::default().add_modifier(Modifier::BOLD)),
+            Tag::Strikethrough => {
+                self.push_inline_style(Style::default().add_modifier(Modifier::CROSSED_OUT))
+            }
+            Tag::Link { .. } => self.push_inline_style(Style::default().fg(self.theme.accent)),
+            Tag::Image { .. } => {}
+            Tag::MetadataBlock(_) => {}
+            Tag::Table(_) | Tag::TableHead | Tag::TableRow | Tag::TableCell => {}
+            Tag::FootnoteDefinition(_) => {}
+            Tag::DefinitionList | Tag::DefinitionListTitle | Tag::DefinitionListDefinition => {}
+            Tag::HtmlBlock => self.start_block(),
+            Tag::Superscript => {
+                self.push_inline_style(Style::default().add_modifier(Modifier::DIM))
+            }
+            Tag::Subscript => self.push_inline_style(Style::default().add_modifier(Modifier::DIM)),
+        }
+    }
+
+    fn end_tag(&mut self, tag: TagEnd) {
+        match tag {
+            TagEnd::Paragraph | TagEnd::HtmlBlock => self.finish_line(),
+            TagEnd::Heading(_) => {
+                self.pop_inline_style();
+                self.finish_line();
+            }
+            TagEnd::BlockQuote(_) => {
+                self.blockquote_depth = self.blockquote_depth.saturating_sub(1);
+                self.finish_line();
+            }
+            TagEnd::CodeBlock => {}
+            TagEnd::List(_) => {
+                self.list_stack.pop();
+                self.finish_line();
+            }
+            TagEnd::Item => self.finish_line(),
+            TagEnd::Emphasis
+            | TagEnd::Strong
+            | TagEnd::Strikethrough
+            | TagEnd::Link
+            | TagEnd::Superscript
+            | TagEnd::Subscript => self.pop_inline_style(),
+            TagEnd::Image => {}
+            TagEnd::MetadataBlock(_) => {}
+            TagEnd::Table | TagEnd::TableHead | TagEnd::TableRow | TagEnd::TableCell => {
+                self.finish_line()
+            }
+            TagEnd::FootnoteDefinition => self.finish_line(),
+            TagEnd::DefinitionList
+            | TagEnd::DefinitionListTitle
+            | TagEnd::DefinitionListDefinition => self.finish_line(),
+        }
+    }
+
+    fn start_block(&mut self) {
+        self.finish_line();
+        if !self.lines.is_empty() && !self.lines.last().is_some_and(|line| line.spans.is_empty()) {
+            self.lines.push(Line::default());
+        }
+    }
+
+    fn start_item(&mut self) {
+        self.finish_line();
+        let indent = "  ".repeat(self.list_stack.len().saturating_sub(1));
+        let marker = if let Some(list) = self.list_stack.last_mut() {
+            if let Some(index) = list.next_index {
+                let marker = format!("{index}. ");
+                list.next_index = Some(index + 1);
+                marker
+            } else {
+                "• ".to_owned()
+            }
+        } else {
+            "• ".to_owned()
+        };
+
+        self.push_text(
+            &format!("{indent}{marker}"),
+            self.base_style.add_modifier(Modifier::BOLD),
+        );
+    }
+
+    fn start_code_block<'b>(&mut self, kind: CodeBlockKind<'b>) {
+        self.start_block();
+        let language = match kind {
+            CodeBlockKind::Indented => None,
+            CodeBlockKind::Fenced(lang) => normalize_code_fence_lang(lang.as_ref()),
+        };
+
+        let highlighter = language.as_deref().and_then(create_highlighter);
+        self.code_block = Some(CodeBlockState {
+            highlighter,
+            base_style: self.code_block_style(),
+        });
+    }
+
+    fn push_text(&mut self, text: &str, style: Style) {
+        if text.is_empty() {
+            return;
+        }
+
+        self.ensure_line_prefix();
+        self.current_line.extend(highlight_spans_with_terms(
+            text,
+            &self.terms,
+            style,
+            style.patch(self.search_highlight),
+        ));
+    }
+
+    fn push_code_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        let Some(code_block) = self.code_block.as_mut() else {
+            return;
+        };
+
+        for raw_line in LinesWithEndings::from(text) {
+            let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+            let spans = if let Some(highlighter) = &mut code_block.highlighter {
+                match highlighter.highlight_line(raw_line, &SYNTAX_SET) {
+                    Ok(segments) => {
+                        let mut spans = segments
+                            .into_iter()
+                            .map(|(style, text)| {
+                                Span::styled(
+                                    text.to_owned(),
+                                    syntect_style_to_ratatui(style, code_block.base_style),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        trim_trailing_newline(&mut spans);
+                        highlight_styled_spans(spans, &self.terms, self.search_highlight)
+                    }
+                    Err(_) => highlight_spans_with_terms(
+                        line,
+                        &self.terms,
+                        code_block.base_style,
+                        code_block.base_style.patch(self.search_highlight),
+                    ),
+                }
+            } else {
+                highlight_spans_with_terms(
+                    line,
+                    &self.terms,
+                    code_block.base_style,
+                    code_block.base_style.patch(self.search_highlight),
+                )
+            };
+
+            self.lines.push(Line::from(spans));
+        }
+    }
+
+    fn push_rule(&mut self) {
+        self.start_block();
+        self.lines.push(Line::from(Span::styled(
+            "────────────────────────",
+            self.base_style.fg(self.theme.muted),
+        )));
+    }
+
+    fn finish_line(&mut self) {
+        if self.current_line.is_empty() {
+            return;
+        }
+
+        self.lines
+            .push(Line::from(std::mem::take(&mut self.current_line)));
+    }
+
+    fn ensure_line_prefix(&mut self) {
+        if !self.current_line.is_empty() || self.blockquote_depth == 0 {
+            return;
+        }
+
+        let prefix = "> ".repeat(self.blockquote_depth);
+        self.current_line.push(Span::styled(
+            prefix,
+            self.base_style
+                .fg(self.theme.muted)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    fn current_style(&self) -> Style {
+        self.inline_styles
+            .last()
+            .copied()
+            .unwrap_or(self.base_style)
+    }
+
+    fn push_inline_style(&mut self, style: Style) {
+        self.inline_styles.push(self.current_style().patch(style));
+    }
+
+    fn pop_inline_style(&mut self) {
+        if self.inline_styles.len() > 1 {
+            self.inline_styles.pop();
+        }
+    }
+
+    fn inline_code_style(&self) -> Style {
+        self.base_style
+            .fg(self.theme.highlight)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    fn code_block_style(&self) -> Style {
+        self.base_style
+            .fg(self.theme.text)
+            .add_modifier(Modifier::DIM)
+    }
+
+    fn heading_style(&self, level: HeadingLevel) -> Style {
+        let color = match level {
+            HeadingLevel::H1 | HeadingLevel::H2 => self.theme.accent,
+            HeadingLevel::H3 | HeadingLevel::H4 => self.theme.highlight,
+            HeadingLevel::H5 | HeadingLevel::H6 => self.theme.text,
+        };
+
+        self.base_style.fg(color).add_modifier(Modifier::BOLD)
+    }
+}
+
+fn normalize_code_fence_lang(lang: &str) -> Option<String> {
+    let token = lang.split_whitespace().next()?.trim().to_ascii_lowercase();
+    if token.is_empty() {
+        return None;
+    }
+
+    let normalized = match token.as_str() {
+        "rs" => "rust",
+        "js" => "javascript",
+        "ts" => "typescript",
+        "sh" => "bash",
+        other => other,
+    };
+    Some(normalized.to_owned())
+}
+
+fn create_highlighter(language: &str) -> Option<HighlightLines<'static>> {
+    let syntax = SYNTAX_SET.find_syntax_by_token(language)?;
+    let theme = THEME_SET.themes.get(SYNTECT_THEME)?;
+    Some(HighlightLines::new(syntax, theme))
+}
+
+fn syntect_style_to_ratatui(style: syntect::highlighting::Style, base: Style) -> Style {
+    let mut rendered = base.fg(to_ratatui_color(style.foreground));
+    if style.font_style.contains(FontStyle::BOLD) {
+        rendered = rendered.add_modifier(Modifier::BOLD);
+    }
+    if style.font_style.contains(FontStyle::ITALIC) {
+        rendered = rendered.add_modifier(Modifier::ITALIC);
+    }
+    if style.font_style.contains(FontStyle::UNDERLINE) {
+        rendered = rendered.add_modifier(Modifier::UNDERLINED);
+    }
+    rendered
+}
+
+fn to_ratatui_color(color: SyntectColor) -> Color {
+    Color::Rgb(color.r, color.g, color.b)
+}
+
+fn trim_trailing_newline(spans: &mut Vec<Span<'static>>) {
+    if let Some(last) = spans.last_mut() {
+        if let Some(stripped) = last.content.strip_suffix('\n') {
+            last.content = stripped.to_owned().into();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::style::{Modifier, Style};
+
+    use super::render_markdown_message;
+    use crate::tui::theme::Theme;
+
+    #[test]
+    fn renders_basic_markdown_without_literal_markup() {
+        let theme = Theme::default();
+        let base = Style::default().fg(theme.text).bg(theme.bubble_user);
+        let text = render_markdown_message(
+            "# Title\n\nSome **bold** and _italic_ text.",
+            &theme,
+            base,
+            None,
+        );
+
+        let rendered = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, vec!["Title", "", "Some bold and italic text."]);
+
+        let body_line = &text.lines[2];
+        assert!(body_line.spans.iter().any(|span| {
+            span.content.as_ref() == "bold" && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+        assert!(body_line.spans.iter().any(|span| {
+            span.content.as_ref() == "italic" && span.style.add_modifier.contains(Modifier::ITALIC)
+        }));
+    }
+
+    #[test]
+    fn fenced_code_blocks_render_code_without_fence_markers() {
+        let theme = Theme::default();
+        let base = Style::default().fg(theme.text).bg(theme.bubble_claude);
+        let text = render_markdown_message("```rust\nfn alpha() {}\n```", &theme, base, None);
+
+        let rendered = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, vec!["fn alpha() {}"]);
+        assert!(text.lines[0].spans.len() > 1);
+    }
+
+    #[test]
+    fn query_highlighting_preserves_existing_markdown_modifiers() {
+        let theme = Theme::default();
+        let base = Style::default().fg(theme.text).bg(theme.bubble_user);
+        let text = render_markdown_message("**alpha** beta", &theme, base, Some("alpha"));
+
+        let alpha = text.lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "alpha")
+            .expect("alpha span");
+
+        assert!(alpha.style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(alpha.style.fg, Some(theme.highlight));
+        assert_eq!(alpha.style.bg, Some(theme.bubble_user));
+    }
+
+    #[test]
+    fn unknown_fence_language_falls_back_to_plain_code_styling() {
+        let theme = Theme::default();
+        let base = Style::default().fg(theme.text).bg(theme.bubble_claude);
+        let text =
+            render_markdown_message("```not-a-lang\nalpha\n```", &theme, base, Some("alpha"));
+
+        assert_eq!(text.lines.len(), 1);
+        let alpha = text.lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "alpha")
+            .expect("alpha span");
+
+        assert_eq!(alpha.style.fg, Some(theme.highlight));
+        assert_eq!(alpha.style.bg, Some(theme.bubble_claude));
+    }
+}

@@ -207,43 +207,46 @@ impl App {
     fn run(&mut self) -> Result<AppExit> {
         let mut terminal = setup_terminal()?;
         install_panic_hook();
-        self.dispatch_search()?;
-        let mut needs_redraw = true;
+        let run_result = (|| -> Result<AppExit> {
+            self.dispatch_search()?;
+            let mut needs_redraw = true;
 
-        while !self.should_quit {
-            if self.maybe_dispatch_search()? {
-                needs_redraw = true;
-            }
-            if self.collect_search_responses()? {
-                needs_redraw = true;
-            }
+            while !self.should_quit {
+                if self.maybe_dispatch_search()? {
+                    needs_redraw = true;
+                }
+                if self.collect_search_responses()? {
+                    needs_redraw = true;
+                }
 
-            if needs_redraw {
-                terminal.draw(|frame| self.draw(frame))?;
-                needs_redraw = false;
-            }
+                if needs_redraw {
+                    terminal.draw(|frame| self.draw(frame))?;
+                    needs_redraw = false;
+                }
 
-            if event::poll(self.poll_timeout())? {
-                match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        self.handle_key(key)?;
-                        needs_redraw = true;
+                if event::poll(self.poll_timeout())? {
+                    match event::read()? {
+                        Event::Key(key) if key.kind == KeyEventKind::Press => {
+                            self.handle_key(key)?;
+                            needs_redraw = true;
+                        }
+                        Event::Mouse(mouse) => {
+                            self.handle_mouse(mouse)?;
+                            needs_redraw = true;
+                        }
+                        Event::Resize(_, _) => needs_redraw = true,
+                        _ => {}
                     }
-                    Event::Mouse(mouse) => {
-                        self.handle_mouse(mouse)?;
-                        needs_redraw = true;
-                    }
-                    Event::Resize(_, _) => needs_redraw = true,
-                    _ => {}
                 }
             }
-        }
 
-        restore_terminal(&mut terminal)?;
-        if let Some(command) = self.handoff.take() {
-            return Ok(AppExit::Handoff(command));
-        }
-        Ok(AppExit::Normal)
+            if let Some(command) = self.handoff.take() {
+                return Ok(AppExit::Handoff(command));
+            }
+            Ok(AppExit::Normal)
+        })();
+
+        finalize_run_result(run_result, restore_terminal(&mut terminal))
     }
 
     pub fn scope_label(&self) -> String {
@@ -489,11 +492,13 @@ impl App {
                 ActionOutcome::Close => self.overlay = Overlay::None,
                 ActionOutcome::Run(action) => {
                     self.overlay = Overlay::None;
-                    self.run_session_action(action)?;
+                    if let Err(error) = self.run_session_action(action) {
+                        self.status_message = Some(format!("{error:#}"));
+                    }
                 }
             },
             Overlay::Viewer(state) => {
-                match state.handle_key(key, viewer_area, viewer_session.as_ref()) {
+                match state.handle_key(key, viewer_area, viewer_session.as_ref(), &self.theme) {
                     ViewerOutcome::Stay => {}
                     ViewerOutcome::Close => self.overlay = Overlay::None,
                 }
@@ -510,7 +515,9 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('n') => self.overlay = Overlay::None,
                 KeyCode::Char('y') | KeyCode::Enter => {
                     self.overlay = Overlay::None;
-                    self.delete_selected_session()?;
+                    if let Err(error) = self.delete_selected_session() {
+                        self.status_message = Some(format!("{error:#}"));
+                    }
                 }
                 _ => {}
             },
@@ -878,8 +885,14 @@ impl App {
         let Some(hit) = self.selected_hit() else {
             return Ok(());
         };
-        fs::remove_file(&hit.session.file_path)
-            .with_context(|| format!("failed to delete {}", hit.session.file_path.display()))?;
+        let file_already_missing = match fs::remove_file(&hit.session.file_path) {
+            Ok(()) => false,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to delete {}", hit.session.file_path.display()));
+            }
+        };
         self.results
             .retain(|result| result.session.file_path != hit.session.file_path);
         if self.selected >= self.results.len() {
@@ -889,14 +902,28 @@ impl App {
         self.preview_cache.remove(&hit.session.file_path);
         match self.manager.sync_best_effort(false)? {
             SyncOutcome::Completed(_) => {
-                self.status_message = Some(format!("deleted {}", hit.session.file_path.display()));
+                self.status_message = Some(if file_already_missing {
+                    format!(
+                        "removed missing session {}",
+                        hit.session.file_path.display()
+                    )
+                } else {
+                    format!("deleted {}", hit.session.file_path.display())
+                });
                 self.trigger_search_now()?;
             }
             SyncOutcome::Busy => {
-                self.status_message = Some(format!(
-                    "deleted {} · index refresh deferred",
-                    hit.session.file_path.display()
-                ));
+                self.status_message = Some(if file_already_missing {
+                    format!(
+                        "removed missing session {} · index refresh deferred",
+                        hit.session.file_path.display()
+                    )
+                } else {
+                    format!(
+                        "deleted {} · index refresh deferred",
+                        hit.session.file_path.display()
+                    )
+                });
             }
         }
         Ok(())
@@ -1025,6 +1052,17 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
     )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+fn finalize_run_result(run_result: Result<AppExit>, restore_result: Result<()>) -> Result<AppExit> {
+    match (run_result, restore_result) {
+        (Ok(exit), Ok(())) => Ok(exit),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(restore_error)) => Err(restore_error),
+        (Err(error), Err(restore_error)) => Err(error).context(format!(
+            "also failed to restore terminal state: {restore_error:#}"
+        )),
+    }
 }
 
 fn install_panic_hook() {
@@ -1175,6 +1213,7 @@ mod tests {
     use std::sync::mpsc;
     use std::path::PathBuf;
 
+    use anyhow::anyhow;
     use ratatui::crossterm::event::KeyCode;
     use tempfile::TempDir;
 
@@ -1184,7 +1223,10 @@ mod tests {
     use crate::parse::{Agent, DerivationType};
     use crate::settings::Settings;
 
-    use super::{build_fork_command, build_resume_command, App, Focus, SearchWorker};
+    use super::{
+        build_fork_command, build_resume_command, finalize_run_result, App, AppExit, Focus,
+        SearchWorker,
+    };
 
     #[test]
     fn builds_resume_commands_for_both_agents() {
@@ -1254,10 +1296,69 @@ mod tests {
         assert_eq!(app.selected, 0);
     }
 
+    #[test]
+    fn deleting_missing_session_file_removes_stale_result_without_error() {
+        let temp = TempDir::new().unwrap();
+        let missing_path = temp.path().join("missing-session.jsonl");
+        let mut app = test_app();
+        app.results = vec![sample_hit_with_path(Agent::Claude, missing_path.clone())];
+        app.selected = 0;
+
+        app.delete_selected_session().unwrap();
+
+        assert!(app.results.is_empty());
+        assert_eq!(app.selected_index(), None);
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("removed missing session")));
+    }
+
+    #[test]
+    fn confirm_delete_keeps_tui_running_when_delete_fails() {
+        let temp = TempDir::new().unwrap();
+        let mut app = test_app();
+        app.results = vec![sample_hit_with_path(
+            Agent::Claude,
+            temp.path().to_path_buf(),
+        )];
+        app.overlay = super::Overlay::ConfirmDelete;
+
+        app.handle_overlay_key(crossterm_key(KeyCode::Char('y')))
+            .unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::None));
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("failed to delete")));
+    }
+
+    #[test]
+    fn finalize_run_result_preserves_original_error_and_mentions_restore_failure() {
+        let result = finalize_run_result(
+            Err(anyhow!("event loop failed")),
+            Err(anyhow!("restore failed")),
+        );
+
+        let error = result.expect_err("combined failure");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("event loop failed"));
+        assert!(rendered.contains("also failed to restore terminal state"));
+        assert!(rendered.contains("restore failed"));
+    }
+
+    #[test]
+    fn finalize_run_result_returns_success_when_both_steps_succeed() {
+        let result = finalize_run_result(Ok(AppExit::Normal), Ok(()));
+        assert!(matches!(result, Ok(AppExit::Normal)));
+    }
+
     fn test_app() -> App {
         let temp = TempDir::new().unwrap();
         let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path()));
-        let (request_tx, _request_rx) = mpsc::channel();
+        let (request_tx, request_rx) = mpsc::channel();
+        std::thread::spawn(move || while request_rx.recv().is_ok() {});
         let (_response_tx, response_rx) = mpsc::channel();
         let worker = SearchWorker {
             request_tx,
@@ -1283,6 +1384,10 @@ mod tests {
     }
 
     fn sample_hit(agent: Agent) -> SearchHit {
+        sample_hit_with_path(agent, PathBuf::from("/tmp/demo/session.jsonl"))
+    }
+
+    fn sample_hit_with_path(agent: Agent, file_path: PathBuf) -> SearchHit {
         SearchHit {
             session: StoredSession {
                 session_id: "session-123".to_owned(),
@@ -1292,7 +1397,7 @@ mod tests {
                 cwd: Some("/tmp/demo".to_owned()),
                 modified_ts: 0,
                 lines: 1,
-                file_path: PathBuf::from("/tmp/demo/session.jsonl"),
+                file_path,
                 first_msg_role: None,
                 first_msg_content: String::new(),
                 last_msg_role: None,
