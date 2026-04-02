@@ -13,7 +13,7 @@ use crate::parse::Session;
 use crate::search_query::extract_highlight_terms;
 use crate::tui::preview::{render_message_body, render_session_text};
 use crate::tui::theme::Theme;
-use crate::tui::util::wrapped_text_height;
+use crate::tui::util::{session_display_title, wrapped_text_height};
 
 const VIEWER_PAGE_STEP: usize = 12;
 const VIEWER_FOOTER_HEIGHT: u16 = 4;
@@ -129,10 +129,11 @@ impl ViewerState {
         frame.render_widget(Clear, area);
         let chunks = split_viewer(area);
 
-        let title = session
-            .custom_title
-            .clone()
-            .unwrap_or_else(|| session.project.clone());
+        let title = session_display_title(
+            session.agent,
+            &session.project,
+            session.custom_title.as_deref(),
+        );
         let text = render_session_text(
             session,
             theme,

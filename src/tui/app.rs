@@ -38,7 +38,7 @@ use crate::tui::filter::{FilterModalState, FilterOutcome};
 use crate::tui::profile;
 use crate::tui::settings::{SettingsModalState, SettingsOutcome};
 use crate::tui::theme::Theme;
-use crate::tui::util::wrapped_text_height;
+use crate::tui::util::{session_display_title, wrapped_text_height};
 use crate::tui::viewer::{ViewerOutcome, ViewerState};
 use crate::tui::{layout, list, preview, search};
 
@@ -1027,10 +1027,11 @@ impl App {
         let title = hit
             .as_ref()
             .map(|hit| {
-                hit.session
-                    .custom_title
-                    .clone()
-                    .unwrap_or_else(|| hit.session.project.clone())
+                session_display_title(
+                    hit.session.agent,
+                    &hit.session.project,
+                    hit.session.custom_title.as_deref(),
+                )
             })
             .unwrap_or_else(|| "selected session".to_owned());
         let paragraph = Paragraph::new(vec![
