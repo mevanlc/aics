@@ -88,22 +88,22 @@ impl Theme {
     /// more cinematic contrast than the default terminal-style themes.
     pub fn sunset() -> Self {
         Self {
-            border: Color::Rgb(94, 78, 112),
+            border: Color::Rgb(88, 80, 96),
             focus_border: Color::Rgb(255, 122, 89),
             text: Color::Rgb(248, 239, 234),
-            muted: Color::Rgb(175, 155, 171),
+            muted: Color::Rgb(164, 155, 162),
             accent: Color::Rgb(255, 122, 89),
-            selection: Color::Rgb(81, 46, 86),
+            selection: Color::Rgb(63, 52, 68),
             highlight: Color::Rgb(255, 209, 102),
             search_match_bg: Color::Rgb(122, 78, 24),
-            list_header_bg: Color::Rgb(54, 32, 61),
-            list_body_bg: Color::Rgb(29, 21, 38),
+            list_header_bg: Color::Rgb(43, 36, 49),
+            list_body_bg: Color::Rgb(26, 23, 31),
             claude: Color::Rgb(255, 170, 110),
             codex: Color::Rgb(108, 210, 196),
-            bubble_user: Color::Rgb(63, 35, 74),
+            bubble_user: Color::Rgb(49, 40, 57),
             bubble_claude: Color::Rgb(87, 49, 31),
             bubble_codex: Color::Rgb(24, 73, 73),
-            bubble_system: Color::Rgb(49, 39, 60),
+            bubble_system: Color::Rgb(43, 38, 49),
             bubble_summary: Color::Rgb(92, 67, 31),
         }
     }

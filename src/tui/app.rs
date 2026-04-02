@@ -32,7 +32,7 @@ use crate::index::{
     SyncOutcome,
 };
 use crate::parse::{parse_session_file, Session};
-use crate::settings::Settings;
+use crate::settings::{Settings, ThemeName};
 use crate::tui::actions::{ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::filter::{FilterModalState, FilterOutcome};
 use crate::tui::profile;
@@ -77,6 +77,7 @@ struct PreviewRenderCache {
     path: PathBuf,
     query: String,
     width: u16,
+    theme_name: ThemeName,
     wrapped_height: Option<usize>,
     text: Text<'static>,
 }
@@ -331,11 +332,14 @@ impl App {
         let path = hit.session.file_path.clone();
         let query = self.committed_query.clone();
         let width = area.width.saturating_sub(2);
+        let theme_name = self.current_frame_theme_name();
 
-        let cache_miss = self
-            .preview_render_cache
-            .as_ref()
-            .is_none_or(|cache| cache.path != path || cache.query != query || cache.width != width);
+        let cache_miss = self.preview_render_cache.as_ref().is_none_or(|cache| {
+            cache.path != path
+                || cache.query != query
+                || cache.width != width
+                || cache.theme_name != theme_name
+        });
         if cache_miss {
             profile::event("preview.cache.miss");
             let highlight_query = (!query.is_empty()).then_some(query.as_str());
@@ -347,6 +351,7 @@ impl App {
                 path: path.clone(),
                 query: query.clone(),
                 width,
+                theme_name,
                 wrapped_height: None,
                 text,
             });
@@ -394,7 +399,7 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) {
         let _draw_profile = profile::scope("app.draw");
-        let theme = self.theme.clone();
+        let theme = self.current_frame_theme();
         frame.render_widget(Clear, frame.area());
         self.last_frame_area = frame.area();
         let area = frame.area();
@@ -451,11 +456,7 @@ impl App {
                     viewer_state.render(frame, frame.area(), session, &theme);
                 }
             }
-            Overlay::Settings(settings_state) => {
-                // Render settings modal with a live preview of the selected theme.
-                let preview_theme = Theme::from_name(settings_state.current_theme());
-                settings_state.render(frame, frame.area(), &preview_theme);
-            }
+            Overlay::Settings(settings_state) => settings_state.render(frame, frame.area(), &theme),
             Overlay::ConfirmDelete => self.render_delete_confirm(frame, frame.area(), &theme),
         }
     }
@@ -535,7 +536,8 @@ impl App {
             }
             _ => {
                 let before = self.query.value().to_owned();
-                if self.query.handle_event(&Event::Key(key)).is_some() && self.query.value() != before
+                if self.query.handle_event(&Event::Key(key)).is_some()
+                    && self.query.value() != before
                 {
                     self.pending_search = true;
                     self.last_edit_at = Some(Instant::now());
@@ -810,6 +812,17 @@ impl App {
         self.overlay = Overlay::Settings(SettingsModalState::new(&self.settings));
     }
 
+    fn current_frame_theme_name(&self) -> ThemeName {
+        match &self.overlay {
+            Overlay::Settings(state) => state.current_theme(),
+            _ => self.settings.theme,
+        }
+    }
+
+    fn current_frame_theme(&self) -> Theme {
+        Theme::from_name(self.current_frame_theme_name())
+    }
+
     fn apply_settings(&mut self, new_settings: Settings) -> Result<()> {
         self.theme = Theme::from_name(new_settings.theme);
         self.preview_render_cache = None;
@@ -861,7 +874,7 @@ impl App {
             return;
         };
 
-        let theme = self.theme.clone();
+        let theme = self.current_frame_theme();
         let frame_area = self.last_frame_area;
         let max_scroll = {
             let session = self.selected_preview();
@@ -1282,7 +1295,8 @@ mod tests {
     use crate::index::SearchHit;
     use crate::index::{IndexManager, IndexPaths, Scope, SearchFilters, SearchRequest, SortMode};
     use crate::parse::{Agent, DerivationType};
-    use crate::settings::Settings;
+    use crate::settings::{Settings, ThemeName};
+    use crate::tui::settings::SettingsModalState;
 
     use super::{
         build_fork_command, build_resume_command, finalize_run_result, App, AppExit, SearchWorker,
@@ -1380,6 +1394,24 @@ mod tests {
         assert!(!app.pending_search);
         assert!(app.last_edit_at.is_none());
         assert_eq!(app.query.value(), "alpha");
+    }
+
+    #[test]
+    fn settings_overlay_uses_live_preview_theme() {
+        let mut app = test_app();
+        app.overlay = super::Overlay::Settings(SettingsModalState::new(&Settings {
+            theme: ThemeName::Lazygit,
+            ..Settings::default()
+        }));
+
+        if let super::Overlay::Settings(state) = &mut app.overlay {
+            *state = SettingsModalState::new(&Settings {
+                theme: ThemeName::Sunset,
+                ..Settings::default()
+            });
+        }
+
+        assert_eq!(app.current_frame_theme_name(), ThemeName::Sunset);
     }
 
     #[test]

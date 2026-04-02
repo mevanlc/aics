@@ -69,10 +69,6 @@ impl SettingsModalState {
         match key.code {
             KeyCode::Esc => return SettingsOutcome::Close,
             KeyCode::Enter if key.modifiers.is_empty() => {
-                if self.field == SettingsField::Theme {
-                    self.theme = self.theme.next();
-                    return SettingsOutcome::Stay;
-                }
                 return SettingsOutcome::Apply(self.build_settings());
             }
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -188,7 +184,7 @@ impl SettingsModalState {
         // Hint
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "  Ctrl+S save · Esc cancel",
+                "  Enter save · Ctrl+S save · Esc cancel",
                 Style::default().fg(theme.muted),
             ))),
             rows[10],
@@ -259,6 +255,30 @@ impl SettingsModalState {
             theme: self.theme,
             claude_command: self.claude_input.value().to_owned(),
             codex_command: self.codex_input.value().to_owned(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::{SettingsField, SettingsModalState, SettingsOutcome};
+    use crate::settings::{Settings, ThemeName};
+
+    #[test]
+    fn enter_applies_settings_from_theme_field() {
+        let mut state = SettingsModalState::new(&Settings::default());
+        state.theme = ThemeName::Sunset;
+        state.field = SettingsField::Theme;
+
+        let outcome = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        match outcome {
+            SettingsOutcome::Apply(settings) => {
+                assert_eq!(settings.theme, ThemeName::Sunset);
+            }
+            other => panic!("expected apply outcome, got {other:?}"),
         }
     }
 }
