@@ -62,7 +62,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
     let list = List::new(items)
         .block(block)
-        .highlight_symbol("› ")
+        .highlight_symbol("⟩ ")
         .highlight_spacing(HighlightSpacing::Always)
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 

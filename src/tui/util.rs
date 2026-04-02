@@ -1,4 +1,8 @@
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
 use chrono::{Local, TimeZone, Utc};
+use directories::BaseDirs;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use unicode_segmentation::UnicodeSegmentation;
@@ -57,7 +61,7 @@ pub fn list_title(hit: &SearchHit) -> String {
     hit.session
         .custom_title
         .clone()
-        .unwrap_or_else(|| hit.session.project.clone())
+        .unwrap_or_else(|| abbreviate_home_path(&hit.session.project))
 }
 
 pub fn list_meta(hit: &SearchHit) -> String {
@@ -214,16 +218,42 @@ fn unescape_html(value: &str) -> String {
         .replace("&#39;", "'")
 }
 
+fn abbreviate_home_path(value: &str) -> String {
+    static HOME_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    abbreviate_home_path_with(value, HOME_DIR.get_or_init(discover_home_dir).as_deref())
+}
+
+fn abbreviate_home_path_with(value: &str, home_dir: Option<&Path>) -> String {
+    let Some(home_dir) = home_dir else {
+        return value.to_owned();
+    };
+    let Ok(relative) = Path::new(value).strip_prefix(home_dir) else {
+        return value.to_owned();
+    };
+
+    if relative.as_os_str().is_empty() {
+        return "~".to_owned();
+    }
+
+    Path::new("~").join(relative).display().to_string()
+}
+
+fn discover_home_dir() -> Option<PathBuf> {
+    BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use ratatui::style::{Color, Style};
     use unicode_segmentation::UnicodeSegmentation;
 
     use ratatui::text::Text;
 
     use super::{
-        highlight_spans, highlight_styled_spans, parse_highlighted_html, truncate_plain,
-        wrapped_text_height,
+        abbreviate_home_path_with, highlight_spans, highlight_styled_spans, parse_highlighted_html,
+        truncate_plain, wrapped_text_height,
     };
 
     #[test]
@@ -305,5 +335,25 @@ mod tests {
     fn wrapped_text_height_counts_wide_wrapped_lines() {
         let text = Text::from("alpha\n漢字漢字\n");
         assert_eq!(wrapped_text_height(&text, 4), 4);
+    }
+
+    #[test]
+    fn abbreviates_paths_under_home_dir() {
+        let abbreviated = abbreviate_home_path_with(
+            "/data/data/com.termux/files/home/p/my/aics",
+            Some(Path::new("/data/data/com.termux/files/home/p")),
+        );
+
+        assert_eq!(abbreviated, "~/my/aics");
+    }
+
+    #[test]
+    fn leaves_non_home_paths_unchanged() {
+        let unchanged = abbreviate_home_path_with(
+            "/worktrees/aics",
+            Some(Path::new("/data/data/com.termux/files/home/p")),
+        );
+
+        assert_eq!(unchanged, "/worktrees/aics");
     }
 }
