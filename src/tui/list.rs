@@ -64,7 +64,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         .block(block)
         .highlight_symbol("⟩")
         .highlight_spacing(HighlightSpacing::Always)
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+        .highlight_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD));
 
     let selected = if app.results.is_empty() {
         None
@@ -132,11 +132,15 @@ fn render_item(hit: &SearchHit, theme: &Theme, width: usize) -> ListItem<'static
         theme.search_match_style(),
     );
     let mut snippet_lines = wrap_line(snippet, width, PREVIEW_LINES);
-    while snippet_lines.len() < PREVIEW_LINES {
-        snippet_lines.push(Line::default());
-    }
 
     let body_style = Style::default().bg(theme.list_body_bg);
+    while snippet_lines.len() < PREVIEW_LINES {
+        snippet_lines.push(Line::styled(
+            " ".repeat(width),
+            body_style,
+        ));
+    }
+
     let mut lines = vec![header];
     lines.extend(
         snippet_lines
