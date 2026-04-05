@@ -42,6 +42,7 @@ pub struct SettingsModalState {
     theme: ThemeName,
     claude_input: Input,
     codex_input: Input,
+    base: Settings,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +59,7 @@ impl SettingsModalState {
             theme: settings.theme,
             claude_input: Input::default().with_value(settings.claude_command.clone()),
             codex_input: Input::default().with_value(settings.codex_command.clone()),
+            base: settings.clone(),
         }
     }
 
@@ -255,6 +257,7 @@ impl SettingsModalState {
             theme: self.theme,
             claude_command: self.claude_input.value().to_owned(),
             codex_command: self.codex_input.value().to_owned(),
+            ..self.base.clone()
         }
     }
 }

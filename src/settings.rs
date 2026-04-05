@@ -55,6 +55,10 @@ pub struct Settings {
     pub claude_command: String,
     #[serde(default = "default_codex_command")]
     pub codex_command: String,
+    #[serde(default = "default_show_preview")]
+    pub show_preview: bool,
+    #[serde(default = "default_preview_width_pct")]
+    pub preview_width_pct: u16,
 }
 
 fn default_claude_command() -> String {
@@ -65,12 +69,22 @@ fn default_codex_command() -> String {
     "codex".to_owned()
 }
 
+fn default_show_preview() -> bool {
+    true
+}
+
+fn default_preview_width_pct() -> u16 {
+    40
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: ThemeName::default(),
             claude_command: default_claude_command(),
             codex_command: default_codex_command(),
+            show_preview: default_show_preview(),
+            preview_width_pct: default_preview_width_pct(),
         }
     }
 }
@@ -141,6 +155,8 @@ mod tests {
         assert_eq!(parsed.theme, ThemeName::Lazygit);
         assert_eq!(parsed.claude_command, "claude");
         assert_eq!(parsed.codex_command, "codex");
+        assert!(parsed.show_preview);
+        assert_eq!(parsed.preview_width_pct, 40);
     }
 
     #[test]

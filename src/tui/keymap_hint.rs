@@ -38,8 +38,8 @@ impl KeymapHint {
     }
 }
 
-const SEP: &str = "  ";
-const SEP_WIDTH: usize = 2;
+const SEP: &str = " | ";
+const SEP_WIDTH: usize = 3;
 const PAD: &str = " ";
 const PAD_WIDTH: usize = 1;
 
@@ -66,7 +66,7 @@ pub fn layout_hints<'a>(
         if prefix_width > 0 {
             spans.extend(prefix_spans);
             // Add separator after prefix
-            spans.push(Span::styled(SEP, Style::default().fg(theme.muted)));
+            spans.push(Span::styled(SEP, Style::default().fg(theme.muted_greater)));
             line_width += prefix_width + SEP_WIDTH;
         }
     }
@@ -93,7 +93,7 @@ pub fn layout_hints<'a>(
 
         // Add separator before this hint (if not first on the line).
         if line_width > PAD_WIDTH {
-            spans.push(Span::styled(SEP, Style::default().fg(theme.muted)));
+            spans.push(Span::styled(SEP, Style::default().fg(theme.muted_greater)));
             line_width += SEP_WIDTH;
         }
 

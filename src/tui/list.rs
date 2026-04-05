@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, HighlightSpacing, List, ListItem, ListState};
+use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
@@ -45,26 +45,30 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         )))]
     } else {
         let visible_slots = visible_slots(area);
-        let (visible_hits, _) = app.list_window(visible_slots);
+        let (visible_hits, selected_within) = app.list_window(visible_slots);
         let content_width = area.width.saturating_sub(3) as usize;
         if compact {
             visible_hits
                 .iter()
-                .map(|hit| render_item_compact(hit, theme, content_width))
+                .enumerate()
+                .map(|(i, hit)| {
+                    render_item_compact(hit, theme, content_width, selected_within == Some(i))
+                })
                 .collect::<Vec<_>>()
         } else {
             visible_hits
                 .iter()
-                .map(|hit| render_item(hit, theme, content_width))
+                .enumerate()
+                .map(|(i, hit)| {
+                    render_item(hit, theme, content_width, selected_within == Some(i))
+                })
                 .collect::<Vec<_>>()
         }
     };
 
     let list = List::new(items)
         .block(block)
-        .highlight_symbol("⟩")
-        .highlight_spacing(HighlightSpacing::Always)
-        .highlight_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD));
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     let selected = if app.results.is_empty() {
         None
@@ -95,7 +99,11 @@ pub fn slot_at_row(area: Rect, row: u16) -> Option<usize> {
     Some(((row - inner_top) as usize) / ih)
 }
 
-fn render_item(hit: &SearchHit, theme: &Theme, width: usize) -> ListItem<'static> {
+fn render_item(hit: &SearchHit, theme: &Theme, width: usize, selected: bool) -> ListItem<'static> {
+    let chevron = if selected { "⟩" } else { " " };
+    let chevron_style = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+    let item_width = width.saturating_sub(1); // 1 for chevron
+
     let (badge, badge_color) = agent_badge(hit.session.agent, theme);
     let meta_prefix = format!("{{{badge}}}");
     let mut meta_suffix = format!(
@@ -109,20 +117,22 @@ fn render_item(hit: &SearchHit, theme: &Theme, width: usize) -> ListItem<'static
     let meta_width =
         UnicodeWidthStr::width(meta_prefix.as_str()) + UnicodeWidthStr::width(meta_suffix.as_str());
 
-    let title_budget = width.saturating_sub(meta_width.saturating_add(1));
+    let title_budget = item_width.saturating_sub(meta_width.saturating_add(1));
     let title_text = truncate_with_ellipsis(&list_title(hit), title_budget);
     let title_width = UnicodeWidthStr::width(title_text.as_str());
-    let padding = " ".repeat(width.saturating_sub(meta_width + title_width).max(1));
+    let padding = " ".repeat(item_width.saturating_sub(meta_width + title_width).max(1));
+    let header_fg = if selected { theme.accent } else { theme.text };
     let header = Line::from(vec![
+        Span::styled(chevron, chevron_style),
         Span::styled(
             meta_prefix,
             Style::default()
                 .fg(badge_color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(meta_suffix, Style::default().fg(theme.muted)),
+        Span::styled(meta_suffix, Style::default().fg(if selected { theme.accent } else { theme.muted })),
         Span::raw(padding),
-        Span::styled(title_text, Style::default().fg(theme.text)),
+        Span::styled(title_text, Style::default().fg(header_fg)),
     ])
     .patch_style(Style::default().bg(theme.list_header_bg));
 
@@ -131,12 +141,12 @@ fn render_item(hit: &SearchHit, theme: &Theme, width: usize) -> ListItem<'static
         Style::default().fg(theme.text),
         theme.search_match_style(),
     );
-    let mut snippet_lines = wrap_line(snippet, width, PREVIEW_LINES);
+    let mut snippet_lines = wrap_line(snippet, item_width, PREVIEW_LINES);
 
     let body_style = Style::default().bg(theme.list_body_bg);
     while snippet_lines.len() < PREVIEW_LINES {
         snippet_lines.push(Line::styled(
-            " ".repeat(width),
+            " ".repeat(item_width),
             body_style,
         ));
     }
@@ -145,22 +155,29 @@ fn render_item(hit: &SearchHit, theme: &Theme, width: usize) -> ListItem<'static
     lines.extend(
         snippet_lines
             .into_iter()
+            .map(|mut line| {
+                line.spans.insert(0, Span::raw(" "));
+                line
+            })
             .map(|line| line.patch_style(body_style)),
     );
     lines.push(Line::default());
     ListItem::new(lines)
 }
 
-fn render_item_compact(hit: &SearchHit, theme: &Theme, width: usize) -> ListItem<'static> {
+fn render_item_compact(hit: &SearchHit, theme: &Theme, width: usize, selected: bool) -> ListItem<'static> {
+    let chevron = if selected { "⟩" } else { " " };
+    let item_width = width.saturating_sub(1);
     let (badge, badge_color) = agent_badge(hit.session.agent, theme);
     let time = relative_time(hit.session.modified_ts);
     let prefix = format!("{{{badge}}} {time} ");
     let prefix_width = UnicodeWidthStr::width(prefix.as_str());
-    let title_budget = width.saturating_sub(prefix_width);
+    let title_budget = item_width.saturating_sub(prefix_width);
     let title_text = truncate_with_ellipsis(&list_title(hit), title_budget);
     ListItem::new(Line::from(vec![
+        Span::styled(chevron, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
         Span::styled(prefix, Style::default().fg(badge_color)),
-        Span::styled(title_text, Style::default().fg(theme.text)),
+        Span::styled(title_text, Style::default().fg(if selected { theme.accent } else { theme.text })),
     ]))
 }
 

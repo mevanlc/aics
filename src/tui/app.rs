@@ -47,7 +47,8 @@ const SEARCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PAGE_STEP: usize = 8;
 const LIST_MOUSE_SCROLL_STEP: isize = 1;
 const PANEL_MOUSE_SCROLL_STEP: usize = 3;
-const PREVIEW_WIDTH_DEFAULT: u16 = 40;
+const PREVIEW_WIDTH_MIN: u16 = 25;
+const PREVIEW_WIDTH_MAX: u16 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -176,12 +177,13 @@ pub struct App {
 }
 
 impl App {
-    const MAIN_HINTS: [keymap_hint::KeymapHint; 7] = [
+    const MAIN_HINTS: [keymap_hint::KeymapHint; 8] = [
         keymap_hint::KeymapHint::new("↑↓", "select"),
         keymap_hint::KeymapHint::new("PgUp/PgDn/Home/End", "scroll preview"),
         keymap_hint::KeymapHint::new("^F", "filters"),
         keymap_hint::KeymapHint::new("^O", "settings"),
         keymap_hint::KeymapHint::new("Enter", "actions"),
+        keymap_hint::KeymapHint::new("^T", "preview"),
         keymap_hint::KeymapHint::new("^H/^L", "resize"),
         keymap_hint::KeymapHint::new("^C", "quit"),
     ];
@@ -222,8 +224,8 @@ impl App {
             search_in_flight: false,
             search_error: None,
             should_quit: false,
-            preview_visible: true,
-            preview_width_pct: PREVIEW_WIDTH_DEFAULT,
+            preview_visible: settings.show_preview,
+            preview_width_pct: settings.preview_width_pct.clamp(PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX),
             last_frame_area: Rect::default(),
             last_layout: None,
             overlay: Overlay::None,
@@ -418,9 +420,8 @@ impl App {
             frame.render_widget(msg, area);
             return;
         }
-        let areas = layout::split(area, self.preview_width_pct);
+        let areas = layout::split(area, self.preview_width_pct, self.preview_visible);
         self.last_layout = Some(areas);
-        self.preview_visible = areas.preview.is_some();
         self.clamp_scroll_state(areas);
         search::render(frame, self, areas.search, &theme);
         list::render(frame, self, areas.list, &theme);
@@ -514,6 +515,9 @@ impl App {
                 if self.selected_index().is_some() {
                     self.overlay = Overlay::Actions(ActionMenuState::new());
                 }
+            }
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_preview()
             }
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.resize_preview(-5)
@@ -786,7 +790,7 @@ impl App {
     }
 
     fn preview_available(&self) -> bool {
-        self.preview_visible
+        self.last_layout.map_or(false, |l| l.preview.is_some())
     }
 
     fn trigger_search_now(&mut self) -> Result<()> {
@@ -843,9 +847,25 @@ impl App {
         self.last_edit_at = Some(Instant::now());
     }
 
+    fn toggle_preview(&mut self) {
+        self.preview_visible = !self.preview_visible;
+        self.preview_render_cache = None;
+        self.save_layout_prefs();
+    }
+
     fn resize_preview(&mut self, delta: i16) {
-        let next = (self.preview_width_pct as i16 + delta).clamp(25, 60);
+        let next = (self.preview_width_pct as i16 + delta)
+            .clamp(PREVIEW_WIDTH_MIN as i16, PREVIEW_WIDTH_MAX as i16);
         self.preview_width_pct = next as u16;
+        self.save_layout_prefs();
+    }
+
+    fn save_layout_prefs(&mut self) {
+        self.settings.show_preview = self.preview_visible;
+        self.settings.preview_width_pct = self.preview_width_pct;
+        if let Err(err) = self.settings.save() {
+            self.status_message = Some(format!("settings error: {err:#}"));
+        }
     }
 
     fn clamp_scroll_state(&mut self, areas: layout::AppLayout) {
@@ -1276,6 +1296,7 @@ mod tests {
 
     use anyhow::anyhow;
     use ratatui::crossterm::event::KeyCode;
+    use ratatui::layout::Rect;
     use tempfile::TempDir;
     use tui_input::Input;
 
@@ -1285,6 +1306,7 @@ mod tests {
     use crate::parse::{Agent, DerivationType};
     use crate::settings::{Settings, ThemeName};
     use crate::tui::settings::SettingsModalState;
+    use crate::tui::layout;
 
     use super::{
         build_fork_command, build_resume_command, finalize_run_result, App, AppExit, SearchWorker,
@@ -1429,6 +1451,12 @@ mod tests {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude), sample_hit(Agent::Codex)];
         app.selected = 0;
+        app.last_layout = Some(layout::AppLayout {
+            search: Rect::new(0, 0, 120, 3),
+            list: Rect::new(0, 3, 60, 20),
+            preview: Some(Rect::new(60, 3, 60, 20)),
+            status: Rect::new(0, 23, 120, 2),
+        });
 
         app.handle_search_key(crossterm_key(KeyCode::PageDown))
             .unwrap();
