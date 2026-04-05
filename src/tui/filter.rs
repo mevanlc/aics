@@ -4,13 +4,14 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
 use crate::index::{Scope, SearchFilters, SortMode};
 use crate::parse::Agent;
+use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::layout;
 use crate::tui::theme::Theme;
 
@@ -142,20 +143,30 @@ impl FilterModalState {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme, scope_label: &str) {
-        let popup = layout::centered_rect(area, 68, 72);
+        let popup = layout::centered_rect(area, 80, 72);
         frame.render_widget(Clear, popup);
-        let block = Block::default()
+
+        // Split popup into left (fields) and right (description) panels.
+        let halves =
+            Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+                .split(popup);
+        let left_area = halves[0];
+        let right_area = halves[1];
+
+        // Left panel: filter fields.
+        let left_block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(theme.border_style(true))
             .title("Filters");
-        frame.render_widget(block, popup);
+        frame.render_widget(left_block.clone(), left_area);
 
-        let inner = popup.inner(ratatui::layout::Margin {
+        let left_inner = left_area.inner(ratatui::layout::Margin {
             horizontal: 1,
             vertical: 1,
         });
-        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(inner);
+        let left_chunks =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(left_inner);
 
         let mut rows = Vec::new();
         for field in FIELD_ORDER {
@@ -177,21 +188,59 @@ impl FilterModalState {
             ]));
         }
 
-        let instructions = Paragraph::new(vec![
-            Line::from(Span::styled(
-                "Enter apply  Esc close  ^R reset  Left/Right toggle  Up/Down move",
-                Style::default().fg(theme.muted),
-            )),
-            Line::from(Span::styled(
-                "Dates use YYYY-MM-DD or RFC3339. Scope toggles between Global and the launch directory.",
-                Style::default().fg(theme.muted),
-            )),
-        ]);
+        const FILTER_HINTS: [KeymapHint; 5] = [
+            KeymapHint::new("Enter", "apply"),
+            KeymapHint::new("Esc", "close"),
+            KeymapHint::new("^R", "reset"),
+            KeymapHint::new("←/→", "toggle"),
+            KeymapHint::new("↑↓", "move"),
+        ];
 
-        frame.render_widget(Paragraph::new(rows), chunks[0]);
-        frame.render_widget(instructions, chunks[1]);
+        frame.render_widget(Paragraph::new(rows), left_chunks[0]);
+        keymap_hint::render(frame, left_chunks[1], &FILTER_HINTS, theme, "");
 
-        if let Some((cursor_x, cursor_y)) = self.cursor_position(chunks[0]) {
+        // Right panel: description of selected field.
+        let right_block = Block::default()
+            .borders(Borders::TOP | Borders::RIGHT | Borders::BOTTOM)
+            .border_type(BorderType::Rounded)
+            .border_style(theme.border_style(false));
+        frame.render_widget(right_block, right_area);
+
+        let right_inner = right_area.inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+
+        let desc_chunks =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)])
+                .split(right_inner);
+
+        let title = Paragraph::new(Line::from(Span::styled(
+            self.selected.label(),
+            Style::default()
+                .fg(theme.text)
+                .add_modifier(Modifier::BOLD),
+        )));
+        frame.render_widget(title, desc_chunks[0]);
+
+        // Separator line.
+        let sep_width = desc_chunks[1].width as usize;
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "─".repeat(sep_width),
+                Style::default().fg(theme.border),
+            ))),
+            desc_chunks[1],
+        );
+
+        let description = Paragraph::new(Span::styled(
+            self.selected.description(),
+            Style::default().fg(theme.muted),
+        ))
+        .wrap(Wrap { trim: false });
+        frame.render_widget(description, desc_chunks[2]);
+
+        if let Some((cursor_x, cursor_y)) = self.cursor_position(left_chunks[0]) {
             frame.set_cursor_position((cursor_x, cursor_y));
         }
     }
@@ -270,10 +319,11 @@ impl FilterModalState {
             _ => return None,
         };
 
+        // prefix "› " (2) + label "{:<12}" (12) = 14
         Some((
             rows_area
                 .x
-                .saturating_add(17 + input.visual_cursor() as u16),
+                .saturating_add(14 + input.visual_cursor() as u16),
             rows_area.y.saturating_add(row_index),
         ))
     }
@@ -317,6 +367,23 @@ impl FilterField {
             FilterField::SubAgents => "Sub-agents",
             FilterField::LiveOnly => "Live only",
             FilterField::Sort => "Sort",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            FilterField::Scope => "Limit results to sessions from the launch directory or search globally across all sessions.",
+            FilterField::Agent => "Filter by agent type: Claude, Codex, or all. Use Left/Right to cycle.",
+            FilterField::Branch => "Filter sessions by git branch name. Leave empty to show all branches.",
+            FilterField::After => "Only show sessions modified after this date. Use YYYY-MM-DD or RFC3339 format.",
+            FilterField::Before => "Only show sessions modified before this date. Use YYYY-MM-DD or RFC3339 format.",
+            FilterField::MinLines => "Only show sessions with at least this many lines of conversation.",
+            FilterField::Original => "Include original (non-derived) sessions in results.",
+            FilterField::Trimmed => "Include trimmed sessions (sessions that were compacted by the agent).",
+            FilterField::Continued => "Include rollover sessions (continuations from a previous session).",
+            FilterField::SubAgents => "Include sub-agent sessions (child sessions spawned by the agent tool).",
+            FilterField::LiveOnly => "Only show sessions that are currently live (have an active agent process).",
+            FilterField::Sort => "Sort results by relevance to the search query or by modification time.",
         }
     }
 
