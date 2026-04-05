@@ -46,7 +46,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     } else {
         let visible_slots = visible_slots(area);
         let (visible_hits, _) = app.list_window(visible_slots);
-        let content_width = area.width.saturating_sub(4) as usize;
+        let content_width = area.width.saturating_sub(3) as usize;
         if compact {
             visible_hits
                 .iter()
@@ -62,7 +62,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
     let list = List::new(items)
         .block(block)
-        .highlight_symbol("⟩ ")
+        .highlight_symbol("⟩")
         .highlight_spacing(HighlightSpacing::Always)
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
