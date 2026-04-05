@@ -58,9 +58,16 @@ pub fn render_session_text(
     let mut lines = Vec::new();
     for message in &session.messages {
         let (label_color, _) = message_colors(session.agent, message.role, theme);
+        let label = match (&message.role, &message.tool_name) {
+            (MessageRole::ToolCall, Some(name)) => format!("\u{203a} {name}"),
+            (MessageRole::ToolResult, Some(name)) => format!("\u{2039} {name}"),
+            (MessageRole::ToolCall, None) => "\u{203a} tool".to_owned(),
+            (MessageRole::ToolResult, None) => "\u{2039} result".to_owned(),
+            _ => role_label(message.role).to_owned(),
+        };
         lines.push(Line::from(vec![
             Span::styled(
-                role_label(message.role),
+                label,
                 Style::default()
                     .fg(label_color)
                     .add_modifier(Modifier::BOLD),
@@ -113,6 +120,7 @@ fn message_colors(
         },
         MessageRole::System => (theme.muted, theme.bubble_system),
         MessageRole::Summary => (theme.highlight, theme.bubble_summary),
+        MessageRole::ToolCall | MessageRole::ToolResult => (theme.tool, theme.bubble_tool),
     }
 }
 
@@ -163,6 +171,7 @@ mod tests {
                 role: MessageRole::Assistant,
                 content: "**alpha**\n\n- beta".to_owned(),
                 timestamp: Some(Utc::now()),
+                tool_name: None,
             }],
             content: "**alpha**\n\n- beta".to_owned(),
         };

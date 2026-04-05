@@ -11,8 +11,9 @@ use super::session::{
     decode_claude_project_from_path, default_project_for_cwd, earliest_timestamp,
     fallback_session_id, first_message_fields, first_user_message, infer_derivation_type,
     last_message_fields, latest_timestamp, metadata_created, metadata_modified, modified_ts,
-    push_unique_chunk, push_unique_message, Agent, MessageRole, Session,
+    push_tool_message, push_unique_chunk, push_unique_message, Agent, MessageRole, Session,
 };
+use super::tool_format;
 
 pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Session>> {
     let path = path.as_ref();
@@ -99,19 +100,52 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
                     continue;
                 };
 
-                let Some(text) = extract_message_text(
-                    message.get("content"),
-                    value.get("toolUseResult"),
-                    value
-                        .get("isMeta")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                ) else {
-                    continue;
-                };
+                let is_meta = value
+                    .get("isMeta")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let tool_use_result = value.get("toolUseResult");
 
-                push_unique_message(&mut messages, role, text.clone(), entry_timestamp);
-                push_unique_chunk(&mut content_chunks, text);
+                let blocks = extract_message_blocks(
+                    message.get("content"),
+                    tool_use_result,
+                    is_meta,
+                );
+
+                for block in blocks {
+                    match block {
+                        MessageBlock::Text(text) => {
+                            push_unique_message(
+                                &mut messages,
+                                role,
+                                text.clone(),
+                                entry_timestamp,
+                            );
+                            push_unique_chunk(&mut content_chunks, text);
+                        }
+                        MessageBlock::ToolCall { name, text } => {
+                            let label = tool_format::tool_label(&name).to_owned();
+                            push_tool_message(
+                                &mut messages,
+                                MessageRole::ToolCall,
+                                Some(label),
+                                text.clone(),
+                                entry_timestamp,
+                            );
+                            push_unique_chunk(&mut content_chunks, text);
+                        }
+                        MessageBlock::ToolResult(text) => {
+                            push_tool_message(
+                                &mut messages,
+                                MessageRole::ToolResult,
+                                None,
+                                text.clone(),
+                                entry_timestamp,
+                            );
+                            push_unique_chunk(&mut content_chunks, text);
+                        }
+                    }
+                }
             }
             "summary" => {
                 if let Some(summary) = value.get("summary").and_then(Value::as_str) {
@@ -188,81 +222,129 @@ fn extract_message_role(value: &Value) -> Option<MessageRole> {
     }
 }
 
-fn extract_message_text(
+enum MessageBlock {
+    Text(String),
+    ToolCall { name: String, text: String },
+    ToolResult(String),
+}
+
+fn extract_message_blocks(
     content: Option<&Value>,
     tool_use_result: Option<&Value>,
     is_meta: bool,
-) -> Option<String> {
-    let mut chunks = Vec::new();
+) -> Vec<MessageBlock> {
+    let mut blocks = Vec::new();
+    let mut text_chunks = Vec::new();
+
+    // Helper closure: flush accumulated text chunks as a single Text block
+    let flush_text = |chunks: &mut Vec<String>, blocks: &mut Vec<MessageBlock>, is_meta: bool| {
+        if chunks.is_empty() {
+            return;
+        }
+        let text = chunks.join("\n\n");
+        chunks.clear();
+        if is_meta && text == "exit" {
+            return;
+        }
+        blocks.push(MessageBlock::Text(text));
+    };
 
     match content {
-        Some(Value::String(text)) => push_unique_chunk(&mut chunks, normalize_claude_text(text)),
+        Some(Value::String(text)) => {
+            let normalized = normalize_claude_text(text);
+            if !normalized.trim().is_empty() {
+                push_unique_chunk(&mut text_chunks, normalized);
+            }
+        }
         Some(Value::Array(items)) => {
             for item in items {
-                if let Some(text) = extract_content_block_text(item) {
-                    push_unique_chunk(&mut chunks, text);
+                let block_type = item.get("type").and_then(Value::as_str);
+                match block_type {
+                    Some("text") => {
+                        if let Some(text) = item.get("text").and_then(Value::as_str) {
+                            push_unique_chunk(&mut text_chunks, normalize_claude_text(text));
+                        }
+                    }
+                    Some("thinking") => {
+                        if let Some(text) = item.get("thinking").and_then(Value::as_str) {
+                            push_unique_chunk(&mut text_chunks, normalize_claude_text(text));
+                        }
+                    }
+                    Some("tool_use") => {
+                        // Flush any accumulated text before emitting tool block
+                        flush_text(&mut text_chunks, &mut blocks, is_meta);
+
+                        let name = item
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("tool")
+                            .to_owned();
+                        let input = item.get("input").unwrap_or(&Value::Null);
+                        let formatted = tool_format::format_tool_call(&name, input);
+                        blocks.push(MessageBlock::ToolCall {
+                            name,
+                            text: formatted,
+                        });
+                    }
+                    Some("tool_result") => {
+                        // Flush any accumulated text before emitting tool block
+                        flush_text(&mut text_chunks, &mut blocks, is_meta);
+
+                        // Prefer toolUseResult.stdout when available
+                        let text = tool_use_result
+                            .and_then(|r| r.get("stdout"))
+                            .and_then(Value::as_str)
+                            .map(|s| s.trim().to_owned())
+                            .filter(|s| !s.is_empty())
+                            .or_else(|| {
+                                item.get("content").map(|c| tool_format::format_tool_result(c))
+                            })
+                            .unwrap_or_default();
+
+                        if !text.is_empty() {
+                            blocks.push(MessageBlock::ToolResult(text));
+                        }
+                    }
+                    _ => {
+                        // Unknown block types: try to extract text
+                        if let Some(text) = item.get("text").and_then(Value::as_str) {
+                            push_unique_chunk(&mut text_chunks, normalize_claude_text(text));
+                        } else if let Some(text) =
+                            item.get("content").and_then(extract_nested_text)
+                        {
+                            push_unique_chunk(&mut text_chunks, text);
+                        }
+                    }
                 }
             }
         }
-        Some(other) => push_unique_chunk(&mut chunks, stringify_json(other)),
+        Some(other) => {
+            let text = stringify_json(other);
+            if !text.trim().is_empty() {
+                push_unique_chunk(&mut text_chunks, text);
+            }
+        }
         None => {}
     }
 
-    if chunks.is_empty() {
+    // If no blocks were emitted yet and there's a toolUseResult, use its stdout
+    if blocks.is_empty() && text_chunks.is_empty() {
         if let Some(stdout) = tool_use_result
             .and_then(|result| result.get("stdout"))
             .and_then(Value::as_str)
         {
-            push_unique_chunk(&mut chunks, stdout);
+            let trimmed = stdout.trim();
+            if !trimmed.is_empty() {
+                blocks.push(MessageBlock::ToolResult(trimmed.to_owned()));
+                return blocks;
+            }
         }
     }
 
-    let text = chunks.join("\n\n");
-    if text.is_empty() {
-        return None;
-    }
+    // Flush remaining text
+    flush_text(&mut text_chunks, &mut blocks, is_meta);
 
-    if is_meta && text == "exit" {
-        return None;
-    }
-
-    Some(text)
-}
-
-fn extract_content_block_text(item: &Value) -> Option<String> {
-    let block_type = item.get("type").and_then(Value::as_str);
-    match block_type {
-        Some("text") => item
-            .get("text")
-            .and_then(Value::as_str)
-            .map(normalize_claude_text),
-        Some("thinking") => item
-            .get("thinking")
-            .and_then(Value::as_str)
-            .map(normalize_claude_text),
-        Some("tool_result") => item
-            .get("content")
-            .and_then(extract_nested_text)
-            .or_else(|| item.get("content").map(stringify_json)),
-        Some("tool_use") => {
-            let name = item.get("name").and_then(Value::as_str).unwrap_or("tool");
-            let input = item
-                .get("input")
-                .map(stringify_json)
-                .filter(|value| !value.is_empty());
-
-            Some(match input {
-                Some(input) => format!("Tool {name}: {input}"),
-                None => format!("Tool {name}"),
-            })
-        }
-        _ => item
-            .get("text")
-            .and_then(Value::as_str)
-            .map(normalize_claude_text)
-            .or_else(|| item.get("content").and_then(extract_nested_text))
-            .or_else(|| item.get("content").map(stringify_json)),
-    }
+    blocks
 }
 
 fn extract_nested_text(value: &Value) -> Option<String> {
@@ -271,7 +353,11 @@ fn extract_nested_text(value: &Value) -> Option<String> {
         Value::Array(items) => {
             let mut chunks = Vec::new();
             for item in items {
-                if let Some(text) = extract_content_block_text(item) {
+                if let Some(text) = item
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(normalize_claude_text)
+                {
                     push_unique_chunk(&mut chunks, text);
                 }
             }

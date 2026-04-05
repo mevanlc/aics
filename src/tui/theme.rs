@@ -23,6 +23,8 @@ pub struct Theme {
     pub bubble_codex: Color,
     pub bubble_system: Color,
     pub bubble_summary: Color,
+    pub tool: Color,
+    pub bubble_tool: Color,
 }
 
 impl Default for Theme {
@@ -61,6 +63,8 @@ impl Theme {
             bubble_codex: Color::Rgb(28, 61, 46),
             bubble_system: Color::Rgb(49, 53, 64),
             bubble_summary: Color::Rgb(60, 54, 32),
+            tool: Color::Rgb(100, 200, 210),
+            bubble_tool: Color::Rgb(25, 42, 48),
         }
     }
 
@@ -87,6 +91,8 @@ impl Theme {
             bubble_codex: Color::Rgb(15, 40, 30),
             bubble_system: Color::Rgb(35, 35, 35),
             bubble_summary: Color::Rgb(45, 40, 20),
+            tool: Color::Rgb(80, 190, 200),
+            bubble_tool: Color::Rgb(15, 35, 40),
         }
     }
 
@@ -113,6 +119,8 @@ impl Theme {
             bubble_codex: Color::Rgb(24, 73, 73),
             bubble_system: Color::Rgb(43, 38, 49),
             bubble_summary: Color::Rgb(92, 67, 31),
+            tool: Color::Rgb(108, 210, 196),
+            bubble_tool: Color::Rgb(24, 55, 55),
         }
     }
 

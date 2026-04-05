@@ -40,12 +40,14 @@ impl FromStr for Agent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum MessageRole {
     User,
     Assistant,
     System,
     Summary,
+    ToolCall,
+    ToolResult,
 }
 
 impl MessageRole {
@@ -55,6 +57,8 @@ impl MessageRole {
             Self::Assistant => "assistant",
             Self::System => "system",
             Self::Summary => "summary",
+            Self::ToolCall => "tool_call",
+            Self::ToolResult => "tool_result",
         }
     }
 }
@@ -74,6 +78,8 @@ impl FromStr for MessageRole {
             "assistant" => Ok(Self::Assistant),
             "system" => Ok(Self::System),
             "summary" => Ok(Self::Summary),
+            "tool_call" => Ok(Self::ToolCall),
+            "tool_result" => Ok(Self::ToolResult),
             _ => Err(()),
         }
     }
@@ -110,6 +116,8 @@ pub struct SessionMessage {
     pub role: MessageRole,
     pub content: String,
     pub timestamp: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,6 +314,33 @@ pub fn push_unique_message(
         role,
         content,
         timestamp,
+        tool_name: None,
+    });
+}
+
+pub fn push_tool_message(
+    messages: &mut Vec<SessionMessage>,
+    role: MessageRole,
+    tool_name: Option<String>,
+    content: impl Into<String>,
+    timestamp: Option<DateTime<Utc>>,
+) {
+    let Some(content) = nonempty_trimmed(content.into()) else {
+        return;
+    };
+
+    if messages
+        .last()
+        .is_some_and(|last| last.role == role && last.content == content)
+    {
+        return;
+    }
+
+    messages.push(SessionMessage {
+        role,
+        content,
+        timestamp,
+        tool_name,
     });
 }
 

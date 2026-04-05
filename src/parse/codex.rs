@@ -10,9 +10,10 @@ use serde_json::{Map, Value};
 use super::session::{
     default_project_for_cwd, earliest_timestamp, fallback_session_id, first_message_fields,
     first_user_message, infer_derivation_type, last_message_fields, latest_timestamp,
-    metadata_created, metadata_modified, modified_ts, push_unique_chunk, push_unique_message,
-    Agent, MessageRole, Session,
+    metadata_created, metadata_modified, modified_ts, push_tool_message, push_unique_chunk,
+    push_unique_message, Agent, MessageRole, Session,
 };
+use super::tool_format;
 
 pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session>> {
     let path = path.as_ref();
@@ -196,17 +197,35 @@ fn handle_response_item(
             }
         }
         "function_call" => {
-            push_tool_call_chunk(
-                content_chunks,
-                payload
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("function_call"),
-                payload.get("arguments"),
+            let name = payload
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("function_call");
+            let args_value: Value = payload
+                .get("arguments")
+                .and_then(Value::as_str)
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or(Value::Null);
+            let formatted = tool_format::format_tool_call(name, &args_value);
+            let label = tool_format::tool_label(name).to_owned();
+            push_tool_message(
+                messages,
+                MessageRole::ToolCall,
+                Some(label),
+                formatted.clone(),
+                timestamp,
             );
+            push_unique_chunk(content_chunks, formatted);
         }
         "function_call_output" => {
             if let Some(output) = payload.get("output").and_then(Value::as_str) {
+                push_tool_message(
+                    messages,
+                    MessageRole::ToolResult,
+                    None,
+                    output,
+                    timestamp,
+                );
                 push_unique_chunk(content_chunks, output);
             }
         }
@@ -215,18 +234,33 @@ fn handle_response_item(
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or("custom_tool_call");
-            let input = payload
-                .get("input")
-                .map(stringify_json)
-                .filter(|value| !value.is_empty());
-            let content = input
-                .map(|input| format!("{name}: {input}"))
-                .unwrap_or_else(|| name.to_owned());
-            push_unique_chunk(content_chunks, content);
+            let input = payload.get("input").unwrap_or(&Value::Null);
+            let formatted = tool_format::format_tool_call(name, input);
+            let label = tool_format::tool_label(name).to_owned();
+            push_tool_message(
+                messages,
+                MessageRole::ToolCall,
+                Some(label),
+                formatted.clone(),
+                timestamp,
+            );
+            push_unique_chunk(content_chunks, formatted);
         }
         "custom_tool_call_output" => {
             if let Some(output) = payload.get("output").and_then(Value::as_str) {
-                push_unique_chunk(content_chunks, output);
+                let result_value: Value = serde_json::from_str(output)
+                    .unwrap_or_else(|_| Value::String(output.to_owned()));
+                let formatted = tool_format::format_tool_result(&result_value);
+                if !formatted.is_empty() {
+                    push_tool_message(
+                        messages,
+                        MessageRole::ToolResult,
+                        None,
+                        formatted.clone(),
+                        timestamp,
+                    );
+                    push_unique_chunk(content_chunks, formatted);
+                }
             }
         }
         _ => {}
@@ -322,25 +356,6 @@ fn extract_reasoning_summary(summary: Option<&Value>) -> Option<String> {
     } else {
         Some(chunks.join("\n\n"))
     }
-}
-
-fn push_tool_call_chunk(content_chunks: &mut Vec<String>, name: &str, arguments: Option<&Value>) {
-    let parsed_arguments = arguments
-        .and_then(Value::as_str)
-        .map(parse_embedded_json)
-        .unwrap_or_default();
-
-    let chunk = if parsed_arguments.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{name}: {parsed_arguments}")
-    };
-    push_unique_chunk(content_chunks, chunk);
-}
-
-fn parse_embedded_json(raw: &str) -> String {
-    let parsed: Value = serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()));
-    stringify_json(&parsed)
 }
 
 fn extract_cwd_from_message(payload: &Value) -> Option<String> {

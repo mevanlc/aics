@@ -31,7 +31,7 @@ use crate::index::{
     IndexManager, Scope, SearchEngine, SearchFilters, SearchHit, SearchRequest, SortMode,
     SyncOutcome,
 };
-use crate::parse::{parse_session_file, Session};
+use crate::parse::{parse_session_file, MessageRole, Session};
 use crate::settings::{Settings, ThemeName};
 use crate::tui::actions::{ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::filter::{FilterModalState, FilterOutcome};
@@ -1248,14 +1248,19 @@ fn sanitize_filename(value: &str) -> String {
 fn session_to_plain_text(session: &Session) -> String {
     let mut output = String::new();
     for message in &session.messages {
+        let role_display = match (&message.role, &message.tool_name) {
+            (MessageRole::ToolCall, Some(name)) => format!("tool_call({name})"),
+            (MessageRole::ToolResult, Some(name)) => format!("tool_result({name})"),
+            _ => message.role.to_string(),
+        };
         let timestamp = message
             .timestamp
             .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
             .unwrap_or_default();
         if timestamp.is_empty() {
-            output.push_str(&format!("{}\n", message.role));
+            output.push_str(&format!("{role_display}\n"));
         } else {
-            output.push_str(&format!("{} {}\n", message.role, timestamp));
+            output.push_str(&format!("{role_display} {timestamp}\n"));
         }
         output.push_str(&message.content);
         output.push_str("\n\n");

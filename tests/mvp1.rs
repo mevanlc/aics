@@ -89,7 +89,9 @@ fn parses_claude_rich_content_blocks() -> Result<()> {
     assert!(session
         .content
         .contains("Let me analyze the authentication module"));
-    assert!(session.content.contains("Tool Bash"));
+    assert!(session
+        .content
+        .contains("cargo test --lib auth 2>&1 | head -20"));
     assert!(session.content.contains("test_token_refresh"));
     assert_eq!(session.custom_title.as_deref(), Some("test-rich-content"));
     Ok(())

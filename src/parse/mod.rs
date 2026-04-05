@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod codex;
 pub mod session;
+pub mod tool_format;
 
 pub use claude::parse_claude_session_file;
 pub use codex::parse_codex_session_file;

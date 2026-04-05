@@ -106,6 +106,8 @@ pub fn role_label(role: MessageRole) -> &'static str {
         MessageRole::Assistant => "Assistant",
         MessageRole::System => "System",
         MessageRole::Summary => "Summary",
+        MessageRole::ToolCall => "Tool",
+        MessageRole::ToolResult => "Result",
     }
 }
 

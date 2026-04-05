@@ -553,11 +553,13 @@ mod tests {
                     role: MessageRole::User,
                     content: "alpha beta gamma delta alpha".to_owned(),
                     timestamp: Some(Utc::now()),
+                    tool_name: None,
                 },
                 SessionMessage {
                     role: MessageRole::Assistant,
                     content: "omega alpha".to_owned(),
                     timestamp: Some(Utc::now()),
+                    tool_name: None,
                 },
             ],
             content: "alpha beta gamma delta alpha\nomega alpha".to_owned(),
@@ -588,6 +590,7 @@ mod tests {
                 role: MessageRole::Assistant,
                 content: "```rust\nfn alpha() {}\n```".to_owned(),
                 timestamp: Some(Utc::now()),
+                tool_name: None,
             }],
             content: "```rust\nfn alpha() {}\n```".to_owned(),
         }

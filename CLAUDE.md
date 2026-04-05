@@ -1,6 +1,6 @@
 # aics
 
-Read `aidocs/ULTRAPLAN.md` before starting work. It contains the full research, architecture, and task breakdown.
+AI Chat Search
 
 ## Project
 
@@ -28,8 +28,6 @@ Binary name: `aics`
 
 ## Task Tracking
 
-The plan has two phases:
-- **MVP** (M1→M2→M3): scaffold, parsers, index, basic TUI with search + preview
-- **Post-MVP**: filters, actions, full viewer, polish
+The original plan is in aidocs/ULTRAPLAN.md
+.md files for/by AI Agents should be read/written to aidocs/
 
-Work through MVP steps in order. Post-MVP steps can be reordered based on what falls out naturally.
