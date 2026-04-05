@@ -10,7 +10,7 @@ use unicode_truncate::UnicodeTruncateStr;
 use unicode_width::UnicodeWidthStr;
 
 use crate::index::SearchHit;
-use crate::parse::{Agent, MessageRole};
+use crate::parse::{normalize_session_path, Agent, MessageRole};
 use crate::search_query::extract_highlight_terms;
 use crate::tui::theme::Theme;
 
@@ -237,7 +237,9 @@ fn abbreviate_home_path_with(value: &str, home_dir: Option<&Path>) -> String {
     let Some(home_dir) = home_dir else {
         return value.to_owned();
     };
-    let Ok(relative) = Path::new(value).strip_prefix(home_dir) else {
+    let normalized_value = normalize_session_path(value);
+    let normalized_home = normalize_session_path(&home_dir.to_string_lossy());
+    let Ok(relative) = Path::new(normalized_value.as_str()).strip_prefix(&normalized_home) else {
         return value.to_owned();
     };
 
@@ -262,8 +264,8 @@ mod tests {
     use ratatui::text::Text;
 
     use super::{
-        abbreviate_home_path_with, highlight_spans, highlight_styled_spans,
-        parse_highlighted_html, session_display_title, truncate_plain, wrapped_text_height,
+        abbreviate_home_path_with, highlight_spans, highlight_styled_spans, parse_highlighted_html,
+        session_display_title, truncate_plain, wrapped_text_height,
     };
 
     #[test]
@@ -365,6 +367,16 @@ mod tests {
         );
 
         assert_eq!(unchanged, "/worktrees/aics");
+    }
+
+    #[test]
+    fn abbreviates_termux_package_alias_paths_under_home_dir() {
+        let abbreviated = abbreviate_home_path_with(
+            "/data/data/com/termux/files/home/p/my/aics",
+            Some(Path::new("/data/data/com.termux/files/home/p")),
+        );
+
+        assert_eq!(abbreviated, "~/my/aics");
     }
 
     #[test]

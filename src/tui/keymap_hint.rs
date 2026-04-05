@@ -119,7 +119,13 @@ pub fn render(frame: &mut Frame, area: Rect, hints: &[KeymapHint], theme: &Theme
         )])
     };
 
-    let lines = layout_hints(hints, area.width as usize, area.height as usize, theme, prefix);
+    let lines = layout_hints(
+        hints,
+        area.width as usize,
+        area.height as usize,
+        theme,
+        prefix,
+    );
 
     // Render each line at the corresponding row.
     for (i, line) in lines.into_iter().enumerate() {

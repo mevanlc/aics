@@ -147,9 +147,8 @@ impl FilterModalState {
         frame.render_widget(Clear, popup);
 
         // Split popup into left (fields) and right (description) panels.
-        let halves =
-            Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
-                .split(popup);
+        let halves = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(popup);
         let left_area = halves[0];
         let right_area = halves[1];
 
@@ -211,15 +210,16 @@ impl FilterModalState {
             vertical: 1,
         });
 
-        let desc_chunks =
-            Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)])
-                .split(right_inner);
+        let desc_chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(right_inner);
 
         let title = Paragraph::new(Line::from(Span::styled(
             self.selected.label(),
-            Style::default()
-                .fg(theme.text)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         )));
         frame.render_widget(title, desc_chunks[0]);
 

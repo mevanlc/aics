@@ -8,10 +8,10 @@ use log::warn;
 use serde_json::Value;
 
 use super::session::{
-    decode_claude_project_from_path, default_project_for_cwd, earliest_timestamp,
-    fallback_session_id, first_message_fields, first_user_message, infer_derivation_type,
-    last_message_fields, latest_timestamp, metadata_created, metadata_modified, modified_ts,
-    push_tool_message, push_unique_chunk, push_unique_message, Agent, MessageRole, Session,
+    earliest_timestamp, fallback_session_id, first_message_fields, first_user_message,
+    infer_derivation_type, last_message_fields, latest_timestamp, metadata_created,
+    metadata_modified, modified_ts, push_tool_message, push_unique_chunk, push_unique_message,
+    Agent, MessageRole, Session,
 };
 use super::tool_format;
 
@@ -106,21 +106,13 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
                     .unwrap_or(false);
                 let tool_use_result = value.get("toolUseResult");
 
-                let blocks = extract_message_blocks(
-                    message.get("content"),
-                    tool_use_result,
-                    is_meta,
-                );
+                let blocks =
+                    extract_message_blocks(message.get("content"), tool_use_result, is_meta);
 
                 for block in blocks {
                     match block {
                         MessageBlock::Text(text) => {
-                            push_unique_message(
-                                &mut messages,
-                                role,
-                                text.clone(),
-                                entry_timestamp,
-                            );
+                            push_unique_message(&mut messages, role, text.clone(), entry_timestamp);
                             push_unique_chunk(&mut content_chunks, text);
                         }
                         MessageBlock::ToolCall { name, text } => {
@@ -178,14 +170,14 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
     let created = created.or_else(|| metadata_created(path));
     let modified = modified.or_else(|| metadata_modified(path)).or(created);
 
-    let project = decode_claude_project_from_path(path)
-        .unwrap_or_else(|| default_project_for_cwd(cwd.as_deref()));
+    let session_id = session_id.unwrap_or_else(|| fallback_session_id(path));
+    let project = cwd.clone().unwrap_or_else(|| session_id.clone());
     let derivation_type = infer_derivation_type(path, is_sidechain);
     let (first_msg_role, first_msg_content) = first_message_fields(&messages);
     let (last_msg_role, last_msg_content) = last_message_fields(&messages);
 
     Ok(Some(Session {
-        session_id: session_id.unwrap_or_else(|| fallback_session_id(path)),
+        session_id,
         agent: Agent::Claude,
         project,
         branch,
@@ -297,7 +289,8 @@ fn extract_message_blocks(
                             .map(|s| s.trim().to_owned())
                             .filter(|s| !s.is_empty())
                             .or_else(|| {
-                                item.get("content").map(|c| tool_format::format_tool_result(c))
+                                item.get("content")
+                                    .map(|c| tool_format::format_tool_result(c))
                             })
                             .unwrap_or_default();
 
@@ -309,8 +302,7 @@ fn extract_message_blocks(
                         // Unknown block types: try to extract text
                         if let Some(text) = item.get("text").and_then(Value::as_str) {
                             push_unique_chunk(&mut text_chunks, normalize_claude_text(text));
-                        } else if let Some(text) =
-                            item.get("content").and_then(extract_nested_text)
+                        } else if let Some(text) = item.get("content").and_then(extract_nested_text)
                         {
                             push_unique_chunk(&mut text_chunks, text);
                         }

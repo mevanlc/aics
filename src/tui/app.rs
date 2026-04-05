@@ -225,7 +225,9 @@ impl App {
             search_error: None,
             should_quit: false,
             preview_visible: settings.show_preview,
-            preview_width_pct: settings.preview_width_pct.clamp(PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX),
+            preview_width_pct: settings
+                .preview_width_pct
+                .clamp(PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX),
             last_frame_area: Rect::default(),
             last_layout: None,
             overlay: Overlay::None,
@@ -1310,8 +1312,8 @@ mod tests {
     use crate::index::{IndexManager, IndexPaths, Scope, SearchFilters, SearchRequest, SortMode};
     use crate::parse::{Agent, DerivationType};
     use crate::settings::{Settings, ThemeName};
-    use crate::tui::settings::SettingsModalState;
     use crate::tui::layout;
+    use crate::tui::settings::SettingsModalState;
 
     use super::{
         build_fork_command, build_resume_command, finalize_run_result, App, AppExit, SearchWorker,

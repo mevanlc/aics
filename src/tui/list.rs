@@ -59,9 +59,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             visible_hits
                 .iter()
                 .enumerate()
-                .map(|(i, hit)| {
-                    render_item(hit, theme, content_width, selected_within == Some(i))
-                })
+                .map(|(i, hit)| render_item(hit, theme, content_width, selected_within == Some(i)))
                 .collect::<Vec<_>>()
         }
     };
@@ -101,7 +99,9 @@ pub fn slot_at_row(area: Rect, row: u16) -> Option<usize> {
 
 fn render_item(hit: &SearchHit, theme: &Theme, width: usize, selected: bool) -> ListItem<'static> {
     let chevron = if selected { "⟩" } else { " " };
-    let chevron_style = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+    let chevron_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
     let item_width = width.saturating_sub(1); // 1 for chevron
 
     let (badge, badge_color) = agent_badge(hit.session.agent, theme);
@@ -130,7 +130,10 @@ fn render_item(hit: &SearchHit, theme: &Theme, width: usize, selected: bool) -> 
                 .fg(badge_color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(meta_suffix, Style::default().fg(if selected { theme.accent } else { theme.muted })),
+        Span::styled(
+            meta_suffix,
+            Style::default().fg(if selected { theme.accent } else { theme.muted }),
+        ),
         Span::raw(padding),
         Span::styled(title_text, Style::default().fg(header_fg)),
     ])
@@ -145,10 +148,7 @@ fn render_item(hit: &SearchHit, theme: &Theme, width: usize, selected: bool) -> 
 
     let body_style = Style::default().bg(theme.list_body_bg);
     while snippet_lines.len() < PREVIEW_LINES {
-        snippet_lines.push(Line::styled(
-            " ".repeat(item_width),
-            body_style,
-        ));
+        snippet_lines.push(Line::styled(" ".repeat(item_width), body_style));
     }
 
     let mut lines = vec![header];
@@ -165,7 +165,12 @@ fn render_item(hit: &SearchHit, theme: &Theme, width: usize, selected: bool) -> 
     ListItem::new(lines)
 }
 
-fn render_item_compact(hit: &SearchHit, theme: &Theme, width: usize, selected: bool) -> ListItem<'static> {
+fn render_item_compact(
+    hit: &SearchHit,
+    theme: &Theme,
+    width: usize,
+    selected: bool,
+) -> ListItem<'static> {
     let chevron = if selected { "⟩" } else { " " };
     let item_width = width.saturating_sub(1);
     let (badge, badge_color) = agent_badge(hit.session.agent, theme);
@@ -175,9 +180,17 @@ fn render_item_compact(hit: &SearchHit, theme: &Theme, width: usize, selected: b
     let title_budget = item_width.saturating_sub(prefix_width);
     let title_text = truncate_with_ellipsis(&list_title(hit), title_budget);
     ListItem::new(Line::from(vec![
-        Span::styled(chevron, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            chevron,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(prefix, Style::default().fg(badge_color)),
-        Span::styled(title_text, Style::default().fg(if selected { theme.accent } else { theme.text })),
+        Span::styled(
+            title_text,
+            Style::default().fg(if selected { theme.accent } else { theme.text }),
+        ),
     ]))
 }
 

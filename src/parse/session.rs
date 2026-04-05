@@ -229,7 +229,7 @@ pub fn decode_claude_project_dir(encoded: &str) -> Option<String> {
     }
 
     if trimmed.starts_with('-') {
-        return Some(format!("/{}", parts.join("/")));
+        return Some(normalize_session_path(&format!("/{}", parts.join("/"))));
     }
 
     let drive = parts.first()?;
@@ -247,6 +247,28 @@ pub fn decode_claude_project_dir(encoded: &str) -> Option<String> {
     }
 
     None
+}
+
+pub fn normalize_session_path(path: &str) -> String {
+    normalize_android_app_data_path(path).unwrap_or_else(|| path.to_owned())
+}
+
+fn normalize_android_app_data_path(path: &str) -> Option<String> {
+    let stripped = path.strip_prefix("/data/data/")?;
+    let components = stripped.split('/').collect::<Vec<_>>();
+    let boundary = components.iter().position(|component| {
+        matches!(
+            *component,
+            "files" | "cache" | "code_cache" | "no_backup" | "shared_prefs" | "databases"
+        )
+    })?;
+    if boundary == 0 {
+        return None;
+    }
+
+    let package = components[..boundary].join(".");
+    let suffix = &components[boundary..];
+    Some(format!("/data/data/{package}/{}", suffix.join("/")))
 }
 
 pub fn first_message_fields(messages: &[SessionMessage]) -> (Option<MessageRole>, String) {
@@ -370,4 +392,26 @@ pub fn earliest_timestamp(
 
 pub fn system_time_or_epoch(timestamp: Option<SystemTime>) -> SystemTime {
     timestamp.unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_claude_project_dir, normalize_session_path};
+
+    #[test]
+    fn decodes_termux_project_dir_to_package_path() {
+        let decoded = decode_claude_project_dir("-data-data-com-termux-files-home-p-my-aics");
+
+        assert_eq!(
+            decoded.as_deref(),
+            Some("/data/data/com.termux/files/home/p/my/aics")
+        );
+    }
+
+    #[test]
+    fn normalizes_android_app_data_paths() {
+        let normalized = normalize_session_path("/data/data/com/termux/files/home/p/my/aics");
+
+        assert_eq!(normalized, "/data/data/com.termux/files/home/p/my/aics");
+    }
 }

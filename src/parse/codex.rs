@@ -8,10 +8,10 @@ use log::warn;
 use serde_json::{Map, Value};
 
 use super::session::{
-    default_project_for_cwd, earliest_timestamp, fallback_session_id, first_message_fields,
-    first_user_message, infer_derivation_type, last_message_fields, latest_timestamp,
-    metadata_created, metadata_modified, modified_ts, push_tool_message, push_unique_chunk,
-    push_unique_message, Agent, MessageRole, Session,
+    earliest_timestamp, fallback_session_id, first_message_fields, first_user_message,
+    infer_derivation_type, last_message_fields, latest_timestamp, metadata_created,
+    metadata_modified, modified_ts, push_tool_message, push_unique_chunk, push_unique_message,
+    Agent, MessageRole, Session,
 };
 use super::tool_format;
 
@@ -129,13 +129,14 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
 
     let created = created.or_else(|| metadata_created(path));
     let modified = modified.or_else(|| metadata_modified(path)).or(created);
-    let project = default_project_for_cwd(cwd.as_deref());
+    let session_id = session_id.unwrap_or_else(|| fallback_session_id(path));
+    let project = cwd.clone().unwrap_or_else(|| session_id.clone());
     let derivation_type = infer_derivation_type(path, false);
     let (first_msg_role, first_msg_content) = first_message_fields(&messages);
     let (last_msg_role, last_msg_content) = last_message_fields(&messages);
 
     Ok(Some(Session {
-        session_id: session_id.unwrap_or_else(|| fallback_session_id(path)),
+        session_id,
         agent: Agent::Codex,
         project,
         branch: None,
@@ -219,13 +220,7 @@ fn handle_response_item(
         }
         "function_call_output" => {
             if let Some(output) = payload.get("output").and_then(Value::as_str) {
-                push_tool_message(
-                    messages,
-                    MessageRole::ToolResult,
-                    None,
-                    output,
-                    timestamp,
-                );
+                push_tool_message(messages, MessageRole::ToolResult, None, output, timestamp);
                 push_unique_chunk(content_chunks, output);
             }
         }

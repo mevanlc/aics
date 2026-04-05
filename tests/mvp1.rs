@@ -98,6 +98,49 @@ fn parses_claude_rich_content_blocks() -> Result<()> {
 }
 
 #[test]
+fn claude_uses_initial_cwd_for_project_on_termux_paths() -> Result<()> {
+    let temp = TempDir::new()?;
+    let path = temp
+        .path()
+        .join(".claude/projects/-data-data-com-termux-files-home-p-my-aics/termux-session.jsonl");
+    write_text_file(
+        &path,
+        concat!(
+            "{\"parentUuid\":null,\"isSidechain\":false,\"userType\":\"external\",\"cwd\":\"/data/data/com.termux/files/home/p/my/aics\",\"sessionId\":\"termux-session\",\"version\":\"2.1.63\",\"gitBranch\":\"main\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"where am i\"},\"uuid\":\"uuid-1\",\"timestamp\":\"2026-04-05T12:00:00.000Z\"}\n",
+            "{\"parentUuid\":\"uuid-1\",\"isSidechain\":false,\"userType\":\"external\",\"cwd\":\"/data/data/com.termux/files/home/p/my/aics\",\"sessionId\":\"termux-session\",\"version\":\"2.1.63\",\"gitBranch\":\"main\",\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"inside the repo\"},\"uuid\":\"uuid-2\",\"timestamp\":\"2026-04-05T12:00:01.000Z\"}\n"
+        ),
+    )?;
+
+    let session = parse_claude_session_file(&path)?.expect("expected Claude session");
+
+    assert_eq!(
+        session.project,
+        "/data/data/com.termux/files/home/p/my/aics"
+    );
+    Ok(())
+}
+
+#[test]
+fn claude_falls_back_to_session_id_when_cwd_is_missing() -> Result<()> {
+    let temp = TempDir::new()?;
+    let path = temp
+        .path()
+        .join(".claude/projects/-Users-testuser-projects-myapp/missing-cwd.jsonl");
+    write_text_file(
+        &path,
+        concat!(
+            "{\"parentUuid\":null,\"isSidechain\":false,\"userType\":\"external\",\"sessionId\":\"missing-cwd-session\",\"version\":\"2.1.63\",\"gitBranch\":\"main\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"},\"uuid\":\"uuid-1\",\"timestamp\":\"2026-04-05T12:00:00.000Z\"}\n",
+            "{\"parentUuid\":\"uuid-1\",\"isSidechain\":false,\"userType\":\"external\",\"sessionId\":\"missing-cwd-session\",\"version\":\"2.1.63\",\"gitBranch\":\"main\",\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"uuid\":\"uuid-2\",\"timestamp\":\"2026-04-05T12:00:01.000Z\"}\n"
+        ),
+    )?;
+
+    let session = parse_claude_session_file(&path)?.expect("expected Claude session");
+
+    assert_eq!(session.project, "missing-cwd-session");
+    Ok(())
+}
+
+#[test]
 fn parses_codex_old_format() -> Result<()> {
     let temp = TempDir::new()?;
     let path = copy_fixture(
