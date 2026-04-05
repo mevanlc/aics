@@ -184,7 +184,7 @@ impl SettingsModalState {
         // Hint
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "  Enter save · Ctrl+S save · Esc cancel",
+                "  Enter save · ^S save · Esc cancel",
                 Style::default().fg(theme.muted),
             ))),
             rows[10],

@@ -179,7 +179,7 @@ impl FilterModalState {
 
         let instructions = Paragraph::new(vec![
             Line::from(Span::styled(
-                "Enter apply  Esc close  Ctrl+R reset  Left/Right toggle  Up/Down move",
+                "Enter apply  Esc close  ^R reset  Left/Right toggle  Up/Down move",
                 Style::default().fg(theme.muted),
             )),
             Line::from(Span::styled(

@@ -1,7 +1,7 @@
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use tui_input::backend::crossterm::EventHandler;
@@ -11,12 +11,15 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::parse::Session;
 use crate::search_query::extract_highlight_terms;
+use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::preview::{render_message_body, render_session_text};
 use crate::tui::theme::Theme;
 use crate::tui::util::{session_display_title, wrapped_text_height};
 
 const VIEWER_PAGE_STEP: usize = 12;
-const VIEWER_FOOTER_HEIGHT: u16 = 4;
+const VIEWER_SEARCH_HEIGHT: u16 = 3; // bordered search input
+const VIEWER_HINTS_HEIGHT: u16 = 2; // keymap hints (2 wrapping lines)
+const VIEWER_FOOTER_HEIGHT: u16 = VIEWER_SEARCH_HEIGHT + VIEWER_HINTS_HEIGHT;
 
 #[derive(Debug, Clone)]
 pub struct ViewerState {
@@ -39,6 +42,14 @@ enum MatchDirection {
 }
 
 impl ViewerState {
+    const HINTS: [KeymapHint; 5] = [
+        KeymapHint::new("↑↓/PgUp/PgDn/Home/End", "scroll"),
+        KeymapHint::new("^N/^P", "matches"),
+        KeymapHint::new("/", "search"),
+        KeymapHint::new("Enter", "done"),
+        KeymapHint::new("Esc", "close"),
+    ];
+
     pub fn new() -> Self {
         Self {
             scroll: 0,
@@ -86,11 +97,11 @@ impl ViewerState {
                     self.editing_search = true;
                     ViewerOutcome::Stay
                 }
-                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('n') => {
                     self.jump_to_match(MatchDirection::Next, area, session, theme);
                     ViewerOutcome::Stay
                 }
-                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('p') => {
                     self.jump_to_match(MatchDirection::Previous, area, session, theme);
                     ViewerOutcome::Stay
                 }
@@ -134,11 +145,15 @@ impl ViewerState {
             &session.project,
             session.custom_title.as_deref(),
         );
-        let text = render_session_text(
+        let mut text = render_session_text(
             session,
             theme,
             (!self.search.value().is_empty()).then_some(self.search.value()),
         );
+        if self.active_match.is_some() {
+            let viewport_width = chunks[0].width.saturating_sub(2);
+            highlight_active_match(&mut text, self.scroll, viewport_width, theme);
+        }
         let scroll = self.scroll.min(self.max_scroll(area, session, theme));
         let body = Paragraph::new(text)
             .block(
@@ -152,37 +167,40 @@ impl ViewerState {
             .scroll((scroll.min(u16::MAX as usize) as u16, 0));
         frame.render_widget(body, chunks[0]);
 
+        // Split footer into search bar (bordered) and keymap hints.
+        let footer_chunks = Layout::vertical([
+            Constraint::Length(VIEWER_SEARCH_HEIGHT),
+            Constraint::Length(VIEWER_HINTS_HEIGHT),
+        ])
+        .split(chunks[1]);
+
         let search_label = if self.editing_search {
             "Search (/)"
         } else {
             "Search (/ to edit)"
         };
-        let footer = Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(search_label, Style::default().fg(theme.muted)),
-                Span::styled(": ", Style::default().fg(theme.muted)),
-                Span::styled(self.search.value(), Style::default().fg(theme.text)),
-            ]),
-            Line::from(Span::styled(
-                "j/k scroll  Ctrl+N/P matches  PgUp/PgDn page  Home/End jump  Enter done  Esc close",
-                Style::default().fg(theme.muted),
-            )),
-        ])
+        let search_bar = Paragraph::new(Line::from(vec![
+            Span::styled(search_label, Style::default().fg(theme.muted)),
+            Span::styled(": ", Style::default().fg(theme.muted)),
+            Span::styled(self.search.value(), Style::default().fg(theme.text)),
+        ]))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(theme.border_style(self.editing_search)),
         );
-        frame.render_widget(footer, chunks[1]);
+        frame.render_widget(search_bar, footer_chunks[0]);
+
+        keymap_hint::render(frame, footer_chunks[1], &Self::HINTS, theme, "");
 
         if self.editing_search {
             // border(1) + "Search (/): "(12) = 13
-            let cursor_x = chunks[1]
+            let cursor_x = footer_chunks[0]
                 .x
                 .saturating_add(13 + self.search.visual_cursor() as u16)
-                .min(chunks[1].right().saturating_sub(1));
-            frame.set_cursor_position((cursor_x, chunks[1].y.saturating_add(1)));
+                .min(footer_chunks[0].right().saturating_sub(1));
+            frame.set_cursor_position((cursor_x, footer_chunks[0].y.saturating_add(1)));
         }
     }
 
@@ -249,6 +267,29 @@ fn split_viewer(area: Rect) -> [Rect; 2] {
     let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(VIEWER_FOOTER_HEIGHT)])
         .split(area);
     [chunks[0], chunks[1]]
+}
+
+/// Re-style search-match spans on the source line containing the active match
+/// row so the "current" match stands out from the rest.
+fn highlight_active_match(text: &mut Text<'_>, active_row: usize, width: u16, theme: &Theme) {
+    if width == 0 {
+        return;
+    }
+    let width = width as usize;
+    let mut row_offset = 0usize;
+    for line in text.lines.iter_mut() {
+        let h = wrapped_rendered_line_height(line, width);
+        if active_row >= row_offset && active_row < row_offset + h {
+            // This source line contains the active match row — promote highlights.
+            for span in &mut line.spans {
+                if span.style.bg == Some(theme.search_match_bg) {
+                    span.style.bg = Some(theme.active_match_bg);
+                }
+            }
+            return;
+        }
+        row_offset += h;
+    }
 }
 
 fn collect_match_rows(session: &Session, theme: &Theme, query: &str, width: u16) -> Vec<usize> {

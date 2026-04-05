@@ -40,7 +40,7 @@ use crate::tui::settings::{SettingsModalState, SettingsOutcome};
 use crate::tui::theme::Theme;
 use crate::tui::util::{session_display_title, wrapped_text_height};
 use crate::tui::viewer::{ViewerOutcome, ViewerState};
-use crate::tui::{layout, list, preview, search};
+use crate::tui::{keymap_hint, layout, list, preview, search};
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
 const SEARCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -176,6 +176,16 @@ pub struct App {
 }
 
 impl App {
+    const MAIN_HINTS: [keymap_hint::KeymapHint; 7] = [
+        keymap_hint::KeymapHint::new("↑↓", "select"),
+        keymap_hint::KeymapHint::new("PgUp/PgDn/Home/End", "scroll preview"),
+        keymap_hint::KeymapHint::new("^F", "filters"),
+        keymap_hint::KeymapHint::new("^O", "settings"),
+        keymap_hint::KeymapHint::new("Enter", "actions"),
+        keymap_hint::KeymapHint::new("^H/^L", "resize"),
+        keymap_hint::KeymapHint::new("^C", "quit"),
+    ];
+
     fn new(
         manager: IndexManager,
         worker: SearchWorker,
@@ -420,30 +430,7 @@ impl App {
         }
 
         let status_base = self.status_text();
-        let w = areas.status.width as usize;
-        let status_str = if w >= 110 {
-            if status_base.is_empty() {
-                "↑↓ select | PgUp/PgDn preview | Home/End preview | ^F filters | ^O settings | Enter actions | ^H/^L resize | ^C quit".to_owned()
-            } else {
-                format!("{status_base} | ↑↓ select | PgUp/PgDn preview | Home/End preview | ^F filters | ^O settings | Enter actions | ^H/^L resize | ^C quit")
-            }
-        } else if w >= 60 {
-            if status_base.is_empty() {
-                "↑↓ select Pg/Home preview Enter ^C".to_owned()
-            } else {
-                format!("{status_base} | ↑↓ select Pg/Home preview Enter ^C")
-            }
-        } else {
-            status_base
-        };
-        let status = Paragraph::new(status_str)
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .border_type(BorderType::Rounded),
-            )
-            .style(ratatui::style::Style::default().fg(theme.muted));
-        frame.render_widget(status, areas.status);
+        keymap_hint::render(frame, areas.status, &Self::MAIN_HINTS, &theme, &status_base);
 
         match self.overlay.clone() {
             Overlay::None => {}

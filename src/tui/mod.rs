@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod app;
 pub mod filter;
+pub mod keymap_hint;
 pub mod layout;
 pub mod list;
 pub mod markdown;
