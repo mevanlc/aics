@@ -433,7 +433,14 @@ impl App {
         self.last_layout = Some(areas);
         self.clamp_scroll_state(areas);
         search::render(frame, self, areas.search, &theme);
-        list::render(frame, self, areas.list, &theme);
+        list::render(
+            frame,
+            self,
+            areas.list,
+            &theme,
+            &self.settings.session_separator,
+            self.settings.snippet_line_count,
+        );
 
         if let Some(preview_area) = areas.preview {
             preview::render(frame, self, preview_area, &theme);
@@ -787,8 +794,10 @@ impl App {
     }
 
     fn list_index_at(&self, area: Rect, row: u16) -> Option<usize> {
-        let slot = list::slot_at_row(area, row)?;
-        let visible_slots = list::visible_slots(area);
+        let sep = &self.settings.session_separator;
+        let snip = self.settings.snippet_line_count;
+        let slot = list::slot_at_row(area, row, snip, sep)?;
+        let visible_slots = list::visible_slots(area, snip, sep);
         let offset = self.list_offset(visible_slots);
         let index = offset + slot;
         (index < self.results.len()).then_some(index)

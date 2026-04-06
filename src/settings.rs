@@ -59,6 +59,10 @@ pub struct Settings {
     pub show_preview: bool,
     #[serde(default = "default_preview_width_pct")]
     pub preview_width_pct: u16,
+    #[serde(default = "default_session_separator")]
+    pub session_separator: String,
+    #[serde(default = "default_snippet_line_count")]
+    pub snippet_line_count: usize,
 }
 
 fn default_claude_command() -> String {
@@ -77,6 +81,14 @@ fn default_preview_width_pct() -> u16 {
     40
 }
 
+fn default_session_separator() -> String {
+    " ".to_owned()
+}
+
+fn default_snippet_line_count() -> usize {
+    3
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -85,6 +97,8 @@ impl Default for Settings {
             codex_command: default_codex_command(),
             show_preview: default_show_preview(),
             preview_width_pct: default_preview_width_pct(),
+            session_separator: default_session_separator(),
+            snippet_line_count: default_snippet_line_count(),
         }
     }
 }
