@@ -117,10 +117,10 @@ fn scope_from_cli(cli: &Cli) -> Result<(Scope, Option<String>)> {
 
     if let Some(raw_dir) = &cli.dir {
         let (path, branch) = parse_dir_arg(raw_dir);
-        return Ok((Scope::CurrentDir(path), branch));
+        return Ok((Scope::current_dir(path), branch));
     }
 
-    Ok((Scope::CurrentDir(env::current_dir()?), None))
+    Ok((Scope::current_dir(env::current_dir()?), None))
 }
 
 fn parse_agent_arg(raw: &str) -> Option<Agent> {
@@ -209,7 +209,7 @@ mod tests {
         ]);
 
         let request = build_request(&cli).unwrap();
-        assert!(matches!(request.scope, Scope::CurrentDir(_)));
+        assert!(matches!(request.scope, Scope::CurrentDir(..)));
         assert_eq!(request.query, "deploy");
         assert_eq!(request.sort, SortMode::Time);
         assert_eq!(request.filters.agent, Some(Agent::Claude));

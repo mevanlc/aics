@@ -200,9 +200,11 @@ impl App {
         settings: Settings,
     ) -> Self {
         let local_scope = match &initial_request.scope {
-            Scope::CurrentDir(path) => Scope::CurrentDir(path.clone()),
+            Scope::CurrentDir(path, canonical) => {
+                Scope::CurrentDir(path.clone(), canonical.clone())
+            }
             Scope::Global => env::current_dir()
-                .map(Scope::CurrentDir)
+                .map(Scope::current_dir)
                 .unwrap_or(Scope::Global),
         };
 
@@ -292,7 +294,7 @@ impl App {
     pub fn scope_label(&self) -> String {
         match &self.scope {
             Scope::Global => "All Projects".to_owned(),
-            Scope::CurrentDir(path) => path
+            Scope::CurrentDir(path, _) => path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .map(ToOwned::to_owned)
@@ -908,7 +910,7 @@ impl App {
     fn local_scope_label(&self) -> String {
         match &self.local_scope {
             Scope::Global => "All Projects".to_owned(),
-            Scope::CurrentDir(path) => path
+            Scope::CurrentDir(path, _) => path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .map(ToOwned::to_owned)

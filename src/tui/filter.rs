@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn ctrl_r_resets_sort_to_time() {
-        let scope = Scope::CurrentDir(PathBuf::from("/tmp/demo"));
+        let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
         let mut state =
             FilterModalState::new(&scope, &SearchFilters::default(), SortMode::Relevance);
 

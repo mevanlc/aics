@@ -18,7 +18,16 @@ use crate::search_query::{extract_highlight_terms, has_explicit_boolean_operator
 #[derive(Debug, Clone)]
 pub enum Scope {
     Global,
-    CurrentDir(PathBuf),
+    /// The original path plus an optional canonical form (when it differs).
+    /// Both are precomputed so `matches_scope` does no filesystem I/O.
+    CurrentDir(PathBuf, Option<PathBuf>),
+}
+
+impl Scope {
+    pub fn current_dir(path: PathBuf) -> Self {
+        let canonical = path.canonicalize().ok().filter(|c| c != &path);
+        Self::CurrentDir(path, canonical)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,9 +402,9 @@ impl SearchEngine {
 fn candidate_limit(request: &SearchRequest, empty_query: bool) -> usize {
     let multiplier = match (&request.scope, empty_query) {
         (Scope::Global, true) => 4,
-        (Scope::CurrentDir(_), true) => 8,
+        (Scope::CurrentDir(..), true) => 8,
         (Scope::Global, false) => 6,
-        (Scope::CurrentDir(_), false) => 10,
+        (Scope::CurrentDir(..), false) => 10,
     };
     let ceiling = if empty_query {
         MAX_EMPTY_QUERY_CANDIDATES
@@ -441,16 +450,44 @@ fn stored_session_from_document(
 fn matches_scope(scope: &Scope, session: &StoredSession) -> bool {
     match scope {
         Scope::Global => true,
-        Scope::CurrentDir(current_dir) => {
-            let current = current_dir.to_string_lossy();
-            let candidates = [Some(session.project.as_str()), session.cwd.as_deref()];
+        Scope::CurrentDir(original, canonical) => {
+            let stored = [Some(session.project.as_str()), session.cwd.as_deref()];
 
-            candidates
-                .into_iter()
+            // Check the original path first; then the canonical form if present.
+            // This way a symlinked working dir still matches sessions that
+            // recorded the symlink path, and also matches sessions that
+            // recorded the resolved real path.
+            let original_str = original.to_string_lossy();
+            stored
+                .iter()
                 .flatten()
-                .any(|candidate| candidate == current.as_ref())
+                .any(|s| {
+                    paths_equal(&original_str, s)
+                        || canonical
+                            .as_ref()
+                            .is_some_and(|c| paths_equal(&c.to_string_lossy(), s))
+                })
         }
     }
+}
+
+fn paths_equal(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        paths_equal_windows(a, b)
+    } else {
+        a == b
+    }
+}
+
+/// Normalize and compare two paths using Windows rules: case-insensitive,
+/// forward/backslash equivalent, trailing separators ignored. Extracted so
+/// it can be tested on any platform.
+fn paths_equal_windows(a: &str, b: &str) -> bool {
+    fn normalize(p: &str) -> String {
+        let s = p.replace('\\', "/");
+        s.trim_end_matches('/').to_ascii_lowercase()
+    }
+    normalize(a) == normalize(b)
 }
 
 fn matches_request(request: &SearchRequest, session: &StoredSession, is_live: bool) -> bool {
@@ -557,7 +594,156 @@ fn replace_case_insensitive(haystack: &str, needle: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{emphasize_terms, replace_case_insensitive};
+    use super::{
+        emphasize_terms, matches_scope, paths_equal, paths_equal_windows,
+        replace_case_insensitive, Scope,
+    };
+    use crate::index::writer::StoredSession;
+    use crate::parse::{Agent, DerivationType};
+    use std::path::PathBuf;
+
+    fn stub_session(project: &str, cwd: Option<&str>) -> StoredSession {
+        StoredSession {
+            session_id: "test".into(),
+            agent: Agent::Claude,
+            project: project.into(),
+            branch: None,
+            cwd: cwd.map(Into::into),
+            modified_ts: 0,
+            lines: 0,
+            file_path: PathBuf::new(),
+            first_msg_role: None,
+            first_msg_content: String::new(),
+            last_msg_role: None,
+            last_msg_content: String::new(),
+            first_user_msg_content: String::new(),
+            derivation_type: DerivationType::Original,
+            is_sidechain: false,
+            custom_title: None,
+        }
+    }
+
+    // -- paths_equal ---------------------------------------------------------
+
+    #[test]
+    fn paths_equal_matches_identical_unix_paths() {
+        assert!(paths_equal("/home/user/repo", "/home/user/repo"));
+    }
+
+    #[test]
+    fn paths_equal_rejects_different_unix_paths() {
+        assert!(!paths_equal("/home/user/repo", "/home/user/other"));
+    }
+
+    #[test]
+    fn paths_equal_windows_case_insensitive() {
+        assert!(paths_equal_windows(
+            "C:\\Users\\Dev\\Repo",
+            "c:\\users\\dev\\repo"
+        ));
+    }
+
+    #[test]
+    fn paths_equal_windows_mixed_separators() {
+        assert!(paths_equal_windows("C:\\Repo", "c:/repo"));
+    }
+
+    #[test]
+    fn paths_equal_windows_trailing_separator() {
+        assert!(paths_equal_windows("C:\\Repo", "C:\\Repo\\"));
+        assert!(paths_equal_windows("C:\\Repo\\", "C:\\Repo"));
+        assert!(paths_equal_windows("/home/user/repo/", "/home/user/repo"));
+    }
+
+    #[test]
+    fn paths_equal_windows_rejects_different_paths() {
+        assert!(!paths_equal_windows("C:\\Repo", "C:\\Other"));
+    }
+
+    // -- matches_scope: original path ----------------------------------------
+
+    #[test]
+    fn scope_matches_session_project_by_original_path() {
+        let scope = Scope::CurrentDir(PathBuf::from("/work/myproject"), None);
+        let session = stub_session("/work/myproject", None);
+        assert!(matches_scope(&scope, &session));
+    }
+
+    #[test]
+    fn scope_matches_session_cwd_by_original_path() {
+        let scope = Scope::CurrentDir(PathBuf::from("/work/myproject"), None);
+        let session = stub_session("something-else", Some("/work/myproject"));
+        assert!(matches_scope(&scope, &session));
+    }
+
+    #[test]
+    fn scope_rejects_unrelated_session() {
+        let scope = Scope::CurrentDir(PathBuf::from("/work/myproject"), None);
+        let session = stub_session("/other/project", Some("/other/project"));
+        assert!(!matches_scope(&scope, &session));
+    }
+
+    // -- matches_scope: canonical fallback -----------------------------------
+
+    #[test]
+    fn scope_matches_via_canonical_when_original_differs() {
+        // Simulates: user is in /link/repo (symlink), session stored /real/repo
+        let scope = Scope::CurrentDir(
+            PathBuf::from("/link/repo"),
+            Some(PathBuf::from("/real/repo")),
+        );
+        let session = stub_session("/real/repo", None);
+        assert!(matches_scope(&scope, &session));
+    }
+
+    #[test]
+    fn scope_still_matches_original_when_canonical_is_present() {
+        // Simulates: user is in /link/repo, session also recorded /link/repo
+        let scope = Scope::CurrentDir(
+            PathBuf::from("/link/repo"),
+            Some(PathBuf::from("/real/repo")),
+        );
+        let session = stub_session("/link/repo", None);
+        assert!(matches_scope(&scope, &session));
+    }
+
+    #[test]
+    fn scope_canonical_matches_cwd_field_too() {
+        let scope = Scope::CurrentDir(
+            PathBuf::from("/link/repo"),
+            Some(PathBuf::from("/real/repo")),
+        );
+        let session = stub_session("unrelated", Some("/real/repo"));
+        assert!(matches_scope(&scope, &session));
+    }
+
+    // -- Scope::current_dir constructor --------------------------------------
+
+    #[test]
+    fn current_dir_constructor_resolves_dot_dot_components() {
+        // Build a path with `..` that resolves to a real directory.
+        let tmp = std::env::temp_dir();
+        let with_dotdot = tmp.join("definitely-not-real/.."); // collapses to tmp
+        let scope = Scope::current_dir(with_dotdot.clone());
+        match &scope {
+            Scope::CurrentDir(original, canonical) => {
+                assert_eq!(original, &with_dotdot);
+                // canonicalize resolves .. so canonical should differ
+                // (or be None if the original already was canonical).
+                // Either way, the canonical form should not contain "..".
+                if let Some(c) = canonical {
+                    assert!(!c.to_string_lossy().contains(".."));
+                }
+            }
+            _ => panic!("expected CurrentDir"),
+        }
+    }
+
+    #[test]
+    fn global_scope_matches_everything() {
+        let session = stub_session("/any/path", Some("/another/path"));
+        assert!(matches_scope(&Scope::Global, &session));
+    }
 
     #[test]
     fn replace_case_insensitive_preserves_original_match_casing() {
