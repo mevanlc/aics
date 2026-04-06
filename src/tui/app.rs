@@ -185,13 +185,13 @@ pub struct App {
 impl App {
     const MAIN_HINTS: [keymap_hint::KeymapHint; 8] = [
         keymap_hint::KeymapHint::new("↑↓", "select"),
-        keymap_hint::KeymapHint::new("Enter", "actions"),
+        keymap_hint::KeymapHint::new("⏎", "actions"),
         keymap_hint::KeymapHint::new("^F", "filters"),
         keymap_hint::KeymapHint::new("^S", "settings"),
-        keymap_hint::KeymapHint::new("^T", "toggle preview"),
+        keymap_hint::KeymapHint::new("^T", "toggle"),
         keymap_hint::KeymapHint::new("^H/^L", "resize"),
         keymap_hint::KeymapHint::new("^C", "quit"),
-        keymap_hint::KeymapHint::new("PgUp/PgDn/Home/End", "scroll preview"),
+        keymap_hint::KeymapHint::new("PgUp/PgDn", "scroll"),
     ];
 
     fn new(
