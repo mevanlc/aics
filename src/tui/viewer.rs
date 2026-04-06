@@ -14,7 +14,7 @@ use crate::search_query::extract_highlight_terms;
 use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::preview::{render_message_body, render_session_text};
 use crate::tui::theme::Theme;
-use crate::tui::util::{session_display_title, wrapped_text_height};
+use crate::tui::util::{block_title, wrapped_text_height};
 
 const VIEWER_PAGE_STEP: usize = 12;
 const VIEWER_SEARCH_HEIGHT: u16 = 3; // bordered search input
@@ -139,33 +139,31 @@ impl ViewerState {
     pub fn render(&self, frame: &mut Frame, area: Rect, session: &Session, theme: &Theme) {
         frame.render_widget(Clear, area);
         let chunks = split_viewer(area);
+        let body_area = chunks[0];
 
-        let title = session_display_title(
-            session.agent,
-            &session.project,
-            session.custom_title.as_deref(),
-        );
         let mut text = render_session_text(
             session,
             theme,
             (!self.search.value().is_empty()).then_some(self.search.value()),
         );
         if self.active_match.is_some() {
-            let viewport_width = chunks[0].width.saturating_sub(2);
+            let viewport_width = body_area.width.saturating_sub(2);
             highlight_active_match(&mut text, self.scroll, viewport_width, theme);
         }
-        let scroll = self.scroll.min(self.max_scroll(area, session, theme));
+        let (total_rows, viewport_height) = viewer_text_metrics(&text, body_area);
+        let scroll = self.scroll.min(total_rows.saturating_sub(viewport_height));
+        let scroll_percent = scroll_progress_percent(scroll, viewport_height, total_rows);
         let body = Paragraph::new(text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(theme.border_style(true))
-                    .title(format!("Viewer · {title}")),
+                    .title(block_title(format!("Viewer · {scroll_percent}%"))),
             )
             .wrap(Wrap { trim: false })
             .scroll((scroll.min(u16::MAX as usize) as u16, 0));
-        frame.render_widget(body, chunks[0]);
+        frame.render_widget(body, body_area);
 
         // Split footer into search bar (bordered) and keymap hints.
         let footer_chunks = Layout::vertical([
@@ -207,9 +205,7 @@ impl ViewerState {
             theme,
             (!self.search.value().is_empty()).then_some(self.search.value()),
         );
-        let viewport_height = chunks[0].height.saturating_sub(2) as usize;
-        let viewport_width = chunks[0].width.saturating_sub(2);
-        wrapped_text_height(&text, viewport_width).saturating_sub(viewport_height)
+        max_scroll_for_text(&text, chunks[0])
     }
 
     pub fn body_area(area: Rect) -> Rect {
@@ -263,6 +259,27 @@ fn split_viewer(area: Rect) -> [Rect; 2] {
     let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(VIEWER_FOOTER_HEIGHT)])
         .split(area);
     [chunks[0], chunks[1]]
+}
+
+fn viewer_text_metrics(text: &Text<'_>, area: Rect) -> (usize, usize) {
+    let viewport_height = area.height.saturating_sub(2) as usize;
+    let viewport_width = area.width.saturating_sub(2);
+    let total_rows = wrapped_text_height(text, viewport_width).max(1);
+    (total_rows, viewport_height)
+}
+
+fn max_scroll_for_text(text: &Text<'_>, area: Rect) -> usize {
+    let (total_rows, viewport_height) = viewer_text_metrics(text, area);
+    total_rows.saturating_sub(viewport_height)
+}
+
+fn scroll_progress_percent(scroll: usize, viewport_height: usize, total_rows: usize) -> usize {
+    if total_rows == 0 {
+        return 100;
+    }
+
+    let farthest_displayed_row = scroll.saturating_add(viewport_height).min(total_rows);
+    farthest_displayed_row.saturating_mul(100) / total_rows
 }
 
 /// Re-style search-match spans on the source line containing the active match
@@ -417,7 +434,8 @@ mod tests {
     use crate::tui::theme::Theme;
 
     use super::{
-        collect_match_rows, next_match_index, previous_match_index, ViewerOutcome, ViewerState,
+        collect_match_rows, next_match_index, previous_match_index, scroll_progress_percent,
+        ViewerOutcome, ViewerState,
     };
 
     #[test]
@@ -447,6 +465,14 @@ mod tests {
         assert_eq!(previous_match_index(&matches, None, 5), 0);
         assert_eq!(previous_match_index(&matches, Some(0), 0), 2);
         assert_eq!(previous_match_index(&matches, Some(2), 0), 1);
+    }
+
+    #[test]
+    fn scroll_progress_tracks_farthest_visible_row() {
+        assert_eq!(scroll_progress_percent(0, 9, 100), 9);
+        assert_eq!(scroll_progress_percent(40, 9, 100), 49);
+        assert_eq!(scroll_progress_percent(91, 9, 100), 100);
+        assert_eq!(scroll_progress_percent(0, 20, 12), 100);
     }
 
     #[test]

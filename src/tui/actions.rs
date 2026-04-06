@@ -7,6 +7,7 @@ use ratatui::Frame;
 
 use crate::tui::layout;
 use crate::tui::theme::Theme;
+use crate::tui::util::block_title;
 
 const ACTIONS: [ActionItem; 8] = [
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
@@ -92,7 +93,7 @@ impl ActionMenuState {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(theme.border_style(true))
-                    .title("Actions"),
+                    .title(block_title("Actions")),
             )
             .highlight_symbol("› ")
             .highlight_style(

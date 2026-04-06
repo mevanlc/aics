@@ -9,11 +9,15 @@ use crate::index::SearchHit;
 use crate::tui::app::App;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
-    agent_badge, list_title, parse_highlighted_html, relative_time, truncate_plain,
+    agent_badge, block_title, list_title, parse_highlighted_html, relative_time, truncate_plain,
 };
 
 fn card_height(snippet_line_count: usize, separator: &str) -> usize {
-    let body = if snippet_line_count == 0 { 0 } else { snippet_line_count };
+    let body = if snippet_line_count == 0 {
+        0
+    } else {
+        snippet_line_count
+    };
     let sep = if separator.is_empty() { 0 } else { 1 };
     1 + body + sep // header + snippet + separator
 }
@@ -41,7 +45,10 @@ pub fn render(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme.border_style(false))
-        .title(Span::styled("Sessions", Style::default().fg(theme.accent)));
+        .title(block_title(Span::styled(
+            "Sessions",
+            Style::default().fg(theme.accent),
+        )));
 
     let compact = effective_item_height(area, snippet_line_count, separator) == 1;
     let items = if app.results.is_empty() {
@@ -106,7 +113,12 @@ pub fn visible_slots(area: Rect, snippet_line_count: usize, separator: &str) -> 
     (content_height / ih).max(1)
 }
 
-pub fn slot_at_row(area: Rect, row: u16, snippet_line_count: usize, separator: &str) -> Option<usize> {
+pub fn slot_at_row(
+    area: Rect,
+    row: u16,
+    snippet_line_count: usize,
+    separator: &str,
+) -> Option<usize> {
     let inner_top = area.y.saturating_add(1);
     let inner_bottom = area.bottom().saturating_sub(1);
     if row < inner_top || row >= inner_bottom {
@@ -149,6 +161,11 @@ fn render_item(
     let title_width = UnicodeWidthStr::width(title_text.as_str());
     let padding = " ".repeat(item_width.saturating_sub(meta_width + title_width).max(1));
     let header_fg = if selected { theme.accent } else { theme.text };
+    let header_bg = if selected {
+        theme.selected_list_header_bg()
+    } else {
+        theme.list_header_bg
+    };
     let header = Line::from(vec![
         Span::styled(chevron, chevron_style),
         Span::styled(
@@ -164,7 +181,7 @@ fn render_item(
         Span::raw(padding),
         Span::styled(title_text, Style::default().fg(header_fg)),
     ])
-    .patch_style(Style::default().bg(theme.list_header_bg));
+    .patch_style(Style::default().bg(header_bg));
 
     let snippet = parse_highlighted_html(
         &hit.snippet_html,
@@ -173,7 +190,11 @@ fn render_item(
     );
     let mut snippet_rows = wrap_line(snippet, item_width, snippet_line_count);
 
-    let body_style = Style::default().bg(theme.list_body_bg);
+    let body_style = Style::default().bg(if selected {
+        theme.selected_list_body_bg()
+    } else {
+        theme.list_body_bg
+    });
     while snippet_rows.len() < snippet_line_count {
         snippet_rows.push(Line::styled(" ".repeat(item_width), body_style));
     }
@@ -189,7 +210,7 @@ fn render_item(
             .map(|line| line.patch_style(body_style)),
     );
     if !separator.is_empty() {
-        lines.push(build_separator_line(separator, item_width, theme));
+        lines.push(build_separator_line(separator, item_width, theme).patch_style(body_style));
     }
     ListItem::new(lines)
 }
@@ -225,19 +246,26 @@ fn render_item_compact(
     let prefix_width = UnicodeWidthStr::width(prefix.as_str());
     let title_budget = item_width.saturating_sub(prefix_width);
     let title_text = truncate_with_ellipsis(&list_title(hit), title_budget);
-    ListItem::new(Line::from(vec![
-        Span::styled(
-            chevron,
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(prefix, Style::default().fg(badge_color)),
-        Span::styled(
-            title_text,
-            Style::default().fg(if selected { theme.accent } else { theme.text }),
-        ),
-    ]))
+    ListItem::new(
+        Line::from(vec![
+            Span::styled(
+                chevron,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(prefix, Style::default().fg(badge_color)),
+            Span::styled(
+                title_text,
+                Style::default().fg(if selected { theme.accent } else { theme.text }),
+            ),
+        ])
+        .patch_style(Style::default().bg(if selected {
+            theme.selected_list_header_bg()
+        } else {
+            theme.list_header_bg
+        })),
+    )
 }
 
 fn format_line_count(lines: usize) -> String {

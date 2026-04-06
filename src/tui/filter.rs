@@ -14,6 +14,7 @@ use crate::parse::Agent;
 use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::layout;
 use crate::tui::theme::Theme;
+use crate::tui::util::block_title;
 
 const FIELD_ORDER: [FilterField; 12] = [
     FilterField::Scope,
@@ -157,7 +158,7 @@ impl FilterModalState {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(theme.border_style(true))
-            .title("Filters");
+            .title(block_title("Filters"));
         frame.render_widget(left_block.clone(), left_area);
 
         let left_inner = left_area.inner(ratatui::layout::Margin {

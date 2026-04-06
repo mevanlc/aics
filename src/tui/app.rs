@@ -43,7 +43,7 @@ use crate::tui::filter::{FilterModalState, FilterOutcome};
 use crate::tui::profile;
 use crate::tui::settings::{SettingsModalState, SettingsOutcome};
 use crate::tui::theme::Theme;
-use crate::tui::util::{session_display_title, wrapped_text_height};
+use crate::tui::util::{block_title, session_display_title, wrapped_text_height};
 use crate::tui::viewer::{ViewerOutcome, ViewerState};
 use crate::tui::{keymap_hint, layout, list, preview, search};
 
@@ -1084,7 +1084,7 @@ impl App {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(theme.border_style(true))
-                .title("Confirm Delete"),
+                .title(block_title("Confirm Delete")),
         );
         frame.render_widget(paragraph, popup);
     }

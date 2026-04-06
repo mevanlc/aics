@@ -71,6 +71,12 @@ pub fn session_display_title(agent: Agent, project: &str, custom_title: Option<&
     }
 }
 
+pub fn block_title<'a>(title: impl Into<Line<'a>>) -> Line<'a> {
+    let mut title = title.into();
+    title.spans.insert(0, Span::raw("─"));
+    title
+}
+
 pub fn list_meta(hit: &SearchHit) -> String {
     let mut meta = format!(
         "{} lines · {}",
@@ -241,13 +247,14 @@ mod tests {
     use std::path::Path;
 
     use ratatui::style::{Color, Style};
+    use ratatui::text::Line;
     use unicode_segmentation::UnicodeSegmentation;
 
     use ratatui::text::Text;
 
     use super::{
-        abbreviate_home_path_with, highlight_spans, highlight_styled_spans, parse_highlighted_html,
-        session_display_title, truncate_plain, wrapped_text_height,
+        abbreviate_home_path_with, block_title, highlight_spans, highlight_styled_spans,
+        parse_highlighted_html, session_display_title, truncate_plain, wrapped_text_height,
     };
 
     #[test]
@@ -381,5 +388,17 @@ mod tests {
         );
 
         assert_eq!(title, "hand-written-title");
+    }
+
+    #[test]
+    fn block_title_prefixes_top_border_dash() {
+        let title = block_title(Line::from("Viewer · 9%"));
+        let rendered = title
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered, "─Viewer · 9%");
     }
 }

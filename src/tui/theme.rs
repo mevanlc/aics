@@ -1,6 +1,7 @@
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::settings::ThemeName;
+use crate::tui::color_ext::ColorExt;
 
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -43,83 +44,105 @@ impl Theme {
     }
 
     pub fn aics() -> Self {
+        let focus_border = Color::Rgb(144, 191, 255);
+        let list_header_bg = Color::Rgb(32, 36, 43);
+        let list_body_bg = list_header_bg.darken(0.223);
+        let selection = list_body_bg.brighten(0.485);
+        let muted_greater = Color::Rgb(50, 53, 58);
+        let codex = Color::Rgb(86, 194, 131);
+        let tool = Color::Rgb(100, 200, 210);
+
         Self {
-            border: Color::Rgb(70, 76, 86),
-            focus_border: Color::Rgb(144, 191, 255),
+            border: muted_greater.brighten(0.449),
+            focus_border,
             text: Color::Rgb(230, 232, 236),
-            muted: Color::Rgb(132, 138, 148),
-            muted_greater: Color::Rgb(50, 53, 58),
-            accent: Color::Rgb(144, 191, 255),
-            selection: Color::Rgb(34, 40, 50),
+            muted: muted_greater.brighten(1.600),
+            muted_greater,
+            accent: focus_border,
+            selection,
             highlight: Color::Rgb(255, 215, 90),
             search_match_bg: Color::Rgb(92, 72, 20),
             active_match_bg: Color::Rgb(160, 130, 20),
-            list_header_bg: Color::Rgb(32, 36, 43),
-            list_body_bg: Color::Rgb(24, 27, 33),
+            list_header_bg,
+            list_body_bg,
             claude: Color::Rgb(242, 153, 74),
-            codex: Color::Rgb(86, 194, 131),
-            bubble_user: Color::Rgb(35, 43, 55),
+            codex,
+            bubble_user: selection.brighten(0.080),
             bubble_claude: Color::Rgb(74, 50, 28),
-            bubble_codex: Color::Rgb(28, 61, 46),
-            bubble_system: Color::Rgb(49, 53, 64),
+            bubble_codex: codex.darken(0.671),
+            bubble_system: list_body_bg.brighten(0.963),
             bubble_summary: Color::Rgb(60, 54, 32),
-            tool: Color::Rgb(100, 200, 210),
-            bubble_tool: Color::Rgb(25, 42, 48),
+            tool,
+            bubble_tool: tool.darken(0.775),
         }
     }
 
     /// Theme inspired by lazygit's default color scheme: green focused borders,
     /// blue selection highlights, higher contrast, terminal-native feel.
     pub fn lazygit() -> Self {
+        let border = Color::Rgb(68, 68, 68);
+        let focus_border = Color::Rgb(50, 205, 50);
+        let highlight = Color::Rgb(255, 255, 0);
+        let claude = Color::Rgb(242, 153, 74);
+        let codex = Color::Rgb(86, 194, 131);
+        let tool = Color::Rgb(80, 190, 200);
+
         Self {
-            border: Color::Rgb(68, 68, 68),
-            focus_border: Color::Rgb(50, 205, 50),
-            text: Color::Rgb(241, 241, 241),
-            muted: Color::Rgb(140, 140, 140),
-            muted_greater: Color::Rgb(51, 51, 51),
-            accent: Color::Rgb(50, 205, 50),
+            border,
+            focus_border,
+            text: border.brighten(2.545),
+            muted: border.brighten(1.059),
+            muted_greater: border.darken(0.236),
+            accent: focus_border,
             selection: Color::Rgb(0, 0, 128),
-            highlight: Color::Rgb(255, 255, 0),
-            search_match_bg: Color::Rgb(96, 96, 0),
-            active_match_bg: Color::Rgb(170, 170, 0),
-            list_header_bg: Color::Rgb(30, 30, 30),
-            list_body_bg: Color::Rgb(20, 20, 20),
-            claude: Color::Rgb(242, 153, 74),
-            codex: Color::Rgb(86, 194, 131),
+            highlight,
+            search_match_bg: highlight.darken(0.62),
+            active_match_bg: highlight.darken(0.33),
+            list_header_bg: border.darken(0.545),
+            list_body_bg: border.darken(0.692),
+            claude,
+            codex,
             bubble_user: Color::Rgb(20, 20, 50),
-            bubble_claude: Color::Rgb(50, 35, 15),
-            bubble_codex: Color::Rgb(15, 40, 30),
-            bubble_system: Color::Rgb(35, 35, 35),
+            bubble_claude: claude.darken(0.784),
+            bubble_codex: codex.darken(0.791),
+            bubble_system: border.darken(0.471),
             bubble_summary: Color::Rgb(45, 40, 20),
-            tool: Color::Rgb(80, 190, 200),
-            bubble_tool: Color::Rgb(15, 35, 40),
+            tool,
+            bubble_tool: tool.darken(0.800),
         }
     }
 
     /// Warm dusk palette with coral accents and deep indigo surfaces for a
     /// more cinematic contrast than the default terminal-style themes.
     pub fn sunset() -> Self {
+        let focus_border = Color::Rgb(255, 122, 89);
+        let codex = Color::Rgb(108, 210, 196);
+        let muted = Color::Rgb(164, 155, 162);
+        let list_header_bg = Color::Rgb(43, 36, 49);
+        let selection = list_header_bg.brighten(0.445);
+        let bubble_claude = Color::Rgb(87, 49, 31);
+
         Self {
             border: Color::Rgb(88, 80, 96),
-            focus_border: Color::Rgb(255, 122, 89),
+            focus_border,
             text: Color::Rgb(248, 239, 234),
-            muted: Color::Rgb(164, 155, 162),
-            muted_greater: Color::Rgb(61, 57, 62),
-            accent: Color::Rgb(255, 122, 89),
-            selection: Color::Rgb(63, 52, 68),
+            muted,
+            muted_greater: muted.darken(0.622),
+            accent: focus_border,
+            selection,
             highlight: Color::Rgb(255, 209, 102),
             search_match_bg: Color::Rgb(122, 78, 24),
             active_match_bg: Color::Rgb(200, 140, 30),
-            list_header_bg: Color::Rgb(43, 36, 49),
-            list_body_bg: Color::Rgb(26, 23, 31),
-            claude: Color::Rgb(255, 170, 110),
-            codex: Color::Rgb(108, 210, 196),
-            bubble_user: Color::Rgb(49, 40, 57),
-            bubble_claude: Color::Rgb(87, 49, 31),
+            list_header_bg,
+            list_body_bg: list_header_bg.darken(0.349),
+            claude: bubble_claude.brighten(2.484),
+            codex,
+            bubble_user: list_header_bg.brighten(0.143),
+            bubble_claude,
             bubble_codex: Color::Rgb(24, 73, 73),
-            bubble_system: Color::Rgb(43, 38, 49),
+            bubble_system: selection.darken(0.286),
             bubble_summary: Color::Rgb(92, 67, 31),
-            tool: Color::Rgb(108, 210, 196),
+            tool: codex,
             bubble_tool: Color::Rgb(24, 55, 55),
         }
     }
@@ -138,9 +161,32 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
+    pub fn selected_list_header_bg(&self) -> Color {
+        self.list_header_bg.brighten(1.0)
+    }
+
+    pub fn selected_list_body_bg(&self) -> Color {
+        self.list_body_bg.brighten(1.0)
+    }
+
     pub fn search_match_style(&self) -> Style {
         Style::default()
             .bg(self.search_match_bg)
             .add_modifier(Modifier::BOLD)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::style::Color;
+
+    use super::Theme;
+
+    #[test]
+    fn selected_list_colors_are_fifty_percent_brighter() {
+        let theme = Theme::aics();
+
+        assert_eq!(theme.selected_list_header_bg(), Color::Rgb(64, 72, 86));
+        assert_eq!(theme.selected_list_body_bg(), Color::Rgb(48, 54, 66));
     }
 }

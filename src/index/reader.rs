@@ -458,15 +458,12 @@ fn matches_scope(scope: &Scope, session: &StoredSession) -> bool {
             // recorded the symlink path, and also matches sessions that
             // recorded the resolved real path.
             let original_str = original.to_string_lossy();
-            stored
-                .iter()
-                .flatten()
-                .any(|s| {
-                    paths_equal(&original_str, s)
-                        || canonical
-                            .as_ref()
-                            .is_some_and(|c| paths_equal(&c.to_string_lossy(), s))
-                })
+            stored.iter().flatten().any(|s| {
+                paths_equal(&original_str, s)
+                    || canonical
+                        .as_ref()
+                        .is_some_and(|c| paths_equal(&c.to_string_lossy(), s))
+            })
         }
     }
 }
@@ -595,8 +592,8 @@ fn replace_case_insensitive(haystack: &str, needle: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        emphasize_terms, matches_scope, paths_equal, paths_equal_windows,
-        replace_case_insensitive, Scope,
+        emphasize_terms, matches_scope, paths_equal, paths_equal_windows, replace_case_insensitive,
+        Scope,
     };
     use crate::index::writer::StoredSession;
     use crate::parse::{Agent, DerivationType};

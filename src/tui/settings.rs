@@ -10,6 +10,7 @@ use tui_input::Input;
 use crate::settings::{Settings, ThemeName};
 use crate::tui::layout;
 use crate::tui::theme::Theme;
+use crate::tui::util::block_title;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsField {
@@ -138,7 +139,7 @@ impl SettingsModalState {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(theme.border_style(true))
-            .title("Settings");
+            .title(block_title("Settings"));
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
 
@@ -224,10 +225,7 @@ impl SettingsModalState {
             Style::default().fg(theme.muted)
         };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "  Session Separator",
-                label_style,
-            ))),
+            Paragraph::new(Line::from(Span::styled("  Session Separator", label_style))),
             rows[10],
         );
         self.render_text_input(frame, rows[11], theme, &self.separator_input, sep_focused);
@@ -242,10 +240,7 @@ impl SettingsModalState {
             Style::default().fg(theme.muted)
         };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "  Snippet Lines",
-                label_style,
-            ))),
+            Paragraph::new(Line::from(Span::styled("  Snippet Lines", label_style))),
             rows[13],
         );
         self.render_text_input(

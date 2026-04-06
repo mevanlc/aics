@@ -9,7 +9,7 @@ use crate::tui::app::App;
 use crate::tui::markdown::render_markdown_message;
 use crate::tui::profile;
 use crate::tui::theme::Theme;
-use crate::tui::util::{role_label, wrapped_text_height};
+use crate::tui::util::{block_title, role_label, wrapped_text_height};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let _profile = profile::scope("preview.render");
@@ -17,7 +17,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme.border_style(false))
-        .title(Span::styled("Preview", Style::default().fg(theme.accent)));
+        .title(block_title(Span::styled(
+            "Preview",
+            Style::default().fg(theme.accent),
+        )));
 
     let (text, max_scroll) = if let Some(state) = app.preview_render_state(area, theme) {
         (state.text.clone(), state.max_scroll)

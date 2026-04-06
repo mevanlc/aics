@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod app;
+pub mod color_ext;
 pub mod filter;
 pub mod keymap_hint;
 pub mod layout;
