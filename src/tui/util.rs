@@ -7,7 +7,6 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_truncate::UnicodeTruncateStr;
-use unicode_width::UnicodeWidthStr;
 
 use crate::index::SearchHit;
 use crate::parse::{normalize_session_path, Agent, MessageRole};
@@ -196,27 +195,10 @@ pub fn truncate_plain(value: &str, width: usize) -> String {
 }
 
 pub fn wrapped_text_height(text: &Text<'_>, width: u16) -> usize {
-    let width = width as usize;
-    if width == 0 {
-        return 0;
-    }
-
-    text.lines
-        .iter()
-        .map(|line| {
-            let content = line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>();
-            let display_width = UnicodeWidthStr::width(content.as_str());
-            if display_width == 0 {
-                1
-            } else {
-                ((display_width - 1) / width) + 1
-            }
-        })
-        .sum()
+    use ratatui::widgets::{Paragraph, Wrap};
+    Paragraph::new(text.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
 }
 
 fn unescape_html(value: &str) -> String {

@@ -174,11 +174,7 @@ impl ViewerState {
         ])
         .split(chunks[1]);
 
-        let search_label = if self.editing_search {
-            "Search (/)"
-        } else {
-            "Search (/ to edit)"
-        };
+        let search_label = "Search";
         let search_bar = Paragraph::new(Line::from(vec![
             Span::styled(search_label, Style::default().fg(theme.muted)),
             Span::styled(": ", Style::default().fg(theme.muted)),
@@ -195,10 +191,10 @@ impl ViewerState {
         keymap_hint::render(frame, footer_chunks[1], &Self::HINTS, theme, "");
 
         if self.editing_search {
-            // border(1) + "Search (/): "(12) = 13
+            // border(1) + "Search: "(8) = 9
             let cursor_x = footer_chunks[0]
                 .x
-                .saturating_add(13 + self.search.visual_cursor() as u16)
+                .saturating_add(9 + self.search.visual_cursor() as u16)
                 .min(footer_chunks[0].right().saturating_sub(1));
             frame.set_cursor_position((cursor_x, footer_chunks[0].y.saturating_add(1)));
         }

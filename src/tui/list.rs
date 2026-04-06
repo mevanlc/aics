@@ -41,7 +41,7 @@ pub fn render(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme.border_style(false))
-        .title("Sessions");
+        .title(Span::styled("Sessions", Style::default().fg(theme.accent)));
 
     let compact = effective_item_height(area, snippet_line_count, separator) == 1;
     let items = if app.results.is_empty() {

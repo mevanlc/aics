@@ -186,7 +186,7 @@ impl App {
         keymap_hint::KeymapHint::new("↑↓", "select"),
         keymap_hint::KeymapHint::new("Enter", "actions"),
         keymap_hint::KeymapHint::new("^F", "filters"),
-        keymap_hint::KeymapHint::new("^O", "settings"),
+        keymap_hint::KeymapHint::new("^S", "settings"),
         keymap_hint::KeymapHint::new("^T", "toggle preview"),
         keymap_hint::KeymapHint::new("^H/^L", "resize"),
         keymap_hint::KeymapHint::new("^C", "quit"),
@@ -266,18 +266,26 @@ impl App {
                     needs_redraw = false;
                 }
 
+                // Drain all pending events before redrawing so that
+                // rapid input (e.g. fast mouse scrolling) doesn't back up
+                // the event queue and cause escape-sequence mis-parsing.
                 if event::poll(self.poll_timeout())? {
-                    match event::read()? {
-                        Event::Key(key) if key.kind == KeyEventKind::Press => {
-                            self.handle_key(key)?;
-                            needs_redraw = true;
+                    while !self.should_quit {
+                        match event::read()? {
+                            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                                self.handle_key(key)?;
+                                needs_redraw = true;
+                            }
+                            Event::Mouse(mouse) => {
+                                self.handle_mouse(mouse)?;
+                                needs_redraw = true;
+                            }
+                            Event::Resize(_, _) => needs_redraw = true,
+                            _ => {}
                         }
-                        Event::Mouse(mouse) => {
-                            self.handle_mouse(mouse)?;
-                            needs_redraw = true;
+                        if !event::poll(std::time::Duration::ZERO)? {
+                            break;
                         }
-                        Event::Resize(_, _) => needs_redraw = true,
-                        _ => {}
                     }
                 }
             }
@@ -491,7 +499,7 @@ impl App {
                     self.clear_query();
                 }
             }
-            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_settings()
             }
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {

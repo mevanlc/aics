@@ -13,7 +13,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         .border_type(BorderType::Rounded)
         .border_style(theme.border_style(false))
         .title(Line::from(vec![
-            Span::styled("Search", Style::default().fg(theme.text)),
+            Span::styled("Search", Style::default().fg(theme.accent)),
             Span::styled(
                 format!(" · {}", app.scope_label()),
                 Style::default().fg(theme.muted),

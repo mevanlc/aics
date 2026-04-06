@@ -17,7 +17,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme.border_style(false))
-        .title("Preview");
+        .title(Span::styled("Preview", Style::default().fg(theme.accent)));
 
     let (text, max_scroll) = if let Some(state) = app.preview_render_state(area, theme) {
         (state.text.clone(), state.max_scroll)
