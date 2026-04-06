@@ -321,7 +321,12 @@ impl App {
     }
 
     pub fn title_status_text(&self) -> String {
-        let mut text = format!("{} results", self.results.len());
+        let truncated = self.results.len() >= self.result_limit;
+        let mut text = if truncated {
+            format!("{}+ results", self.results.len())
+        } else {
+            format!("{} results", self.results.len())
+        };
         let filter_count = self.filters.active_count();
         if filter_count > 0 {
             text.push_str(&format!(" · {filter_count} filters"));

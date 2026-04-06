@@ -25,7 +25,7 @@ struct Cli {
     dir: Option<String>,
     #[arg(long = "branch")]
     branch: Option<String>,
-    #[arg(short = 'n', long = "num-results", default_value_t = 100)]
+    #[arg(short = 'n', long = "num-results", default_value_t = 2000)]
     num_results: usize,
     #[arg(long = "agent", value_parser = ["claude", "codex"])]
     agent: Option<String>,
