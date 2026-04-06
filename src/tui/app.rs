@@ -62,7 +62,7 @@ pub enum Focus {
     Preview,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum Overlay {
     None,
     Filters(FilterModalState),
@@ -460,15 +460,24 @@ impl App {
         let status_base = self.status_text();
         keymap_hint::render(frame, areas.status, &Self::MAIN_HINTS, &theme, &status_base);
 
-        match self.overlay.clone() {
+        let local_scope_label = self.local_scope_label();
+        let viewer_theme_name = self.current_frame_theme_name();
+        let selected = self.selected;
+        let results = &self.results;
+        let preview_cache = &self.preview_cache;
+        match &mut self.overlay {
             Overlay::None => {}
             Overlay::Filters(filter_state) => {
-                filter_state.render(frame, frame.area(), &theme, &self.local_scope_label());
+                filter_state.render(frame, frame.area(), &theme, &local_scope_label);
             }
             Overlay::Actions(action_menu) => action_menu.render(frame, frame.area(), &theme),
             Overlay::Viewer(viewer_state) => {
-                if let Some(session) = self.selected_preview() {
-                    viewer_state.render(frame, frame.area(), session, &theme);
+                let session = results
+                    .get(selected)
+                    .and_then(|hit| preview_cache.get(&hit.session.file_path))
+                    .and_then(|session| session.as_ref());
+                if let Some(session) = session {
+                    viewer_state.render(frame, frame.area(), session, &theme, viewer_theme_name);
                 }
             }
             Overlay::Settings(settings_state) => settings_state.render(frame, frame.area(), &theme),
@@ -575,6 +584,7 @@ impl App {
 
     fn handle_overlay_key(&mut self, key: KeyEvent) -> Result<()> {
         let viewer_area = self.last_frame_area;
+        let viewer_theme_name = self.current_frame_theme_name();
         let viewer_session = if matches!(self.overlay, Overlay::Viewer(_)) {
             self.selected_preview().cloned()
         } else {
@@ -604,7 +614,13 @@ impl App {
                 }
             },
             Overlay::Viewer(state) => {
-                match state.handle_key(key, viewer_area, viewer_session.as_ref(), &self.theme) {
+                match state.handle_key(
+                    key,
+                    viewer_area,
+                    viewer_session.as_ref(),
+                    &self.theme,
+                    viewer_theme_name,
+                ) {
                     ViewerOutcome::Stay => {}
                     ViewerOutcome::Close => self.overlay = Overlay::None,
                 }
@@ -893,7 +909,8 @@ impl App {
 
     fn open_viewer(&mut self) {
         if self.selected_index().is_some() {
-            self.overlay = Overlay::Viewer(ViewerState::new());
+            let _ = self.selected_preview();
+            self.overlay = Overlay::Viewer(ViewerState::with_search(&self.committed_query));
         }
     }
 
@@ -933,23 +950,21 @@ impl App {
             self.preview_scroll = 0;
         }
 
-        let viewer_snapshot = match &self.overlay {
-            Overlay::Viewer(state) => Some(state.clone()),
-            _ => None,
-        };
-        let Some(viewer_state) = viewer_snapshot else {
+        if !matches!(self.overlay, Overlay::Viewer(_)) {
             return;
-        };
+        }
 
         let theme = self.current_frame_theme();
         let frame_area = self.last_frame_area;
-        let max_scroll = {
-            let session = self.selected_preview();
-            session
-                .map(|session| viewer_state.max_scroll(frame_area, session, &theme))
-                .unwrap_or(0)
-        };
-        if let Overlay::Viewer(state) = &mut self.overlay {
+        let theme_name = self.current_frame_theme_name();
+        let selected = self.selected;
+        let viewer_session = self
+            .results
+            .get(selected)
+            .and_then(|hit| self.preview_cache.get(&hit.session.file_path))
+            .and_then(|session| session.as_ref());
+        if let (Overlay::Viewer(state), Some(session)) = (&mut self.overlay, viewer_session) {
+            let max_scroll = state.max_scroll(frame_area, session, &theme, theme_name);
             state.scroll = state.scroll.min(max_scroll);
         }
     }
@@ -1449,6 +1464,20 @@ mod tests {
 
         assert_eq!(app.selected, 0);
         assert!(matches!(app.overlay, super::Overlay::Actions(_)));
+    }
+
+    #[test]
+    fn opening_viewer_prepopulates_search_with_list_query() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.committed_query = "alpha beta".to_owned();
+
+        app.open_viewer();
+
+        match &app.overlay {
+            super::Overlay::Viewer(state) => assert_eq!(state.search_query(), "alpha beta"),
+            _ => panic!("viewer should be open"),
+        }
     }
 
     #[test]

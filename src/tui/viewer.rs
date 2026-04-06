@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -13,13 +15,16 @@ use crate::parse::Session;
 use crate::search_query::extract_highlight_terms;
 use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::preview::{render_message_body, render_session_text};
+use crate::tui::profile;
 use crate::tui::theme::Theme;
 use crate::tui::util::{block_title, wrapped_text_height};
+use crate::settings::ThemeName;
 
 const VIEWER_PAGE_STEP: usize = 12;
 const VIEWER_SEARCH_HEIGHT: u16 = 3; // bordered search input
 const VIEWER_HINTS_HEIGHT: u16 = 2; // keymap hints (2 wrapping lines)
 const VIEWER_FOOTER_HEIGHT: u16 = VIEWER_SEARCH_HEIGHT + VIEWER_HINTS_HEIGHT;
+const VIEWER_MATCH_SCROLLOFF: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct ViewerState {
@@ -27,6 +32,17 @@ pub struct ViewerState {
     search: Input,
     editing_search: bool,
     active_match: Option<usize>,
+    render_cache: Option<ViewerRenderCache>,
+}
+
+#[derive(Debug, Clone)]
+struct ViewerRenderCache {
+    path: PathBuf,
+    query: String,
+    width: u16,
+    theme_name: ThemeName,
+    total_rows: usize,
+    text: Text<'static>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,11 +67,16 @@ impl ViewerState {
     ];
 
     pub fn new() -> Self {
+        Self::with_search("")
+    }
+
+    pub fn with_search(query: &str) -> Self {
         Self {
             scroll: 0,
-            search: Input::default(),
+            search: Input::default().with_value(query.to_owned()),
             editing_search: false,
             active_match: None,
+            render_cache: None,
         }
     }
 
@@ -73,6 +94,7 @@ impl ViewerState {
         area: Rect,
         session: Option<&Session>,
         theme: &Theme,
+        theme_name: ThemeName,
     ) -> ViewerOutcome {
         if self.editing_search {
             match key.code {
@@ -86,6 +108,7 @@ impl ViewerState {
                     self.search.handle_event(&Event::Key(key));
                     if self.search.value() != before {
                         self.active_match = None;
+                        self.render_cache = None;
                     }
                     ViewerOutcome::Stay
                 }
@@ -98,11 +121,11 @@ impl ViewerState {
                     ViewerOutcome::Stay
                 }
                 KeyCode::Char('n') => {
-                    self.jump_to_match(MatchDirection::Next, area, session, theme);
+                    self.jump_to_match(MatchDirection::Next, area, session, theme, theme_name);
                     ViewerOutcome::Stay
                 }
                 KeyCode::Char('p') => {
-                    self.jump_to_match(MatchDirection::Previous, area, session, theme);
+                    self.jump_to_match(MatchDirection::Previous, area, session, theme, theme_name);
                     ViewerOutcome::Stay
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -136,21 +159,28 @@ impl ViewerState {
         }
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, session: &Session, theme: &Theme) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        session: &Session,
+        theme: &Theme,
+        theme_name: ThemeName,
+    ) {
+        let _profile = profile::scope("viewer.render");
         frame.render_widget(Clear, area);
         let chunks = split_viewer(area);
         let body_area = chunks[0];
 
-        let mut text = render_session_text(
-            session,
-            theme,
-            (!self.search.value().is_empty()).then_some(self.search.value()),
-        );
+        let (total_rows, mut text) = {
+            let cache = self.render_cache(area, session, theme, theme_name);
+            (cache.total_rows, cache.text.clone())
+        };
         if self.active_match.is_some() {
             let viewport_width = body_area.width.saturating_sub(2);
             highlight_active_match(&mut text, self.scroll, viewport_width, theme);
         }
-        let (total_rows, viewport_height) = viewer_text_metrics(&text, body_area);
+        let viewport_height = body_area.height.saturating_sub(2) as usize;
         let scroll = self.scroll.min(total_rows.saturating_sub(viewport_height));
         let scroll_percent = scroll_progress_percent(scroll, viewport_height, total_rows);
         let body = Paragraph::new(text)
@@ -198,14 +228,17 @@ impl ViewerState {
         }
     }
 
-    pub fn max_scroll(&self, area: Rect, session: &Session, theme: &Theme) -> usize {
-        let chunks = split_viewer(area);
-        let text = render_session_text(
-            session,
-            theme,
-            (!self.search.value().is_empty()).then_some(self.search.value()),
-        );
-        max_scroll_for_text(&text, chunks[0])
+    pub fn max_scroll(
+        &mut self,
+        area: Rect,
+        session: &Session,
+        theme: &Theme,
+        theme_name: ThemeName,
+    ) -> usize {
+        let body_area = split_viewer(area)[0];
+        let cache = self.render_cache(area, session, theme, theme_name);
+        let viewport_height = body_area.height.saturating_sub(2) as usize;
+        cache.total_rows.saturating_sub(viewport_height)
     }
 
     pub fn body_area(area: Rect) -> Rect {
@@ -220,6 +253,7 @@ impl ViewerState {
         self.search = Input::default();
         self.editing_search = false;
         self.active_match = None;
+        self.render_cache = None;
         ViewerOutcome::Stay
     }
 
@@ -229,6 +263,7 @@ impl ViewerState {
         area: Rect,
         session: Option<&Session>,
         theme: &Theme,
+        theme_name: ThemeName,
     ) {
         let Some(session) = session else {
             self.active_match = None;
@@ -236,7 +271,8 @@ impl ViewerState {
         };
 
         let query = self.search.value();
-        let viewport_width = Self::body_area(area).width.saturating_sub(2);
+        let body_area = Self::body_area(area);
+        let viewport_width = body_area.width.saturating_sub(2);
         let matches = collect_match_rows(session, theme, query, viewport_width);
         if matches.is_empty() {
             self.active_match = None;
@@ -251,7 +287,47 @@ impl ViewerState {
         };
 
         self.active_match = Some(next_index);
-        self.scroll = matches[next_index];
+        let max_scroll = self.max_scroll(area, session, theme, theme_name);
+        let viewport_height = body_area.height.saturating_sub(2) as usize;
+        self.scroll = scroll_for_match(matches[next_index], viewport_height, max_scroll);
+    }
+
+    fn render_cache(
+        &mut self,
+        area: Rect,
+        session: &Session,
+        theme: &Theme,
+        theme_name: ThemeName,
+    ) -> &ViewerRenderCache {
+        let body_area = Self::body_area(area);
+        let width = body_area.width.saturating_sub(2);
+        let path = session.file_path.clone();
+        let query = self.search.value().to_owned();
+
+        let cache_miss = self.render_cache.as_ref().is_none_or(|cache| {
+            cache.path != path
+                || cache.query != query
+                || cache.width != width
+                || cache.theme_name != theme_name
+        });
+        if cache_miss {
+            profile::event("viewer.cache.miss");
+            let highlight_query = (!query.is_empty()).then_some(query.as_str());
+            let text = render_session_text(session, theme, highlight_query);
+            let total_rows = wrapped_text_height(&text, width).max(1);
+            self.render_cache = Some(ViewerRenderCache {
+                path,
+                query,
+                width,
+                theme_name,
+                total_rows,
+                text,
+            });
+        } else {
+            profile::event("viewer.cache.hit");
+        }
+
+        self.render_cache.as_ref().expect("viewer cache should exist")
     }
 }
 
@@ -261,18 +337,6 @@ fn split_viewer(area: Rect) -> [Rect; 2] {
     [chunks[0], chunks[1]]
 }
 
-fn viewer_text_metrics(text: &Text<'_>, area: Rect) -> (usize, usize) {
-    let viewport_height = area.height.saturating_sub(2) as usize;
-    let viewport_width = area.width.saturating_sub(2);
-    let total_rows = wrapped_text_height(text, viewport_width).max(1);
-    (total_rows, viewport_height)
-}
-
-fn max_scroll_for_text(text: &Text<'_>, area: Rect) -> usize {
-    let (total_rows, viewport_height) = viewer_text_metrics(text, area);
-    total_rows.saturating_sub(viewport_height)
-}
-
 fn scroll_progress_percent(scroll: usize, viewport_height: usize, total_rows: usize) -> usize {
     if total_rows == 0 {
         return 100;
@@ -280,6 +344,16 @@ fn scroll_progress_percent(scroll: usize, viewport_height: usize, total_rows: us
 
     let farthest_displayed_row = scroll.saturating_add(viewport_height).min(total_rows);
     farthest_displayed_row.saturating_mul(100) / total_rows
+}
+
+fn match_scrolloff(viewport_height: usize) -> usize {
+    VIEWER_MATCH_SCROLLOFF.min(viewport_height / 3)
+}
+
+fn scroll_for_match(match_row: usize, viewport_height: usize, max_scroll: usize) -> usize {
+    match_row
+        .saturating_sub(match_scrolloff(viewport_height))
+        .min(max_scroll)
 }
 
 /// Re-style search-match spans on the source line containing the active match
@@ -431,11 +505,12 @@ mod tests {
     use tui_input::Input;
 
     use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionMessage};
+    use crate::settings::ThemeName;
     use crate::tui::theme::Theme;
 
     use super::{
-        collect_match_rows, next_match_index, previous_match_index, scroll_progress_percent,
-        ViewerOutcome, ViewerState,
+        collect_match_rows, match_scrolloff, next_match_index, previous_match_index,
+        scroll_for_match, scroll_progress_percent, ViewerOutcome, ViewerState,
     };
 
     #[test]
@@ -476,6 +551,20 @@ mod tests {
     }
 
     #[test]
+    fn match_scrolloff_scales_for_short_viewports() {
+        assert_eq!(match_scrolloff(2), 0);
+        assert_eq!(match_scrolloff(6), 2);
+        assert_eq!(match_scrolloff(12), 3);
+    }
+
+    #[test]
+    fn scroll_for_match_applies_scrolloff_until_clamped() {
+        assert_eq!(scroll_for_match(10, 12, 40), 7);
+        assert_eq!(scroll_for_match(2, 12, 40), 0);
+        assert_eq!(scroll_for_match(39, 12, 30), 30);
+    }
+
+    #[test]
     fn viewer_starts_without_active_match() {
         let state = ViewerState::new();
 
@@ -494,6 +583,7 @@ mod tests {
             area,
             Some(&session),
             &Theme::default(),
+            ThemeName::Lazygit,
         );
         assert_eq!(outcome, ViewerOutcome::Stay);
         assert!(state.search_query().is_empty());
@@ -504,6 +594,7 @@ mod tests {
             area,
             Some(&session),
             &Theme::default(),
+            ThemeName::Lazygit,
         );
         assert_eq!(outcome, ViewerOutcome::Close);
     }
@@ -521,6 +612,7 @@ mod tests {
             area,
             Some(&session),
             &Theme::default(),
+            ThemeName::Lazygit,
         );
         assert_eq!(outcome, ViewerOutcome::Stay);
         assert!(state.search_query().is_empty());
@@ -537,17 +629,23 @@ mod tests {
         let next = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
         let previous = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
 
-        state.handle_key(next, area, Some(&session), &Theme::default());
+        state.handle_key(next, area, Some(&session), &Theme::default(), ThemeName::Lazygit);
         assert_eq!(state.active_match, Some(0));
-        assert_eq!(state.scroll, 1);
+        assert_eq!(state.scroll, 0);
 
-        state.handle_key(next, area, Some(&session), &Theme::default());
+        state.handle_key(next, area, Some(&session), &Theme::default(), ThemeName::Lazygit);
         assert_eq!(state.active_match, Some(1));
-        assert_eq!(state.scroll, 4);
+        assert_eq!(state.scroll, 0);
 
-        state.handle_key(previous, area, Some(&session), &Theme::default());
+        state.handle_key(
+            previous,
+            area,
+            Some(&session),
+            &Theme::default(),
+            ThemeName::Lazygit,
+        );
         assert_eq!(state.active_match, Some(0));
-        assert_eq!(state.scroll, 1);
+        assert_eq!(state.scroll, 0);
     }
 
     fn sample_session() -> Session {
