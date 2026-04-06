@@ -160,6 +160,7 @@ pub struct App {
     sort: SortMode,
     result_limit: usize,
     selected: usize,
+    list_offset: usize,
     preview_cache: HashMap<PathBuf, Option<Session>>,
     preview_render_cache: Option<PreviewRenderCache>,
     committed_query: String,
@@ -221,6 +222,7 @@ impl App {
             sort: initial_request.sort,
             result_limit: initial_request.limit.max(1),
             selected: 0,
+            list_offset: 0,
             preview_cache: HashMap::new(),
             preview_render_cache: None,
             committed_query: initial_request.query,
@@ -421,7 +423,8 @@ impl App {
         }
 
         let max_items = max_items.max(1);
-        let offset = self.selected.saturating_sub(max_items.saturating_sub(1));
+        let max_offset = self.results.len().saturating_sub(max_items);
+        let offset = self.list_offset.min(max_offset);
         let end = (offset + max_items).min(self.results.len());
         (&self.results[offset..end], Some(self.selected - offset))
     }
@@ -746,9 +749,11 @@ impl App {
                             self.preview_render_cache = None;
                             if self.results.is_empty() {
                                 self.selected = 0;
+                                self.list_offset = 0;
                             } else {
                                 self.selected =
                                     self.selected.min(self.results.len().saturating_sub(1));
+                                self.ensure_selection_visible();
                             }
                             self.preview_scroll = 0;
                             self.search_error = None;
@@ -789,6 +794,7 @@ impl App {
         let next = (self.selected as isize + delta).clamp(0, max_index);
         if next as usize != self.selected {
             self.selected = next as usize;
+            self.ensure_selection_visible();
             self.preview_scroll = 0;
         }
     }
@@ -798,6 +804,7 @@ impl App {
             return;
         }
         self.selected = index.min(self.results.len().saturating_sub(1));
+        self.ensure_selection_visible();
         self.preview_scroll = 0;
     }
 
@@ -812,7 +819,34 @@ impl App {
     }
 
     fn list_offset(&self, max_items: usize) -> usize {
-        self.selected.saturating_sub(max_items.saturating_sub(1))
+        let max_items = max_items.max(1);
+        let max_offset = self.results.len().saturating_sub(max_items);
+        self.list_offset.min(max_offset)
+    }
+
+    fn ensure_selection_visible(&mut self) {
+        let visible_slots = self
+            .last_layout
+            .map(|layout| {
+                list::visible_slots(
+                    layout.list,
+                    self.settings.snippet_line_count,
+                    &self.settings.session_separator,
+                )
+            })
+            .unwrap_or(1)
+            .max(1);
+
+        let max_offset = self.results.len().saturating_sub(visible_slots);
+        if self.selected < self.list_offset {
+            self.list_offset = self.selected;
+        } else {
+            let bottom = self.list_offset + visible_slots;
+            if self.selected >= bottom {
+                self.list_offset = self.selected.saturating_sub(visible_slots.saturating_sub(1));
+            }
+        }
+        self.list_offset = self.list_offset.min(max_offset);
     }
 
     fn preview_available(&self) -> bool {
@@ -1499,6 +1533,30 @@ mod tests {
 
         assert_eq!(app.selected, 0);
         assert_eq!(app.preview_scroll, PAGE_STEP);
+    }
+
+    #[test]
+    fn moving_up_from_bottom_visible_item_does_not_scroll_list_immediately() {
+        let mut app = test_app();
+        app.results = (0..6).map(|_| sample_hit(Agent::Claude)).collect();
+        app.last_layout = Some(layout::AppLayout {
+            search: Rect::new(0, 0, 120, 3),
+            list: Rect::new(0, 3, 60, 8),
+            preview: Some(Rect::new(60, 3, 60, 8)),
+            status: Rect::new(0, 11, 120, 2),
+        });
+
+        app.select_absolute(5);
+        let (_, selected_within) = app.list_window(3);
+        assert_eq!(app.list_offset(3), 3);
+        assert_eq!(selected_within, Some(2));
+
+        app.handle_search_key(crossterm_key(KeyCode::Up)).unwrap();
+
+        let (_, selected_within) = app.list_window(3);
+        assert_eq!(app.selected, 4);
+        assert_eq!(app.list_offset(3), 3);
+        assert_eq!(selected_within, Some(1));
     }
 
     #[test]

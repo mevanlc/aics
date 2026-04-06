@@ -195,6 +195,7 @@ fn render_item(
     } else {
         theme.list_body_bg
     });
+    let separator_style = Style::default().bg(theme.list_body_bg);
     while snippet_rows.len() < snippet_line_count {
         snippet_rows.push(Line::styled(" ".repeat(item_width), body_style));
     }
@@ -210,7 +211,9 @@ fn render_item(
             .map(|line| line.patch_style(body_style)),
     );
     if !separator.is_empty() {
-        lines.push(build_separator_line(separator, item_width, theme).patch_style(body_style));
+        lines.push(
+            build_separator_line(separator, item_width + 1, theme).patch_style(separator_style),
+        );
     }
     ListItem::new(lines)
 }
@@ -219,13 +222,15 @@ fn build_separator_line(separator: &str, width: usize, theme: &Theme) -> Line<'s
     if separator.trim().is_empty() {
         return Line::default();
     }
+    let mut text = String::from(" ");
+    let content_width = width.saturating_sub(1);
     let sep_width = UnicodeWidthStr::width(separator);
-    if sep_width == 0 {
-        return Line::default();
+    if sep_width == 0 || content_width == 0 {
+        return Line::from(Span::styled(text, Style::default().fg(theme.muted_greater)));
     }
-    let full_repeats = width / sep_width;
-    let remainder = width % sep_width;
-    let mut text = separator.repeat(full_repeats);
+    let full_repeats = content_width / sep_width;
+    let remainder = content_width % sep_width;
+    text.push_str(&separator.repeat(full_repeats));
     if remainder > 0 {
         text.push_str(&truncate_plain(separator, remainder));
     }
@@ -423,12 +428,20 @@ fn append_ellipsis(rows: &mut [Vec<Span<'static>>], row_widths: &mut [usize], wi
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::style::{Color, Style};
+    use ratatui::widgets::{List, ListState};
+    use ratatui::Terminal;
 
     use super::{
-        build_separator_line, format_line_count, slot_at_row, truncate_with_ellipsis, wrap_line,
+        build_separator_line, format_line_count, render_item, slot_at_row, truncate_with_ellipsis,
+        wrap_line,
     };
+    use crate::index::{SearchHit, StoredSession};
+    use crate::parse::{Agent, DerivationType};
     use crate::tui::theme::Theme;
 
     #[test]
@@ -522,7 +535,105 @@ mod tests {
         let theme = Theme::lazygit();
         let line = build_separator_line("-·", 7, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "-·-·-·-");
+        assert_eq!(text, " -·-·-·");
+    }
+
+    #[test]
+    fn build_separator_single_column_width_is_left_padding_only() {
+        let theme = Theme::lazygit();
+        let line = build_separator_line("-·", 1, &theme);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " ");
+    }
+
+    #[test]
+    fn render_item_separator_fills_full_row_width() {
+        let theme = Theme::lazygit();
+        let hit = SearchHit {
+            session: StoredSession {
+                session_id: "session-123".to_owned(),
+                agent: Agent::Claude,
+                project: "/tmp/demo".to_owned(),
+                branch: Some("main".to_owned()),
+                cwd: Some("/tmp/demo".to_owned()),
+                modified_ts: 0,
+                lines: 71,
+                file_path: PathBuf::from("/tmp/demo/session.jsonl"),
+                first_msg_role: None,
+                first_msg_content: String::new(),
+                last_msg_role: None,
+                last_msg_content: String::new(),
+                first_user_msg_content: String::new(),
+                derivation_type: DerivationType::Original,
+                is_sidechain: false,
+                custom_title: Some("commit /commit --all".to_owned()),
+            },
+            snippet_html: String::new(),
+            score: 0.0,
+            is_live: false,
+        };
+
+        let item = render_item(&hit, &theme, 32, false, "·", 0);
+        let backend = TestBackend::new(32, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = ListState::default();
+
+        terminal
+            .draw(|f| {
+                f.render_stateful_widget(List::new(vec![item.clone()]), f.area(), &mut state);
+            })
+            .unwrap();
+
+        let rendered = terminal.backend().buffer();
+        let separator = (0..32)
+            .map(|x| rendered[(x, 1)].symbol())
+            .collect::<String>();
+
+        assert_eq!(separator, " ·······························");
+    }
+
+    #[test]
+    fn selected_item_separator_uses_unselected_body_background() {
+        let theme = Theme::lazygit();
+        let hit = SearchHit {
+            session: StoredSession {
+                session_id: "session-123".to_owned(),
+                agent: Agent::Claude,
+                project: "/tmp/demo".to_owned(),
+                branch: Some("main".to_owned()),
+                cwd: Some("/tmp/demo".to_owned()),
+                modified_ts: 0,
+                lines: 71,
+                file_path: PathBuf::from("/tmp/demo/session.jsonl"),
+                first_msg_role: None,
+                first_msg_content: String::new(),
+                last_msg_role: None,
+                last_msg_content: String::new(),
+                first_user_msg_content: String::new(),
+                derivation_type: DerivationType::Original,
+                is_sidechain: false,
+                custom_title: Some("commit /commit --all".to_owned()),
+            },
+            snippet_html: String::new(),
+            score: 0.0,
+            is_live: false,
+        };
+
+        let item = render_item(&hit, &theme, 32, true, "·", 0);
+        let backend = TestBackend::new(32, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = ListState::default();
+
+        terminal
+            .draw(|f| {
+                f.render_stateful_widget(List::new(vec![item.clone()]), f.area(), &mut state);
+            })
+            .unwrap();
+
+        let rendered = terminal.backend().buffer();
+        for x in 0..32 {
+            assert_eq!(rendered[(x, 1)].bg, theme.list_body_bg);
+        }
     }
 
     #[test]
