@@ -14,7 +14,7 @@ This is a short status pass against [ULTRAPLAN.md](/Users/mclark/p/my/aics/aidoc
 
 - `done`: most parser, indexing, TUI, filter, viewer, JSON output, and action-dispatch foundations
 - `changed`: some original search semantics and action names evolved during implementation
-- `open`: a small number of plan items remain, mostly around sort wiring, focus behavior, and a few planned actions
+- `open`: a small number of plan items remain, mostly around snippet generation strategy and a few planned actions
 
 ## Checklist
 
@@ -31,10 +31,11 @@ This is a short status pass against [ULTRAPLAN.md](/Users/mclark/p/my/aics/aidoc
 - `done` Tantivy schema and incremental index writer
 - `done` Index rebuild support via `--rebuild-index`
 - `done` Lenient query parsing
+- `done` CLI sort wiring now uses `--sort-by <time|relevance>` with `time` as the default
 - `changed` Search snippets use the manual fallback path rather than Tantivy `SnippetGenerator` as the primary mechanism
-- `changed` Multi-word search currently behaves as AND-by-default, not the OR semantics described in ULTRAPLAN
+- `changed` Multi-word search intentionally behaves as AND-by-default; ULTRAPLAN has been updated to match that decision
 - `changed` Recency weighting exists for relevance search, but the implementation uses score post-processing rather than the originally described `TopDocs::tweak_score()`
-- `open` CLI sort wiring does not currently expose the planned relevance default vs `--by-time` switch correctly
+- `open` SnippetGenerator remains unimplemented as the primary snippet path
 
 ### TUI Foundation
 
@@ -44,13 +45,13 @@ This is a short status pass against [ULTRAPLAN.md](/Users/mclark/p/my/aics/aidoc
 - `done` App state, debounced search worker, status bar, result list, preview pane
 - `done` Full conversation viewer with inline search
 - `done` Filter modal with scope, agent, branch, date, min-lines, derivation toggles, live-only, and sort
-- `changed` Focus enum exists, but the original Tab-cycling focus model is not fully wired; list and preview handlers currently reuse search handling
+- `changed` The original Tab-cycling focus model was intentionally dropped in favor of a simpler shared-keybinding interaction model; ULTRAPLAN has been updated to reflect that decision
 
 ### CLI Surface
 
 - `done` Full flag surface from the plan is present in `clap`
 - `done` JSON output mode
-- `open` `--by-time` is parsed but not honored distinctly because requests are always built with time sort
+- `done` `--sort-by <time|relevance>` is honored distinctly, with `time` as the default
 
 ### Actions
 
@@ -79,9 +80,25 @@ This is a short status pass against [ULTRAPLAN.md](/Users/mclark/p/my/aics/aidoc
 
 These are the main remaining ULTRAPLAN items worth treating as still open:
 
-1. Wire sort mode correctly so relevance is the normal search sort and `--by-time` switches to time sort.
-2. Decide whether to keep the current AND-style multi-word semantics or restore the original OR-style semantics from ULTRAPLAN.
-3. Decide whether to keep the manual snippet path or add Tantivy `SnippetGenerator` as a primary snippet source.
-4. Either finish the planned Tab-based focus model or update ULTRAPLAN to reflect the simpler interaction model now in use.
-5. Decide whether `fork` is the final replacement for clone/continue, or whether separate trim/continue actions should still be added.
-6. Decide whether live detection should stay Claude-marker-only or be extended to Codex as well.
+1. Plan and implement Tantivy `SnippetGenerator` as the primary snippet source.
+Context: keep the current manual snippet logic as a fallback, but teach the primary path to skip noisy preambles and system-style boilerplate so list snippets surface distinctive per-session text.
+2. Decide whether `fork` is the final replacement for clone/continue, or whether separate trim/continue actions should still be added.
+3. Decide whether live detection should stay Claude-marker-only or be extended to Codex as well.
+
+## SnippetGenerator Next Step
+
+The next snippet pass should stay modest and keep the current fallback path intact.
+
+1. Add a Tantivy-backed snippet path in the search engine for matched queries only.
+2. Keep the current manual fallback for empty queries, snippet generation failures, and documents whose generated snippet is clearly low-signal.
+3. Add a snippet post-processing layer that can reject or trim boilerplate before the final snippet is shown.
+4. Add tests that prove snippets prefer distinctive matched text over generic preambles.
+
+## SnippetGenerator Future Heuristics
+
+Once the primary path exists, these are reasonable follow-ups:
+
+- Drop or de-prioritize snippets that start with repeated assistant boilerplate like "I’ll", "I'll", "Let me", or generic task restatements.
+- Drop or trim snippets dominated by system/setup text, shell wrappers, or repeated tool framing.
+- Prefer snippets that contain exact matched terms near uncommon surrounding text.
+- Fall back immediately when the generated snippet becomes too short or too generic after filtering.

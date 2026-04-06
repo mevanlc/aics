@@ -73,11 +73,11 @@ Terminals disagree on emoji width — this can't be universally solved, but the 
 Features to carry forward:
 - 200ms search debounce
 - Lenient query parsing (no syntax errors for the user)
-- Multi-word queries: OR semantics with 5x phrase boost for exact matches
+- Multi-word queries: AND semantics by default, with 5x phrase boost for exact matches unless the user explicitly uses boolean operators
 - Recency decay: 7-day half-life exponential (`1.0 + exp(-age / half_life)`)
 - Snippet generation: tantivy SnippetGenerator primary, manual keyword extraction fallback
 - Filters: scope (global vs current project), agent (claude/codex/all), session type (original/trimmed/continued/sub-agent), date range, min-lines, branch, live-only
-- Sort: by relevance (default) or by time
+- Sort: by time (default) or by relevance
 - Preview pane: first/last messages, colored by agent
 - Full conversation view with inline search
 - Action menu: view, resume, export, clone, trim, delete, copy ID/path
@@ -148,7 +148,7 @@ App state holds:
 - Filter state
 - Theme
 
-Focus model: enum with variants for each panel/modal. Tab cycles between search bar, session list, and preview. Modals (filter, actions) capture focus exclusively until dismissed.
+Focus model: enum with variants for panels/modals, but no Tab-cycling between panes. The simpler interaction model keeps search/list/preview navigation on shared keybindings, and modals (filter, actions) capture focus exclusively until dismissed.
 
 ### CLI Surface
 
@@ -166,11 +166,11 @@ Options:
   --min-lines <N>           Minimum line count
   --no-original             Exclude original sessions
   --no-trimmed              Exclude trimmed sessions
-  --no-rollover             Exclude rollover sessions
+  --no-rollover             Exclude continued sessions (rollover); `--no-continued` alias
   --sub-agent               Include sub-agent sessions
   --live                    Show only running sessions
   --json                    Output as JSONL (non-interactive)
-  --by-time                 Sort by time instead of relevance
+  --sort-by <time|relevance>  Choose result ordering (default: time)
   --rebuild-index           Force full index rebuild
 ```
 
@@ -213,7 +213,7 @@ The MVP story: user runs `aics -g`, sees all conversations sorted by last-modifi
 
 7. **Index writer** — Incremental indexing engine. On startup: load state from `~/.cache/aics/index_state.json`, scan filesystem, diff to find new/modified/deleted files, parse and index changed files, prune deleted, commit, save updated state. Handle first-run (full build) gracefully. Index stored at `~/.cache/aics/index/`. Sub-agent sessions excluded from the index by default.
 
-8. **Search engine** — Query the index. Lenient query parsing via `QueryParser::parse_query_lenient()`. Phrase boost (5x via `BoostQuery` when query has 2+ words). Recency decay via `TopDocs::tweak_score()` using the `modified_ts` fast field. Snippet generation via `SnippetGenerator` with manual fallback. Return ranked results.
+8. **Search engine** — Query the index. Lenient query parsing via `QueryParser::parse_query_lenient()`. Phrase boost (5x via `BoostQuery` when query has 2+ words and the user is not using explicit boolean operators). Time ordering is the default, with `--sort-by relevance` and the filter modal able to switch to relevance ordering when desired. Recency decay is applied to relevance scores. Snippet generation should eventually use `SnippetGenerator` as the primary path with a manual fallback. Return ranked results.
 
 #### M3: TUI — Enough to Be Useful
 
@@ -227,7 +227,7 @@ The MVP story: user runs `aics -g`, sees all conversations sorted by last-modifi
 
 13. **Search bar** — Text input with readline-style emacs keybindings: Ctrl+A (start), Ctrl+E (end), Ctrl+U (kill line), Ctrl+K (kill to end), Ctrl+W (delete word back), Alt+D (delete word forward), Alt+B/Alt+F (word back/forward). Evaluate whether `tui-input` supports these or whether `tui-textarea` is a better fit — the implementing agent should pick whichever provides the best readline coverage out of the box. Shows current scope on the right ("All Projects" vs project name). Typing triggers debounced search (200ms).
 
-14. **Session list** — Scrollable list of sessions. Default sort: by `modified_ts` descending. When a search query is active, sort by relevance instead. Each entry shows enough to identify the session: agent icon, project/cwd, snippet or first user message, line count, relative time. Selected row highlighted. Query terms highlighted in the list entries. Keybindings: j/k or arrows, Home/End, PgUp/PgDn.
+14. **Session list** — Scrollable list of sessions. Default sort is by `modified_ts` descending; relevance sort is opt-in via CLI or the filter modal. Each entry shows enough to identify the session: agent icon, project/cwd, snippet or first user message, line count, relative time. Selected row highlighted. Query terms highlighted in the list entries. Keybindings: j/k or arrows, Home/End, PgUp/PgDn.
 
 15. **Preview pane** — Shows a usable/readable form of the selected conversation in the right panel. This will be iterated on later, so start with something functional: messages labeled by role, separated visually, scrollable. Loads lazily (only when selection changes).
 
@@ -243,7 +243,7 @@ These are ordered roughly by value, but the implementing agent should use judgme
 
 19. **Rendering quality pass** — Test with emoji-heavy content, CJK characters, non-BMP, long lines. Ensure truncation is grapheme-aware via `unicode-segmentation` + `unicode-truncate`. Ensure no background color bleeding or stale characters at widget boundaries. Clear widget areas fully before redraw. Test terminal resize. Lean towards getting this right rather than just "good enough" — the old tool's rendering artifacts were a significant annoyance.
 
-20. **Full CLI flags** — Add the rest: `--dir`, `--branch`, `--agent`, `--after`, `--before`, `--min-lines`, `--no-original`, `--no-trimmed`, `--no-rollover`, `--sub-agent`, `--live`, `-n`, `--by-time`, `--json`, `--rebuild-index`.
+20. **Full CLI flags** — Add the rest: `--dir`, `--branch`, `--agent`, `--after`, `--before`, `--min-lines`, `--no-original`, `--no-trimmed`, `--no-rollover`, `--sub-agent`, `--live`, `-n`, `--sort-by`, `--json`, `--rebuild-index`.
 
 21. **Filter system** — Filters applied as a pipeline over the session list. Toggleable via keybindings or a filter modal (Ctrl+F). Includes: session type toggles, agent filter, date range, min-lines, scope, branch.
 
@@ -306,7 +306,7 @@ Tests should include, but not be limited to:
 Tests should include, but not be limited to:
 
 - Filter pipeline: scope filtering (global vs directory), agent filtering, date range filtering, session type filtering — each independently and in combination
-- Sort modes: by-time vs by-relevance produce different orderings
+- Sort modes: `--sort-by time` vs `--sort-by relevance` produce different orderings
 - Action dispatch: delete action removes file and index entry
 - JSON output mode: `--json` produces valid JSONL on stdout
 - CLI arg parsing: key flag combinations are wired correctly

@@ -39,6 +39,47 @@ fn json_mode_emits_valid_jsonl_hits() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn json_mode_accepts_sort_by_relevance() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let cache_root = temp.path().join("cache");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_aics"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CACHE_ROOT", &cache_root)
+        .env("AICS_CLAUDE_PROJECTS_DIR", &roots.0)
+        .env("AICS_CODEX_SESSIONS_DIR", &roots.1)
+        .args([
+            "--json",
+            "--sort-by",
+            "relevance",
+            "-g",
+            "-n",
+            "2",
+            "Express server",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:#?}");
+    let stdout = String::from_utf8(output.stdout)?;
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert!(!lines.is_empty());
+
+    let value: serde_json::Value = serde_json::from_str(lines[0])?;
+    assert_eq!(value["session"]["agent"], "codex");
+    assert!(value["session"]["first_user_msg_content"]
+        .as_str()
+        .is_some_and(|text| text.contains("Express server")));
+    assert!(value["snippet_html"]
+        .as_str()
+        .is_some_and(|snippet| snippet.contains("Express")));
+    Ok(())
+}
+
 fn fixture_roots(temp: &TempDir) -> Result<(PathBuf, PathBuf)> {
     copy_fixture(
         temp,

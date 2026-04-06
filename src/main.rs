@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use chrono::{Local, NaiveDate, TimeZone, Utc};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use env_logger::Env;
 
 use aics::index::{IndexManager, Scope, SearchFilters, SearchRequest, SortMode, SyncOutcome};
@@ -39,7 +39,11 @@ struct Cli {
     no_original: bool,
     #[arg(long = "no-trimmed")]
     no_trimmed: bool,
-    #[arg(long = "no-rollover")]
+    #[arg(
+        long = "no-rollover",
+        visible_alias = "no-continued",
+        help = "Exclude continued sessions (also called rollover sessions)"
+    )]
     no_rollover: bool,
     #[arg(long = "sub-agent")]
     sub_agent: bool,
@@ -47,12 +51,27 @@ struct Cli {
     live: bool,
     #[arg(long = "json")]
     json: bool,
-    #[arg(long = "by-time")]
-    by_time: bool,
+    #[arg(long = "sort-by", value_enum, default_value_t = CliSort::Time)]
+    sort_by: CliSort,
     #[arg(long = "rebuild-index")]
     rebuild_index: bool,
     #[arg()]
     query: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliSort {
+    Time,
+    Relevance,
+}
+
+impl From<CliSort> for SortMode {
+    fn from(value: CliSort) -> Self {
+        match value {
+            CliSort::Time => SortMode::Time,
+            CliSort::Relevance => SortMode::Relevance,
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -94,7 +113,7 @@ fn build_request(cli: &Cli) -> Result<SearchRequest> {
         query: cli.query.clone().unwrap_or_default(),
         scope,
         limit: cli.num_results.max(1),
-        sort: SortMode::Time,
+        sort: cli.sort_by.into(),
         filters: SearchFilters {
             agent: cli.agent.as_deref().and_then(parse_agent_arg),
             branch,
@@ -204,7 +223,8 @@ mod tests {
             "--no-trimmed",
             "--sub-agent",
             "--live",
-            "--by-time",
+            "--sort-by",
+            "time",
             "deploy",
         ]);
 
@@ -230,6 +250,16 @@ mod tests {
 
         assert_eq!(request.query, "deploy");
         assert_eq!(request.sort, SortMode::Time);
+    }
+
+    #[test]
+    fn parses_relevance_sort_from_sort_by_flag() {
+        let cli = Cli::parse_from(["aics", "--sort-by", "relevance", "deploy"]);
+
+        let request = build_request(&cli).unwrap();
+
+        assert_eq!(request.query, "deploy");
+        assert_eq!(request.sort, SortMode::Relevance);
     }
 
     #[test]
