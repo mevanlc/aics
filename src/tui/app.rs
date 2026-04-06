@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io;
+use std::io::Write;
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,6 +29,9 @@ use ratatui::{Frame, Terminal};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
+use crate::fs_safename::{
+    validate_windows_filename_component, validate_windows_stem_with_extension,
+};
 use crate::index::{
     IndexManager, Scope, SearchEngine, SearchFilters, SearchHit, SearchRequest, SortMode,
     SyncOutcome,
@@ -965,10 +970,8 @@ impl App {
         let Some(session) = self.selected_preview().cloned() else {
             bail!("no session selected");
         };
-        let path = export_path_for_session(&session)?;
         let rendered = session_to_plain_text(&session);
-        fs::write(&path, rendered)
-            .with_context(|| format!("failed to write {}", path.display()))?;
+        let path = write_session_export(&session, &rendered)?;
         self.status_message = Some(format!("exported {}", path.display()));
         Ok(())
     }
@@ -1212,39 +1215,44 @@ fn build_fork_command(hit: &SearchHit, settings: &Settings) -> Result<ExternalCo
     Ok(command)
 }
 
-fn export_path_for_session(session: &Session) -> Result<PathBuf> {
+fn write_session_export(session: &Session, rendered: &str) -> Result<PathBuf> {
+    let stem = export_stem_for_session(session)?;
+    let cwd = env::current_dir().context("failed to resolve current directory")?;
+    for suffix in 0usize.. {
+        let candidate_stem = if suffix == 0 {
+            stem.clone()
+        } else {
+            format!("{stem}-{suffix}")
+        };
+        validate_windows_stem_with_extension(&candidate_stem, "txt").with_context(|| {
+            format!("export filename `{candidate_stem}.txt` is not Windows-safe")
+        })?;
+
+        let path = cwd.join(format!("{candidate_stem}.txt"));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(rendered.as_bytes())
+                    .with_context(|| format!("failed to write {}", path.display()))?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to create {}", path.display()));
+            }
+        }
+    }
+
+    bail!("failed to allocate a unique export filename")
+}
+
+fn export_stem_for_session(session: &Session) -> Result<String> {
     let stem = session
         .custom_title
         .clone()
         .unwrap_or_else(|| session.session_id.clone());
-    let sanitized = sanitize_filename(&stem);
-    let cwd = env::current_dir().context("failed to resolve current directory")?;
-    let mut candidate = cwd.join(format!("{sanitized}.txt"));
-    let mut suffix = 1usize;
-    while candidate.exists() {
-        candidate = cwd.join(format!("{sanitized}-{suffix}.txt"));
-        suffix += 1;
-    }
-    Ok(candidate)
-}
-
-fn sanitize_filename(value: &str) -> String {
-    let sanitized = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    let trimmed = sanitized.trim_matches('-');
-    if trimmed.is_empty() {
-        "aics-session".to_owned()
-    } else {
-        trimmed.to_owned()
-    }
+    validate_windows_filename_component(&stem)
+        .with_context(|| format!("export stem `{stem}` is not Windows-safe"))?;
+    Ok(stem)
 }
 
 fn session_to_plain_text(session: &Session) -> String {
@@ -1298,6 +1306,8 @@ fn execute_handoff(command: ExternalCommand) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::mpsc;
 
@@ -1316,8 +1326,8 @@ mod tests {
     use crate::tui::settings::SettingsModalState;
 
     use super::{
-        build_fork_command, build_resume_command, finalize_run_result, App, AppExit, SearchWorker,
-        PAGE_STEP,
+        build_fork_command, build_resume_command, export_stem_for_session, finalize_run_result,
+        write_session_export, App, AppExit, SearchWorker, PAGE_STEP,
     };
 
     #[test]
@@ -1509,6 +1519,38 @@ mod tests {
     }
 
     #[test]
+    fn export_rejects_windows_reserved_titles() {
+        let mut hit = sample_hit(Agent::Claude);
+        hit.session.custom_title = Some("NUL".to_owned());
+
+        let error = export_stem_for_session_from_hit(&hit).expect_err("reserved title");
+        assert!(format!("{error:#}").contains("not Windows-safe"));
+    }
+
+    #[test]
+    fn export_uses_create_new_to_avoid_overwriting_existing_files() {
+        let temp = TempDir::new().unwrap();
+        let previous_dir = env::current_dir().unwrap();
+        env::set_current_dir(temp.path()).unwrap();
+
+        let session = sample_session_for_export("session-export");
+        fs::write(temp.path().join("session-export.txt"), "existing").unwrap();
+
+        let path = write_session_export(&session, "new contents").unwrap();
+        let first = fs::read_to_string(temp.path().join("session-export.txt")).unwrap();
+        let second = fs::read_to_string(&path).unwrap();
+
+        env::set_current_dir(previous_dir).unwrap();
+
+        assert_eq!(first, "existing");
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            "session-export-1.txt"
+        );
+        assert_eq!(second, "new contents");
+    }
+
+    #[test]
     fn confirm_delete_keeps_tui_running_when_delete_fails() {
         let temp = TempDir::new().unwrap();
         let mut app = test_app();
@@ -1608,5 +1650,35 @@ mod tests {
             score: 0.0,
             is_live: false,
         }
+    }
+
+    fn sample_session_for_export(stem: &str) -> crate::parse::Session {
+        crate::parse::Session {
+            session_id: "session-123".to_owned(),
+            agent: Agent::Claude,
+            project: "/tmp/demo".to_owned(),
+            branch: Some("main".to_owned()),
+            cwd: Some("/tmp/demo".to_owned()),
+            created: None,
+            modified: None,
+            modified_ts: 0,
+            lines: 1,
+            file_path: PathBuf::from("/tmp/demo/session.jsonl"),
+            first_msg_role: None,
+            first_msg_content: String::new(),
+            last_msg_role: None,
+            last_msg_content: String::new(),
+            first_user_msg_content: String::new(),
+            derivation_type: DerivationType::Original,
+            is_sidechain: false,
+            custom_title: Some(stem.to_owned()),
+            messages: Vec::new(),
+            content: String::new(),
+        }
+    }
+
+    fn export_stem_for_session_from_hit(hit: &SearchHit) -> Result<String, anyhow::Error> {
+        let session = sample_session_for_export(hit.session.custom_title.as_deref().unwrap_or(""));
+        export_stem_for_session(&session)
     }
 }

@@ -13,7 +13,11 @@ use aics::settings::Settings;
 use aics::tui::run_app;
 
 #[derive(Debug, Parser)]
-#[command(name = "aics", version, about = "Search Claude Code and Codex session history")]
+#[command(
+    name = "aics",
+    version,
+    about = "Search Claude Code and Codex session history"
+)]
 struct Cli {
     #[arg(short = 'g', long = "global")]
     global: bool,

@@ -1,4 +1,5 @@
 pub mod clipboard;
+pub mod fs_safename;
 pub mod index;
 pub mod live;
 pub mod parse;
