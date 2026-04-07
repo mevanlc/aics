@@ -78,12 +78,17 @@ pub fn render(
                 .iter()
                 .enumerate()
                 .map(|(i, hit)| {
+                    let item_separator = if i + 1 == visible_hits.len() {
+                        ""
+                    } else {
+                        separator
+                    };
                     render_item(
                         hit,
                         theme,
                         content_width,
                         selected_within == Some(i),
-                        separator,
+                        item_separator,
                         snippet_line_count,
                     )
                 })
@@ -110,7 +115,16 @@ pub fn render(
 pub fn visible_slots(area: Rect, snippet_line_count: usize, separator: &str) -> usize {
     let content_height = area.height.saturating_sub(2) as usize;
     let ih = effective_item_height(area, snippet_line_count, separator);
-    (content_height / ih).max(1)
+    if ih == 1 {
+        return content_height.max(1);
+    }
+
+    if separator.is_empty() {
+        return (content_height / ih).max(1);
+    }
+
+    // Full cards include a separator, but the last visible card can omit it.
+    ((content_height.saturating_add(1)) / ih).max(1)
 }
 
 pub fn slot_at_row(
@@ -126,7 +140,23 @@ pub fn slot_at_row(
     }
 
     let ih = effective_item_height(area, snippet_line_count, separator);
-    Some(((row - inner_top) as usize) / ih)
+    let inner_row = (row - inner_top) as usize;
+    if ih == 1 {
+        return Some(inner_row);
+    }
+
+    let slots = visible_slots(area, snippet_line_count, separator);
+    let max_rows_used = if separator.is_empty() {
+        slots.saturating_mul(ih)
+    } else {
+        slots.saturating_mul(ih).saturating_sub(1)
+    };
+    if inner_row >= max_rows_used {
+        return None;
+    }
+
+    let slot = inner_row / ih;
+    (slot < slots).then_some(slot)
 }
 
 fn render_item(
@@ -438,7 +468,7 @@ mod tests {
 
     use super::{
         build_separator_line, format_line_count, render_item, slot_at_row, truncate_with_ellipsis,
-        wrap_line,
+        visible_slots, wrap_line,
     };
     use crate::index::{SearchHit, StoredSession};
     use crate::parse::{Agent, DerivationType};
@@ -528,6 +558,27 @@ mod tests {
         assert_eq!(slot_at_row(area, 5, 0, " "), Some(0));
         assert_eq!(slot_at_row(area, 6, 0, " "), Some(0));
         assert_eq!(slot_at_row(area, 7, 0, " "), Some(1));
+    }
+
+    #[test]
+    fn visible_slots_uses_last_card_without_separator_when_needed() {
+        // content height = 9 rows (11 total minus 2 borders)
+        // full card height with 3 snippet lines + separator = 5 rows
+        // two full cards would be 10 rows, but two cards with no trailing separator is 9 rows.
+        let area = Rect::new(0, 0, 72, 11);
+        assert_eq!(visible_slots(area, 3, " "), 2);
+    }
+
+    #[test]
+    fn slot_at_row_ignores_trailing_blank_rows() {
+        // content height = 12 rows. With 5-row cards and last separator omitted,
+        // only 9 rows are used for two cards, so bottom rows are blank.
+        let area = Rect::new(0, 4, 72, 14);
+        assert_eq!(visible_slots(area, 3, " "), 2);
+        assert_eq!(slot_at_row(area, 5, 3, " "), Some(0));
+        assert_eq!(slot_at_row(area, 13, 3, " "), Some(1));
+        assert_eq!(slot_at_row(area, 14, 3, " "), None);
+        assert_eq!(slot_at_row(area, 15, 3, " "), None);
     }
 
     #[test]
