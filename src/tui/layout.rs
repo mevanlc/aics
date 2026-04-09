@@ -18,7 +18,7 @@ pub fn split(area: Rect, preview_width_pct: u16, show_preview: bool) -> AppLayou
 
     let show_preview = show_preview && vertical[1].width > 44;
     let body = if show_preview {
-        let preview_width_pct = preview_width_pct.clamp(25, 60);
+        let preview_width_pct = preview_width_pct.clamp(25, 75);
         let list_width_pct = 100u16.saturating_sub(preview_width_pct);
         Layout::horizontal([
             Constraint::Percentage(list_width_pct),

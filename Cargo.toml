@@ -22,6 +22,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 syntect = "5.3.0"
 tantivy = "0.25.0"
+tui-textarea = { package = "tui-textarea-2", version = "0.10.2" }
 tui-input = "0.15.0"
 unicode-segmentation = "1.12.0"
 unicode-truncate = "2.0.1"

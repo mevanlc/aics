@@ -1,0 +1,640 @@
+use std::fmt;
+
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::Frame;
+use tui_textarea::TextArea;
+
+use crate::tui::keymap_hint::{self, KeymapHint};
+use crate::tui::layout;
+use crate::tui::theme::Theme;
+use crate::tui::util::block_title;
+
+const HELP_HINTS: [KeymapHint; 4] = [
+    KeymapHint::new("Esc", "clear/close"),
+    KeymapHint::new("Tab", "switch tab"),
+    KeymapHint::new("↑↓", "move"),
+    KeymapHint::new("Type", "filter"),
+];
+
+const PAGE_STEP: usize = 8;
+const LEFT_PANEL_PREFERRED_WIDTH: u16 = 36;
+const RIGHT_PANEL_MIN_CONTENT_WIDTH: u16 = 12;
+const RIGHT_PANEL_HORIZONTAL_CHROME: u16 = 3;
+const RIGHT_PANEL_MIN_WIDTH: u16 = RIGHT_PANEL_MIN_CONTENT_WIDTH + RIGHT_PANEL_HORIZONTAL_CHROME;
+
+const SESSION_LIST_ITEMS: [HelpItem; 13] = [
+    HelpItem::new(
+        "Type",
+        "filter sessions",
+        "Type in the main search box to filter sessions. Searches dispatch after a short debounce, and the committed query is reused when you open the full viewer.",
+    ),
+    HelpItem::new(
+        "?",
+        "open this help",
+        "Open the contextual hotkey help for the session list screen. This tab is selected by default when help is opened from the main search screen.",
+    ),
+    HelpItem::new(
+        "Esc",
+        "clear query / quit",
+        "If the main query is not empty, Esc clears it and runs a fresh search. If the query is already empty, Esc exits the TUI.",
+    ),
+    HelpItem::new(
+        "↑↓",
+        "select session",
+        "Move the highlighted session up or down in the result list without opening the actions menu.",
+    ),
+    HelpItem::new(
+        "PgUp / PgDn",
+        "page preview or list",
+        "When the preview pane is visible, Page Up and Page Down scroll the preview. If the preview is hidden, they move the result selection by one page.",
+    ),
+    HelpItem::new(
+        "Home / End",
+        "jump to top / bottom",
+        "When the preview pane is visible, Home jumps to the top of the preview and End jumps to the bottom. If the preview is hidden, they jump to the first or last result instead.",
+    ),
+    HelpItem::new(
+        "Enter",
+        "open actions",
+        "Open the session actions menu for the selected result. From there you can view, export, copy metadata, delete, resume, or fork the session.",
+    ),
+    HelpItem::new(
+        "^F",
+        "filters",
+        "Open the filter modal to change scope, agent, branch, date range, derivation toggles, live-only mode, and sort order.",
+    ),
+    HelpItem::new(
+        "^S",
+        "settings",
+        "Open settings to change theme, CLI handoff commands, session separators, and snippet line count.",
+    ),
+    HelpItem::new(
+        "^T",
+        "toggle preview",
+        "Show or hide the preview pane. This preference is saved so the next launch uses the same preview visibility.",
+    ),
+    HelpItem::new(
+        "^H / ^L",
+        "resize preview",
+        "Resize the preview pane width. Ctrl+H makes the preview wider; Ctrl+L makes it narrower.",
+    ),
+    HelpItem::new(
+        "^C",
+        "quit immediately",
+        "Exit the TUI without changing the current query or selection state first.",
+    ),
+    HelpItem::new(
+        "Mouse",
+        "click and scroll",
+        "Click a session to select it. Scroll over the list to move the selection, or over the preview pane to scroll the preview content.",
+    ),
+];
+
+const VIEWER_ITEMS: [HelpItem; 11] = [
+    HelpItem::new(
+        "?",
+        "open this help",
+        "Open the contextual hotkey help while the dedicated viewer is visible. The viewer tab is selected by default when help is opened from the viewer.",
+    ),
+    HelpItem::new(
+        "Esc",
+        "clear search / close",
+        "If the viewer search box has text, Esc clears it first. If the viewer search is already empty, Esc closes the dedicated viewer and returns to the session list.",
+    ),
+    HelpItem::new(
+        "/",
+        "edit viewer search",
+        "Start editing the dedicated viewer search field. Viewer search highlights matching text inside the full conversation and drives match navigation.",
+    ),
+    HelpItem::new(
+        "Enter",
+        "finish editing search",
+        "When the viewer search field is active, Enter stops editing and leaves the current search text in place.",
+    ),
+    HelpItem::new(
+        "n / ^N",
+        "next match",
+        "Jump to the next highlighted match in the viewer. Navigation wraps when you reach the last match.",
+    ),
+    HelpItem::new(
+        "p / ^P",
+        "previous match",
+        "Jump to the previous highlighted match in the viewer. Navigation wraps when you move backward from the first match.",
+    ),
+    HelpItem::new(
+        "↑↓ / j/k",
+        "scroll line",
+        "Scroll the viewer one line at a time. Vim-style j and k are supported in addition to the arrow keys.",
+    ),
+    HelpItem::new(
+        "PgUp / PgDn",
+        "scroll page",
+        "Scroll the full conversation by a page at a time.",
+    ),
+    HelpItem::new(
+        "Home / g",
+        "jump to top",
+        "Jump to the top of the viewer. Plain g works as a shortcut in addition to Home.",
+    ),
+    HelpItem::new(
+        "End / G",
+        "jump to bottom",
+        "Jump to the bottom of the viewer. Shift+G also works as a shortcut in addition to End.",
+    ),
+    HelpItem::new(
+        "Mouse",
+        "scroll viewer",
+        "Use the mouse wheel over the viewer body to scroll the conversation without leaving the modal.",
+    ),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpTab {
+    SessionList,
+    Viewer,
+}
+
+impl HelpTab {
+    fn next(self) -> Self {
+        match self {
+            Self::SessionList => Self::Viewer,
+            Self::Viewer => Self::SessionList,
+        }
+    }
+
+    fn previous(self) -> Self {
+        self.next()
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::SessionList => "Session List",
+            Self::Viewer => "Viewer",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::SessionList => "Session List Hotkeys",
+            Self::Viewer => "Viewer Hotkeys",
+        }
+    }
+
+    fn items(self) -> &'static [HelpItem] {
+        match self {
+            Self::SessionList => &SESSION_LIST_ITEMS,
+            Self::Viewer => &VIEWER_ITEMS,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HelpItem {
+    key: &'static str,
+    short: &'static str,
+    detail: &'static str,
+}
+
+impl HelpItem {
+    const fn new(key: &'static str, short: &'static str, detail: &'static str) -> Self {
+        Self { key, short, detail }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpOutcome {
+    Stay,
+    Close,
+}
+
+pub struct HelpModalState {
+    tab: HelpTab,
+    selected: usize,
+    filter: TextArea<'static>,
+}
+
+impl fmt::Debug for HelpModalState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HelpModalState")
+            .field("tab", &self.tab)
+            .field("selected", &self.selected)
+            .field("filter", &self.filter_text())
+            .finish()
+    }
+}
+
+impl HelpModalState {
+    pub fn new(tab: HelpTab) -> Self {
+        Self {
+            tab,
+            selected: 0,
+            filter: build_filter_input(),
+        }
+    }
+
+    pub fn tab(&self) -> HelpTab {
+        self.tab
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> HelpOutcome {
+        match key.code {
+            KeyCode::Esc => {
+                if self.filter_text().is_empty() {
+                    HelpOutcome::Close
+                } else {
+                    self.clear_filter();
+                    HelpOutcome::Stay
+                }
+            }
+            KeyCode::Tab => {
+                self.switch_tab(true);
+                HelpOutcome::Stay
+            }
+            KeyCode::BackTab => {
+                self.switch_tab(false);
+                HelpOutcome::Stay
+            }
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+                self.move_selection(-1);
+                HelpOutcome::Stay
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+                self.move_selection(1);
+                HelpOutcome::Stay
+            }
+            KeyCode::PageUp => {
+                self.move_selection(-(PAGE_STEP as isize));
+                HelpOutcome::Stay
+            }
+            KeyCode::PageDown => {
+                self.move_selection(PAGE_STEP as isize);
+                HelpOutcome::Stay
+            }
+            KeyCode::Home => {
+                self.selected = 0;
+                HelpOutcome::Stay
+            }
+            KeyCode::End => {
+                self.selected = self.filtered_items().len().saturating_sub(1);
+                HelpOutcome::Stay
+            }
+            KeyCode::Enter => HelpOutcome::Stay,
+            KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                HelpOutcome::Stay
+            }
+            _ => {
+                if self.filter.input(key) {
+                    self.collapse_filter_to_single_line();
+                    self.selected = 0;
+                }
+                HelpOutcome::Stay
+            }
+        }
+    }
+
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let popup = layout::centered_rect(area, 80, 72);
+        frame.render_widget(Clear, popup);
+
+        let [left_area, right_area] = split_help_columns(popup);
+
+        let left_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(theme.border_style(true))
+            .title(block_title(self.tab.title()));
+        frame.render_widget(left_block.clone(), left_area);
+
+        let left_inner = padded_inner(left_area);
+        let left_chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(left_inner);
+
+        frame.render_widget(Paragraph::new(self.render_tabs(theme)), left_chunks[0]);
+
+        self.configure_filter_widget(theme);
+        frame.render_widget(&self.filter, left_chunks[1]);
+
+        let filtered = self.filtered_items();
+        let max_rows = left_chunks[2].height as usize;
+        let (start, end) = visible_window(filtered.len(), self.selected, max_rows);
+        let rows = if filtered.is_empty() {
+            vec![Line::from(Span::styled(
+                "No matching keys",
+                Style::default().fg(theme.muted),
+            ))]
+        } else {
+            filtered[start..end]
+                .iter()
+                .enumerate()
+                .map(|(visible_index, item)| {
+                    let absolute_index = start + visible_index;
+                    let selected = absolute_index == self.selected;
+                    let prefix = if selected { "›" } else { " " };
+                    let style = if selected {
+                        Style::default()
+                            .fg(theme.text)
+                            .bg(theme.selection)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.text)
+                    };
+                    Line::from(vec![
+                        Span::styled(prefix, style),
+                        Span::styled(format!("{:<12}", item.key), style),
+                        Span::styled(item.short, style),
+                    ])
+                })
+                .collect::<Vec<_>>()
+        };
+        frame.render_widget(Paragraph::new(rows), left_chunks[2]);
+        keymap_hint::render(frame, left_chunks[3], &HELP_HINTS, theme, "");
+
+        let right_block = Block::default()
+            .borders(Borders::TOP | Borders::RIGHT | Borders::BOTTOM)
+            .border_type(BorderType::Rounded)
+            .border_style(theme.border_style(false));
+        frame.render_widget(right_block, right_area);
+
+        let right_inner = padded_inner(right_area);
+        let desc_chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(right_inner);
+
+        let title = if let Some(item) = filtered.get(self.selected) {
+            Line::from(vec![
+                Span::styled(
+                    item.key,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    item.short,
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                ),
+            ])
+        } else {
+            Line::from(Span::styled(
+                "No matching keys",
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ))
+        };
+        frame.render_widget(Paragraph::new(title), desc_chunks[0]);
+
+        let sep_width = desc_chunks[1].width as usize;
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "─".repeat(sep_width),
+                Style::default().fg(theme.border),
+            ))),
+            desc_chunks[1],
+        );
+
+        let description = if let Some(item) = filtered.get(self.selected) {
+            format!(
+                "{}\n\nTip: the filter box supports readline-style editing shortcuts such as Ctrl+A, Ctrl+E, Ctrl+W, Alt+B, and Alt+F.",
+                item.detail
+            )
+        } else {
+            "No keys match the current filter.\n\nTip: press Esc once to clear the filter box, then Esc again to close help.".to_owned()
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(description, Style::default().fg(theme.muted)))
+                .wrap(Wrap { trim: false }),
+            desc_chunks[2],
+        );
+    }
+
+    fn switch_tab(&mut self, forward: bool) {
+        self.tab = if forward {
+            self.tab.next()
+        } else {
+            self.tab.previous()
+        };
+        self.selected = 0;
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let len = self.filtered_items().len();
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+        let max_index = len.saturating_sub(1) as isize;
+        self.selected = (self.selected as isize + delta).clamp(0, max_index) as usize;
+    }
+
+    fn filtered_items(&self) -> Vec<&'static HelpItem> {
+        let filter = self.filter_text().trim().to_ascii_lowercase();
+        self.tab
+            .items()
+            .iter()
+            .filter(|item| {
+                filter.is_empty()
+                    || item.key.to_ascii_lowercase().contains(&filter)
+                    || item.short.to_ascii_lowercase().contains(&filter)
+                    || item.detail.to_ascii_lowercase().contains(&filter)
+            })
+            .collect()
+    }
+
+    fn filter_text(&self) -> &str {
+        self.filter
+            .lines()
+            .first()
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    fn clear_filter(&mut self) {
+        self.filter = build_filter_input();
+        self.selected = 0;
+    }
+
+    fn collapse_filter_to_single_line(&mut self) {
+        let joined = self.filter.lines().join(" ");
+        if self.filter.lines().len() > 1 {
+            self.filter = build_filter_input();
+            if !joined.is_empty() {
+                self.filter.insert_str(joined);
+            }
+        }
+    }
+
+    fn configure_filter_widget(&mut self, theme: &Theme) {
+        self.filter.set_style(Style::default().fg(theme.text));
+        self.filter.set_cursor_line_style(Style::default());
+        self.filter.set_cursor_style(
+            Style::default()
+                .fg(theme.list_body_bg)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        );
+        self.filter
+            .set_placeholder_style(Style::default().fg(theme.muted_greater));
+        self.filter.set_block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme.border_style(true)),
+        );
+    }
+
+    fn render_tabs(&self, theme: &Theme) -> Line<'static> {
+        let mut spans = vec![Span::raw(" ")];
+        for (index, tab) in [HelpTab::SessionList, HelpTab::Viewer]
+            .into_iter()
+            .enumerate()
+        {
+            if index > 0 {
+                spans.push(Span::styled("  ", Style::default().fg(theme.muted)));
+            }
+            let selected = tab == self.tab;
+            let style = if selected {
+                Style::default()
+                    .fg(theme.text)
+                    .bg(theme.selection)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.muted)
+            };
+            spans.push(Span::styled(format!(" {} ", tab.label()), style));
+        }
+        Line::from(spans)
+    }
+}
+
+fn build_filter_input() -> TextArea<'static> {
+    let mut filter = TextArea::default();
+    filter.set_cursor_line_style(Style::default());
+    filter.set_placeholder_text("type to filter");
+    filter
+}
+
+fn padded_inner(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    }
+}
+
+fn split_help_columns(area: Rect) -> [Rect; 2] {
+    let left_width = preferred_left_panel_width(area.width);
+    let columns =
+        Layout::horizontal([Constraint::Length(left_width), Constraint::Min(0)]).split(area);
+    [columns[0], columns[1]]
+}
+
+fn preferred_left_panel_width(total_width: u16) -> u16 {
+    if total_width == 0 {
+        return 0;
+    }
+
+    if total_width >= LEFT_PANEL_PREFERRED_WIDTH + RIGHT_PANEL_MIN_WIDTH {
+        return LEFT_PANEL_PREFERRED_WIDTH;
+    }
+
+    total_width.saturating_sub(RIGHT_PANEL_MIN_WIDTH).max(1)
+}
+
+fn visible_window(total: usize, selected: usize, max_rows: usize) -> (usize, usize) {
+    if total == 0 {
+        return (0, 0);
+    }
+    let max_rows = max_rows.max(1);
+    let mut start = 0usize;
+    if selected >= max_rows {
+        start = selected + 1 - max_rows;
+    }
+    let end = (start + max_rows).min(total);
+    (start, end)
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
+
+    use super::{
+        preferred_left_panel_width, split_help_columns, HelpModalState, HelpOutcome, HelpTab,
+        LEFT_PANEL_PREFERRED_WIDTH, RIGHT_PANEL_MIN_CONTENT_WIDTH, RIGHT_PANEL_MIN_WIDTH,
+    };
+
+    #[test]
+    fn esc_clears_filter_before_closing() {
+        let mut help = HelpModalState::new(HelpTab::SessionList);
+        help.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+
+        assert_eq!(
+            help.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            HelpOutcome::Stay
+        );
+        assert_eq!(help.filter_text(), "");
+
+        assert_eq!(
+            help.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            HelpOutcome::Close
+        );
+    }
+
+    #[test]
+    fn tab_switches_help_tabs() {
+        let mut help = HelpModalState::new(HelpTab::SessionList);
+
+        help.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(help.tab, HelpTab::Viewer);
+
+        help.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(help.tab, HelpTab::SessionList);
+    }
+
+    #[test]
+    fn filtering_restricts_visible_entries() {
+        let mut help = HelpModalState::new(HelpTab::Viewer);
+        for ch in "mouse".chars() {
+            help.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+
+        let items = help.filtered_items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].key, "Mouse");
+    }
+
+    #[test]
+    fn right_panel_absorbs_shrink_until_minimum_content_width() {
+        let total_width = LEFT_PANEL_PREFERRED_WIDTH + RIGHT_PANEL_MIN_WIDTH + 7;
+        assert_eq!(
+            preferred_left_panel_width(total_width),
+            LEFT_PANEL_PREFERRED_WIDTH
+        );
+
+        let [left, right] = split_help_columns(Rect::new(0, 0, total_width, 20));
+        assert_eq!(left.width, LEFT_PANEL_PREFERRED_WIDTH);
+        assert_eq!(right.width, total_width - LEFT_PANEL_PREFERRED_WIDTH);
+        assert!(right.width.saturating_sub(3) >= RIGHT_PANEL_MIN_CONTENT_WIDTH);
+    }
+
+    #[test]
+    fn left_panel_shrinks_after_right_panel_hits_minimum_width() {
+        let total_width = LEFT_PANEL_PREFERRED_WIDTH + RIGHT_PANEL_MIN_WIDTH - 4;
+        let [left, right] = split_help_columns(Rect::new(0, 0, total_width, 20));
+
+        assert_eq!(right.width, RIGHT_PANEL_MIN_WIDTH);
+        assert_eq!(left.width, total_width - RIGHT_PANEL_MIN_WIDTH);
+    }
+}

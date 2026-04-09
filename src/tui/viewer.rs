@@ -13,12 +13,12 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::parse::Session;
 use crate::search_query::extract_highlight_terms;
+use crate::settings::ThemeName;
 use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::preview::{render_message_body, render_session_text};
 use crate::tui::profile;
 use crate::tui::theme::Theme;
 use crate::tui::util::{block_title, wrapped_text_height};
-use crate::settings::ThemeName;
 
 const VIEWER_PAGE_STEP: usize = 12;
 const VIEWER_SEARCH_HEIGHT: u16 = 3; // bordered search input
@@ -58,11 +58,12 @@ enum MatchDirection {
 }
 
 impl ViewerState {
-    const HINTS: [KeymapHint; 5] = [
+    const HINTS: [KeymapHint; 6] = [
         KeymapHint::new("↑↓/PgUp/PgDn/Home/End", "scroll"),
-        KeymapHint::new("^N/^P", "matches"),
+        KeymapHint::new("n/p", "matches"),
         KeymapHint::new("/", "search"),
         KeymapHint::new("Enter", "done"),
+        KeymapHint::new("?", "help"),
         KeymapHint::new("Esc", "close"),
     ];
 
@@ -327,7 +328,9 @@ impl ViewerState {
             profile::event("viewer.cache.hit");
         }
 
-        self.render_cache.as_ref().expect("viewer cache should exist")
+        self.render_cache
+            .as_ref()
+            .expect("viewer cache should exist")
     }
 }
 
@@ -629,11 +632,23 @@ mod tests {
         let next = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
         let previous = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
 
-        state.handle_key(next, area, Some(&session), &Theme::default(), ThemeName::Lazygit);
+        state.handle_key(
+            next,
+            area,
+            Some(&session),
+            &Theme::default(),
+            ThemeName::Lazygit,
+        );
         assert_eq!(state.active_match, Some(0));
         assert_eq!(state.scroll, 0);
 
-        state.handle_key(next, area, Some(&session), &Theme::default(), ThemeName::Lazygit);
+        state.handle_key(
+            next,
+            area,
+            Some(&session),
+            &Theme::default(),
+            ThemeName::Lazygit,
+        );
         assert_eq!(state.active_match, Some(1));
         assert_eq!(state.scroll, 0);
 

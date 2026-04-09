@@ -40,6 +40,7 @@ use crate::parse::{parse_session_file, MessageRole, Session};
 use crate::settings::{Settings, ThemeName};
 use crate::tui::actions::{ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::filter::{FilterModalState, FilterOutcome};
+use crate::tui::help::{HelpModalState, HelpOutcome, HelpTab};
 use crate::tui::profile;
 use crate::tui::settings::{SettingsModalState, SettingsOutcome};
 use crate::tui::theme::Theme;
@@ -53,7 +54,7 @@ const PAGE_STEP: usize = 8;
 const LIST_MOUSE_SCROLL_STEP: isize = 1;
 const PANEL_MOUSE_SCROLL_STEP: usize = 3;
 const PREVIEW_WIDTH_MIN: u16 = 25;
-const PREVIEW_WIDTH_MAX: u16 = 60;
+const PREVIEW_WIDTH_MAX: u16 = 75;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -176,6 +177,7 @@ pub struct App {
     last_frame_area: Rect,
     last_layout: Option<layout::AppLayout>,
     overlay: Overlay,
+    help: Option<HelpModalState>,
     status_message: Option<String>,
     handoff: Option<ExternalCommand>,
     settings: Settings,
@@ -183,11 +185,12 @@ pub struct App {
 }
 
 impl App {
-    const MAIN_HINTS: [keymap_hint::KeymapHint; 8] = [
+    const MAIN_HINTS: [keymap_hint::KeymapHint; 9] = [
         keymap_hint::KeymapHint::new("↑↓", "select"),
         keymap_hint::KeymapHint::new("⏎", "actions"),
         keymap_hint::KeymapHint::new("^F", "filters"),
         keymap_hint::KeymapHint::new("^S", "settings"),
+        keymap_hint::KeymapHint::new("?", "help"),
         keymap_hint::KeymapHint::new("^T", "toggle"),
         keymap_hint::KeymapHint::new("^H/^L", "resize"),
         keymap_hint::KeymapHint::new("^C", "quit"),
@@ -240,6 +243,7 @@ impl App {
             last_frame_area: Rect::default(),
             last_layout: None,
             overlay: Overlay::None,
+            help: None,
             status_message: None,
             handoff: None,
             theme: Theme::from_name(settings.theme),
@@ -488,6 +492,9 @@ impl App {
             Overlay::Settings(settings_state) => settings_state.render(frame, frame.area(), &theme),
             Overlay::ConfirmDelete => self.render_delete_confirm(frame, frame.area(), &theme),
         }
+        if let Some(help_state) = &mut self.help {
+            help_state.render(frame, frame.area(), &theme);
+        }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -496,8 +503,17 @@ impl App {
             return Ok(());
         }
 
+        if self.help.is_some() {
+            return self.handle_help_key(key);
+        }
+
         if !matches!(self.overlay, Overlay::None) {
             return self.handle_overlay_key(key);
+        }
+
+        if is_help_key(key) {
+            self.open_help(HelpTab::SessionList);
+            return Ok(());
         }
 
         match self.focus {
@@ -588,6 +604,11 @@ impl App {
     }
 
     fn handle_overlay_key(&mut self, key: KeyEvent) -> Result<()> {
+        if matches!(self.overlay, Overlay::Viewer(_)) && is_help_key(key) {
+            self.open_help(HelpTab::Viewer);
+            return Ok(());
+        }
+
         let viewer_area = self.last_frame_area;
         let viewer_theme_name = self.current_frame_theme_name();
         let viewer_session = if matches!(self.overlay, Overlay::Viewer(_)) {
@@ -654,6 +675,10 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
+        if self.help.is_some() {
+            return Ok(());
+        }
+
         if !matches!(self.overlay, Overlay::None) {
             return self.handle_overlay_mouse(mouse);
         }
@@ -864,7 +889,9 @@ impl App {
         } else {
             let bottom = self.list_offset + visible_slots;
             if self.selected >= bottom {
-                self.list_offset = self.selected.saturating_sub(visible_slots.saturating_sub(1));
+                self.list_offset = self
+                    .selected
+                    .saturating_sub(visible_slots.saturating_sub(1));
             }
         }
         self.list_offset = self.list_offset.min(max_offset);
@@ -917,6 +944,20 @@ impl App {
             let _ = self.selected_preview();
             self.overlay = Overlay::Viewer(ViewerState::with_search(&self.committed_query));
         }
+    }
+
+    fn open_help(&mut self, tab: HelpTab) {
+        self.help = Some(HelpModalState::new(tab));
+    }
+
+    fn handle_help_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(help_state) = &mut self.help else {
+            return Ok(());
+        };
+        if matches!(help_state.handle_key(key), HelpOutcome::Close) {
+            self.help = None;
+        }
+        Ok(())
     }
 
     fn clear_query(&mut self) {
@@ -1238,6 +1279,12 @@ fn contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
 }
 
+fn is_help_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('?')
+        && !key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+}
+
 fn build_resume_command(hit: &SearchHit, settings: &Settings) -> Result<ExternalCommand> {
     let cwd = hit
         .session
@@ -1395,6 +1442,7 @@ mod tests {
     use crate::index::{IndexManager, IndexPaths, Scope, SearchFilters, SearchRequest, SortMode};
     use crate::parse::{Agent, DerivationType};
     use crate::settings::{Settings, ThemeName};
+    use crate::tui::help::HelpTab;
     use crate::tui::layout;
     use crate::tui::settings::SettingsModalState;
 
@@ -1494,6 +1542,33 @@ mod tests {
             .unwrap();
 
         assert!(matches!(app.overlay, super::Overlay::None));
+    }
+
+    #[test]
+    fn question_mark_opens_help_from_main_screen() {
+        let mut app = test_app();
+
+        app.handle_key(crossterm_key(KeyCode::Char('?'))).unwrap();
+
+        assert_eq!(
+            app.help.as_ref().map(|state| state.tab()),
+            Some(HelpTab::SessionList)
+        );
+    }
+
+    #[test]
+    fn question_mark_opens_viewer_help_when_viewer_is_visible() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.open_viewer();
+
+        app.handle_key(crossterm_key(KeyCode::Char('?'))).unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+        assert_eq!(
+            app.help.as_ref().map(|state| state.tab()),
+            Some(HelpTab::Viewer)
+        );
     }
 
     #[test]
