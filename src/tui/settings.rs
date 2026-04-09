@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
+use unicode_width::UnicodeWidthStr;
 
 use crate::ring_cursor::RingCursor;
 use crate::settings::{Settings, ThemeName};
@@ -182,7 +183,7 @@ impl SettingsModalState {
             rows[1],
         );
 
-        let theme_line = self.render_theme_selector(theme, theme_focused);
+        let theme_line = self.render_theme_selector(rows[2].width, theme, theme_focused);
         frame.render_widget(Paragraph::new(theme_line), rows[2]);
 
         // Claude command field
@@ -264,13 +265,83 @@ impl SettingsModalState {
         );
     }
 
-    fn render_theme_selector(&self, theme: &Theme, focused: bool) -> Line<'static> {
-        let mut spans = vec![Span::raw("  ")];
-        for (i, name) in ThemeName::ALL.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::styled("  ", Style::default().fg(theme.muted)));
+    fn render_theme_selector(&self, width: u16, theme: &Theme, focused: bool) -> Line<'static> {
+        let indent = "  ";
+        let sep = "  ";
+        let arrow_left = " < ";
+        let arrow_right = " > ";
+        let selected_index = self.theme.index();
+        let entries: Vec<String> = ThemeName::ALL
+            .iter()
+            .map(|name| {
+                let marker = if self.theme == *name { "● " } else { "○ " };
+                format!("{marker}{}", name.label())
+            })
+            .collect();
+
+        let available_width = width as usize;
+        let indent_w = UnicodeWidthStr::width(indent);
+        let sep_w = UnicodeWidthStr::width(sep);
+        let arrow_w = UnicodeWidthStr::width(arrow_left);
+        let entry_width = |index: usize| UnicodeWidthStr::width(entries[index].as_str());
+
+        let visible_width = available_width.saturating_sub(indent_w);
+        let mut start = selected_index;
+        let mut end = selected_index + 1;
+        let mut total_w = arrow_w * 2 + entry_width(selected_index);
+
+        loop {
+            let mut grew = false;
+
+            if start > 0 {
+                let candidate_w = sep_w + entry_width(start - 1);
+                if total_w + candidate_w <= visible_width {
+                    start -= 1;
+                    total_w += candidate_w;
+                    grew = true;
+                }
             }
-            let is_selected = self.theme == *name;
+
+            if end < entries.len() {
+                let candidate_w = sep_w + entry_width(end);
+                if total_w + candidate_w <= visible_width {
+                    total_w += candidate_w;
+                    end += 1;
+                    grew = true;
+                }
+            }
+
+            if !grew {
+                break;
+            }
+        }
+
+        let active_arrow = if focused {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.muted)
+        };
+        let inactive_arrow = Style::default().fg(theme.muted_greater);
+        let separator_style = Style::default().fg(theme.muted_greater);
+
+        let mut spans = vec![Span::raw(indent)];
+        spans.push(Span::styled(
+            arrow_left,
+            if start > 0 {
+                active_arrow
+            } else {
+                inactive_arrow
+            },
+        ));
+
+        for index in start..end {
+            if index > start {
+                spans.push(Span::styled(sep, separator_style));
+            }
+
+            let is_selected = index == selected_index;
             let style = if is_selected && focused {
                 Style::default()
                     .fg(theme.text)
@@ -281,12 +352,18 @@ impl SettingsModalState {
             } else {
                 Style::default().fg(theme.muted)
             };
-            let marker = if is_selected { "● " } else { "○ " };
-            spans.push(Span::styled(format!("{marker}{}", name.label()), style));
+            spans.push(Span::styled(entries[index].clone(), style));
         }
-        if focused {
-            spans.push(Span::styled("  ◂▸", Style::default().fg(theme.muted)));
-        }
+
+        spans.push(Span::styled(
+            arrow_right,
+            if end < entries.len() {
+                active_arrow
+            } else {
+                inactive_arrow
+            },
+        ));
+
         Line::from(spans)
     }
 
@@ -361,9 +438,11 @@ fn theme_name_cursor(selected: ThemeName) -> RingCursor<ThemeName> {
 #[cfg(test)]
 mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::style::Style;
 
     use super::{SettingsField, SettingsModalState, SettingsOutcome};
     use crate::settings::{Settings, ThemeName};
+    use crate::tui::theme::Theme;
 
     #[test]
     fn enter_applies_settings_from_theme_field() {
@@ -379,5 +458,58 @@ mod tests {
             }
             other => panic!("expected apply outcome, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn theme_selector_shows_all_items_when_width_allows() {
+        let state = SettingsModalState::new(&Settings::default());
+
+        let rendered = spans_text(&state.render_theme_selector(80, &Theme::default(), false));
+
+        assert_eq!(rendered, "   < ● lazygit  ○ aics  ○ sunset  ○ late.sh > ");
+    }
+
+    #[test]
+    fn theme_selector_shows_offscreen_arrows_when_width_is_tight() {
+        let mut settings = Settings::default();
+        settings.theme = ThemeName::Sunset;
+        let state = SettingsModalState::new(&settings);
+        let theme = Theme::default();
+
+        let rendered = state.render_theme_selector(26, &theme, true);
+
+        assert_eq!(spans_text(&rendered), "   < ○ aics  ● sunset > ");
+        assert_eq!(rendered.spans[1].style, active_arrow_style(&theme));
+        assert_eq!(rendered.spans[5].style, active_arrow_style(&theme));
+    }
+
+    #[test]
+    fn theme_selector_dims_arrows_when_no_items_are_hidden() {
+        let state = SettingsModalState::new(&Settings::default());
+        let theme = Theme::default();
+
+        let rendered = state.render_theme_selector(80, &theme, true);
+
+        assert_eq!(
+            rendered.spans[1].style,
+            Style::default().fg(theme.muted_greater)
+        );
+        assert_eq!(
+            rendered.spans[9].style,
+            Style::default().fg(theme.muted_greater)
+        );
+    }
+
+    fn spans_text(line: &ratatui::text::Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    fn active_arrow_style(theme: &Theme) -> Style {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(ratatui::style::Modifier::BOLD)
     }
 }
