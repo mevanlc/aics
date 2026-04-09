@@ -1,13 +1,17 @@
 use std::env;
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use chrono::{Local, NaiveDate, TimeZone, Utc};
 use clap::{Parser, ValueEnum};
 use env_logger::Env;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
-use aics::index::{IndexManager, Scope, SearchFilters, SearchRequest, SortMode, SyncOutcome};
+use aics::index::{
+    IndexManager, Scope, SearchFilters, SearchRequest, SortMode, SyncOutcome, SyncProgress,
+};
 use aics::parse::Agent;
 use aics::settings::Settings;
 use aics::tui::run_app;
@@ -55,6 +59,10 @@ struct Cli {
     sort_by: CliSort,
     #[arg(long = "rebuild-index")]
     rebuild_index: bool,
+    #[arg(long = "delete-index", conflicts_with = "rebuild_index")]
+    delete_index: bool,
+    #[arg(long = "progress", value_enum, default_value_t = CliProgress::Err)]
+    progress: CliProgress,
     #[arg()]
     query: Option<String>,
 }
@@ -63,6 +71,13 @@ struct Cli {
 enum CliSort {
     Time,
     Relevance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliProgress {
+    None,
+    Err,
+    Out,
 }
 
 impl From<CliSort> for SortMode {
@@ -77,9 +92,24 @@ impl From<CliSort> for SortMode {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("warn")).init();
     let cli = Cli::parse();
-    let settings = Settings::load().unwrap_or_default();
     let manager = IndexManager::new()?;
-    match manager.sync_best_effort(cli.rebuild_index)? {
+    if cli.delete_index {
+        manager.delete_index()?;
+        return Ok(());
+    }
+    validate_terminal_mode(&cli)?;
+    let settings = Settings::load().unwrap_or_default();
+    let sync_outcome = if let Some(draw_target) = progress_draw_target(cli.progress, cli.json) {
+        let mut progress = StartupProgress::new(draw_target);
+        let outcome = manager.sync_best_effort_with_progress(cli.rebuild_index, |event| {
+            progress.update(event);
+        });
+        progress.finish();
+        outcome?
+    } else {
+        manager.sync_best_effort(cli.rebuild_index)?
+    };
+    match sync_outcome {
         SyncOutcome::Completed(_) | SyncOutcome::Busy => {}
     }
     let request = build_request(&cli)?;
@@ -92,11 +122,67 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if !std::io::stdout().is_terminal() {
+    run_app(manager, search_engine, request, settings)
+}
+
+fn validate_terminal_mode(cli: &Cli) -> Result<()> {
+    if cli.json && cli.progress == CliProgress::Out {
+        bail!("--progress out conflicts with --json because stdout is reserved for JSON output");
+    }
+
+    if !cli.delete_index && !cli.json && !std::io::stdout().is_terminal() {
         bail!("stdout is not a terminal; use --json for non-interactive output");
     }
 
-    run_app(manager, search_engine, request, settings)
+    Ok(())
+}
+
+fn progress_draw_target(mode: CliProgress, json_mode: bool) -> Option<ProgressDrawTarget> {
+    match mode {
+        CliProgress::None => None,
+        CliProgress::Err => std::io::stderr()
+            .is_terminal()
+            .then(ProgressDrawTarget::stderr),
+        CliProgress::Out if json_mode => None,
+        CliProgress::Out => std::io::stdout()
+            .is_terminal()
+            .then(ProgressDrawTarget::stdout),
+    }
+}
+
+struct StartupProgress {
+    bar: ProgressBar,
+}
+
+impl StartupProgress {
+    fn new(draw_target: ProgressDrawTarget) -> Self {
+        let bar = ProgressBar::with_draw_target(None, draw_target);
+        bar.set_style(bar_style());
+        bar.enable_steady_tick(Duration::from_millis(100));
+        Self { bar }
+    }
+
+    fn update(&mut self, event: SyncProgress) {
+        match event {
+            SyncProgress::Discovering { .. } => {}
+            SyncProgress::IndexingStarted { total } => {
+                self.bar.set_length(total as u64);
+            }
+            SyncProgress::IndexingProgress { processed, .. } => {
+                self.bar.set_position(processed as u64);
+            }
+        }
+    }
+
+    fn finish(self) {
+        self.bar.finish_and_clear();
+    }
+}
+
+fn bar_style() -> ProgressStyle {
+    ProgressStyle::with_template("Indexing {bar:40}")
+        .expect("valid progress template")
+        .progress_chars("=> ")
 }
 
 fn build_request(cli: &Cli) -> Result<SearchRequest> {
@@ -202,7 +288,10 @@ fn parse_date(raw: &str, end_of_day: bool) -> Result<u64> {
 mod tests {
     use clap::Parser;
 
-    use super::{build_request, parse_after_date, parse_before_date, parse_dir_arg, Cli};
+    use super::{
+        build_request, parse_after_date, parse_before_date, parse_dir_arg, validate_terminal_mode,
+        Cli, CliProgress,
+    };
     use aics::index::{Scope, SortMode};
     use aics::parse::Agent;
 
@@ -277,5 +366,27 @@ mod tests {
         let (path, branch) = parse_dir_arg("/tmp/project:feature-x");
         assert_eq!(path.to_string_lossy(), "/tmp/project");
         assert_eq!(branch.as_deref(), Some("feature-x"));
+    }
+
+    #[test]
+    fn defaults_progress_to_stderr() {
+        let cli = Cli::parse_from(["aics", "deploy"]);
+        assert_eq!(cli.progress, CliProgress::Err);
+    }
+
+    #[test]
+    fn rejects_stdout_progress_in_json_mode() {
+        let cli = Cli::parse_from(["aics", "--json", "--progress", "out", "deploy"]);
+        let error = validate_terminal_mode(&cli).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("--progress out conflicts with --json"));
+    }
+
+    #[test]
+    fn parses_delete_index_flag() {
+        let cli = Cli::parse_from(["aics", "--delete-index"]);
+        assert!(cli.delete_index);
+        assert!(!cli.rebuild_index);
     }
 }

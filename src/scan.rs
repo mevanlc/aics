@@ -23,6 +23,16 @@ pub struct SessionFile {
     pub size: u64,
 }
 
+pub(crate) trait ScanProgressObserver {
+    fn on_discovered(&mut self, discovered: usize);
+}
+
+struct NoopScanProgress;
+
+impl ScanProgressObserver for NoopScanProgress {
+    fn on_discovered(&mut self, _discovered: usize) {}
+}
+
 pub fn default_session_roots() -> Result<SessionRoots> {
     let base_dirs = BaseDirs::new().context("failed to locate home directory")?;
     let home = base_dirs.home_dir();
@@ -47,22 +57,40 @@ pub fn scan_default_session_files() -> Result<Vec<SessionFile>> {
 }
 
 pub fn scan_session_files(roots: &SessionRoots) -> Result<Vec<SessionFile>> {
+    let mut progress = NoopScanProgress;
+    scan_session_files_with_progress(roots, &mut progress)
+}
+
+pub(crate) fn scan_session_files_with_progress<P: ScanProgressObserver>(
+    roots: &SessionRoots,
+    progress: &mut P,
+) -> Result<Vec<SessionFile>> {
     let mut files = Vec::new();
-    scan_agent_root(&roots.claude_projects, Agent::Claude, &mut files)?;
-    scan_agent_root(&roots.codex_sessions, Agent::Codex, &mut files)?;
+    scan_agent_root(&roots.claude_projects, Agent::Claude, &mut files, progress)?;
+    scan_agent_root(&roots.codex_sessions, Agent::Codex, &mut files, progress)?;
     files.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(files)
 }
 
-fn scan_agent_root(root: &Path, agent: Agent, output: &mut Vec<SessionFile>) -> Result<()> {
+fn scan_agent_root<P: ScanProgressObserver>(
+    root: &Path,
+    agent: Agent,
+    output: &mut Vec<SessionFile>,
+    progress: &mut P,
+) -> Result<()> {
     if !root.exists() {
         return Ok(());
     }
 
-    scan_directory(root, agent, output)
+    scan_directory(root, agent, output, progress)
 }
 
-fn scan_directory(directory: &Path, agent: Agent, output: &mut Vec<SessionFile>) -> Result<()> {
+fn scan_directory<P: ScanProgressObserver>(
+    directory: &Path,
+    agent: Agent,
+    output: &mut Vec<SessionFile>,
+    progress: &mut P,
+) -> Result<()> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) => {
@@ -99,7 +127,7 @@ fn scan_directory(directory: &Path, agent: Agent, output: &mut Vec<SessionFile>)
         };
 
         if file_type.is_dir() {
-            scan_directory(&path, agent, output)?;
+            scan_directory(&path, agent, output, progress)?;
             continue;
         }
 
@@ -126,6 +154,7 @@ fn scan_directory(directory: &Path, agent: Agent, output: &mut Vec<SessionFile>)
             modified: system_time_or_epoch(metadata.modified().ok()),
             size: metadata.len(),
         });
+        progress.on_discovered(output.len());
     }
 
     Ok(())

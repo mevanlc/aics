@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use aics::index::{
     IndexManager, IndexPaths, Scope, SearchFilters, SearchRequest, SortMode, SyncOutcome,
+    SyncProgress,
 };
 use aics::scan::SessionRoots;
 use anyhow::Result;
@@ -57,6 +58,58 @@ fn sync_best_effort_reports_busy_when_writer_lock_is_held() -> Result<()> {
 
     let outcome = manager.sync_with_roots_best_effort(&roots, false)?;
     assert!(matches!(outcome, SyncOutcome::Busy));
+    Ok(())
+}
+
+#[test]
+fn sync_progress_reports_discovery_then_reindex_count() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let cache_root = temp.path().join("cache");
+    let manager = IndexManager::with_paths(IndexPaths::from_root(&cache_root));
+
+    let mut first_events = Vec::new();
+    manager.sync_with_roots_and_progress(&roots, true, |event| first_events.push(event))?;
+    assert!(first_events
+        .iter()
+        .any(|event| matches!(event, SyncProgress::Discovering { discovered } if *discovered >= 1)));
+    assert!(first_events
+        .iter()
+        .any(|event| matches!(event, SyncProgress::IndexingStarted { total } if *total == 2)));
+    assert!(matches!(
+        first_events.last(),
+        Some(SyncProgress::IndexingProgress {
+            processed: 2,
+            total: 2
+        })
+    ));
+
+    let mut second_events = Vec::new();
+    manager.sync_with_roots_and_progress(&roots, false, |event| second_events.push(event))?;
+    assert!(second_events
+        .iter()
+        .any(|event| matches!(event, SyncProgress::IndexingStarted { total } if *total == 0)));
+    assert!(!second_events
+        .iter()
+        .any(|event| matches!(event, SyncProgress::IndexingProgress { .. })));
+    Ok(())
+}
+
+#[test]
+fn delete_index_removes_index_directory_and_state_file() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let cache_root = temp.path().join("cache");
+    let manager = IndexManager::with_paths(IndexPaths::from_root(&cache_root));
+
+    manager.sync_with_roots(&roots, true)?;
+    assert!(cache_root.join("index").exists());
+    assert!(cache_root.join("index_state.json").exists());
+
+    manager.delete_index()?;
+
+    assert!(!cache_root.join("index").exists());
+    assert!(!cache_root.join("index_state.json").exists());
     Ok(())
 }
 

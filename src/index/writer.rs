@@ -14,7 +14,9 @@ use tantivy::{Index, TantivyDocument, TantivyError, Term};
 use crate::index::reader::SearchEngine;
 use crate::index::schema::IndexSchema;
 use crate::parse::{parse_session_file, Agent, DerivationType, MessageRole, Session};
-use crate::scan::{default_session_roots, scan_session_files, SessionFile, SessionRoots};
+use crate::scan::{
+    default_session_roots, scan_session_files_with_progress, SessionFile, SessionRoots,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSession {
@@ -79,6 +81,43 @@ pub enum SyncOutcome {
     Busy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncProgress {
+    Discovering { discovered: usize },
+    IndexingStarted { total: usize },
+    IndexingProgress { processed: usize, total: usize },
+}
+
+trait SyncProgressObserver {
+    fn on_progress(&mut self, progress: SyncProgress);
+}
+
+struct NoopSyncProgress;
+
+impl SyncProgressObserver for NoopSyncProgress {
+    fn on_progress(&mut self, _progress: SyncProgress) {}
+}
+
+impl<F> SyncProgressObserver for F
+where
+    F: FnMut(SyncProgress),
+{
+    fn on_progress(&mut self, progress: SyncProgress) {
+        self(progress);
+    }
+}
+
+struct ScanToSyncProgress<'a, P> {
+    progress: &'a mut P,
+}
+
+impl<P: SyncProgressObserver> crate::scan::ScanProgressObserver for ScanToSyncProgress<'_, P> {
+    fn on_discovered(&mut self, discovered: usize) {
+        self.progress
+            .on_progress(SyncProgress::Discovering { discovered });
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IndexPaths {
     pub cache_root: PathBuf,
@@ -127,9 +166,45 @@ impl IndexManager {
         self.sync_with_roots(&roots, rebuild)
     }
 
+    pub fn delete_index(&self) -> Result<()> {
+        if self.paths.index_dir.exists() {
+            fs::remove_dir_all(&self.paths.index_dir)
+                .with_context(|| format!("failed to remove {}", self.paths.index_dir.display()))?;
+        }
+        if self.paths.state_file.exists() {
+            fs::remove_file(&self.paths.state_file)
+                .with_context(|| format!("failed to remove {}", self.paths.state_file.display()))?;
+        }
+        Ok(())
+    }
+
+    pub fn sync_best_effort_with_progress<F>(
+        &self,
+        rebuild: bool,
+        mut on_progress: F,
+    ) -> Result<SyncOutcome>
+    where
+        F: FnMut(SyncProgress),
+    {
+        let roots = default_session_roots()?;
+        self.sync_with_roots_best_effort_impl(&roots, rebuild, &mut on_progress)
+    }
+
     pub fn sync_best_effort(&self, rebuild: bool) -> Result<SyncOutcome> {
         let roots = default_session_roots()?;
         self.sync_with_roots_best_effort(&roots, rebuild)
+    }
+
+    pub fn sync_with_roots_and_progress<F>(
+        &self,
+        roots: &SessionRoots,
+        rebuild: bool,
+        mut on_progress: F,
+    ) -> Result<SyncStats>
+    where
+        F: FnMut(SyncProgress),
+    {
+        self.sync_with_roots_impl(roots, rebuild, &mut on_progress)
     }
 
     pub fn sync_with_roots_best_effort(
@@ -137,7 +212,17 @@ impl IndexManager {
         roots: &SessionRoots,
         rebuild: bool,
     ) -> Result<SyncOutcome> {
-        match self.sync_with_roots(roots, rebuild) {
+        let mut progress = NoopSyncProgress;
+        self.sync_with_roots_best_effort_impl(roots, rebuild, &mut progress)
+    }
+
+    fn sync_with_roots_best_effort_impl<P: SyncProgressObserver>(
+        &self,
+        roots: &SessionRoots,
+        rebuild: bool,
+        progress: &mut P,
+    ) -> Result<SyncOutcome> {
+        match self.sync_with_roots_impl(roots, rebuild, progress) {
             Ok(stats) => Ok(SyncOutcome::Completed(stats)),
             Err(error) if !rebuild && is_lock_busy_error(&error) => {
                 warn!(
@@ -151,6 +236,16 @@ impl IndexManager {
     }
 
     pub fn sync_with_roots(&self, roots: &SessionRoots, rebuild: bool) -> Result<SyncStats> {
+        let mut progress = NoopSyncProgress;
+        self.sync_with_roots_impl(roots, rebuild, &mut progress)
+    }
+
+    fn sync_with_roots_impl<P: SyncProgressObserver>(
+        &self,
+        roots: &SessionRoots,
+        rebuild: bool,
+        progress: &mut P,
+    ) -> Result<SyncStats> {
         fs::create_dir_all(&self.paths.cache_root)
             .with_context(|| format!("failed to create {}", self.paths.cache_root.display()))?;
 
@@ -173,7 +268,10 @@ impl IndexManager {
         } else {
             load_state(&self.paths.state_file)?
         };
-        let scanned_files = scan_session_files(roots)?;
+        let scanned_files = {
+            let mut scan_progress = ScanToSyncProgress { progress };
+            scan_session_files_with_progress(roots, &mut scan_progress)?
+        };
         let mut next_state = IndexState::default();
         let mut stats = SyncStats {
             scanned: scanned_files.len(),
@@ -181,6 +279,7 @@ impl IndexManager {
         };
         let mut writer = index.writer(50_000_000)?;
         let mut changed = rebuild;
+        let mut pending_files = Vec::new();
 
         for file in &scanned_files {
             let key = normalize_path_key(&file.path);
@@ -203,6 +302,15 @@ impl IndexManager {
                 continue;
             }
 
+            pending_files.push(file.clone());
+        }
+
+        progress.on_progress(SyncProgress::IndexingStarted {
+            total: pending_files.len(),
+        });
+
+        for (index, file) in pending_files.iter().enumerate() {
+            let key = normalize_path_key(&file.path);
             writer.delete_term(Term::from_field_text(fields.file_path, &key));
             changed = true;
 
@@ -221,6 +329,10 @@ impl IndexManager {
             next_state
                 .files
                 .insert(key, IndexedFileState::from_file(file, indexed));
+            progress.on_progress(SyncProgress::IndexingProgress {
+                processed: index + 1,
+                total: pending_files.len(),
+            });
         }
 
         for deleted_path in previous_state.files.keys() {
