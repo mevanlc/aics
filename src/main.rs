@@ -20,28 +20,58 @@ use aics::tui::run_app;
 #[command(
     name = "aics",
     version,
-    about = "Search Claude Code and Codex session history"
+    about = "Search local Claude Code and Codex CLI session history",
+    after_help = "Examples:\n  aics deploy\n      Search sessions for the current directory and open the TUI.\n\n  aics -g --agent claude --after 2026-03-01 deploy\n      Search all Claude sessions after 2026-03-01.\n\n  aics --json -g --sort-by relevance \"vector db\"\n      Print matching sessions as JSONL instead of launching the TUI.\n\nDate filters:\n  --after and --before accept YYYY-MM-DD or RFC3339 timestamps.\n\nScope:\n  By default, searches are scoped to the current directory.\n  Use --global to search everything, or --dir PATH[:BRANCH] to target a project."
 )]
 struct Cli {
-    #[arg(short = 'g', long = "global")]
+    #[arg(
+        short = 'g',
+        long = "global",
+        help = "Search across all indexed sessions instead of scoping to the current directory"
+    )]
     global: bool,
-    #[arg(long = "dir", value_name = "PATH[:BRANCH]")]
+    #[arg(
+        long = "dir",
+        value_name = "PATH[:BRANCH]",
+        help = "Search sessions for a specific project directory; append :BRANCH to also filter by branch"
+    )]
     dir: Option<String>,
-    #[arg(long = "branch")]
+    #[arg(
+        long = "branch",
+        help = "Limit results to a branch name; conflicts with a different branch embedded in --dir"
+    )]
     branch: Option<String>,
-    #[arg(short = 'n', long = "num-results", default_value_t = 2000)]
+    #[arg(
+        short = 'n',
+        long = "num-results",
+        default_value_t = 2000,
+        help = "Maximum number of results to load into the TUI or emit as JSONL"
+    )]
     num_results: usize,
-    #[arg(long = "agent", value_parser = ["claude", "codex"])]
+    #[arg(
+        long = "agent",
+        value_parser = ["claude", "codex"],
+        help = "Only include sessions recorded by one agent"
+    )]
     agent: Option<String>,
-    #[arg(long = "after")]
+    #[arg(
+        long = "after",
+        help = "Only include sessions on or after this date or timestamp"
+    )]
     after: Option<String>,
-    #[arg(long = "before")]
+    #[arg(
+        long = "before",
+        help = "Only include sessions on or before this date or timestamp"
+    )]
     before: Option<String>,
-    #[arg(long = "min-lines")]
+    #[arg(
+        long = "min-lines",
+        help = "Only include sessions with at least this many content lines"
+    )]
     min_lines: Option<usize>,
-    #[arg(long = "no-original")]
+    #[arg(long = "no-original", help = "Exclude original/root sessions")]
     no_original: bool,
-    #[arg(long = "no-trimmed")]
+    #[arg(long = "no-trimmed", help = "Exclude trimmed sessions")]
     no_trimmed: bool,
     #[arg(
         long = "no-rollover",
@@ -49,21 +79,38 @@ struct Cli {
         help = "Exclude continued sessions (also called rollover sessions)"
     )]
     no_rollover: bool,
-    #[arg(long = "sub-agent")]
+    #[arg(
+        long = "sub-agent",
+        help = "Include sub-agent or sidechain sessions in the result set"
+    )]
     sub_agent: bool,
-    #[arg(long = "live")]
+    #[arg(
+        long = "live",
+        help = "Only include sessions that currently appear to be live"
+    )]
     live: bool,
-    #[arg(long = "json")]
+    #[arg(
+        long = "json",
+        help = "Print JSONL hits to stdout instead of launching the interactive TUI"
+    )]
     json: bool,
-    #[arg(long = "sort-by", value_enum, default_value_t = CliSort::Time)]
+    #[arg(
+        long = "sort-by",
+        value_enum,
+        default_value_t = CliSort::Time,
+        help = "Order results by time or text relevance"
+    )]
     sort_by: CliSort,
-    #[arg(long = "rebuild-index")]
+    #[arg(
+        long = "rebuild-index",
+        help = "Rebuild the local search index before searching"
+    )]
     rebuild_index: bool,
     #[arg(long = "delete-index", conflicts_with = "rebuild_index")]
     delete_index: bool,
     #[arg(long = "progress", value_enum, default_value_t = CliProgress::Err)]
     progress: CliProgress,
-    #[arg()]
+    #[arg(help = "Optional search query to run immediately or prefill in the TUI")]
     query: Option<String>,
 }
 
@@ -286,7 +333,7 @@ fn parse_date(raw: &str, end_of_day: bool) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     use super::{
         build_request, parse_after_date, parse_before_date, parse_dir_arg, validate_terminal_mode,
@@ -367,7 +414,6 @@ mod tests {
         assert_eq!(path.to_string_lossy(), "/tmp/project");
         assert_eq!(branch.as_deref(), Some("feature-x"));
     }
-
     #[test]
     fn defaults_progress_to_stderr() {
         let cli = Cli::parse_from(["aics", "deploy"]);
@@ -388,5 +434,16 @@ mod tests {
         let cli = Cli::parse_from(["aics", "--delete-index"]);
         assert!(cli.delete_index);
         assert!(!cli.rebuild_index);
+    }
+
+    #[test]
+    fn help_text_includes_descriptions_and_examples() {
+        let mut command = Cli::command();
+        let help = command.render_help().to_string();
+
+        assert!(help.contains("Search across all indexed sessions"));
+        assert!(help.contains("Optional search query to run immediately"));
+        assert!(help.contains("Examples:"));
+        assert!(help.contains("YYYY-MM-DD or RFC3339"));
     }
 }
