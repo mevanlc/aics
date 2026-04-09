@@ -120,6 +120,11 @@ fn fixture_roots(temp: &TempDir) -> Result<SessionRoots> {
     )?;
     copy_fixture(
         temp,
+        "tests/fixtures/sessions/codex/session_index.jsonl",
+        ".codex/session_index.jsonl",
+    )?;
+    copy_fixture(
+        temp,
         "tests/fixtures/sessions/codex/minimal.jsonl",
         ".codex/sessions/2026/01/15/rollout-minimal.jsonl",
     )?;
@@ -128,6 +133,32 @@ fn fixture_roots(temp: &TempDir) -> Result<SessionRoots> {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
     })
+}
+
+#[test]
+fn search_query_matches_codex_thread_name() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+
+    let hits = engine.search(&SearchRequest {
+        query: "server rename".to_owned(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Relevance,
+        filters: SearchFilters::default(),
+    })?;
+
+    assert!(hits.iter().any(|hit| {
+        hit.session.custom_title.as_deref() == Some("express server rename")
+            && hit
+                .session
+                .first_user_msg_content
+                .contains("hello world Express server")
+    }));
+    Ok(())
 }
 
 fn copy_fixture(temp: &TempDir, from: &str, to: &str) -> Result<PathBuf> {

@@ -551,12 +551,75 @@ fn fallback_snippet(session: &StoredSession, query: &str) -> String {
     } else {
         &session.last_msg_content
     };
+    let snippet = snippet_display_text(base);
 
     if query.is_empty() {
+        snippet
+    } else {
+        emphasize_terms(&snippet, query)
+    }
+}
+
+fn snippet_display_text(base: &str) -> String {
+    let base = base.trim();
+    let stripped = strip_leading_global_boilerplate(base);
+    if stripped.is_empty() {
         base.to_owned()
     } else {
-        emphasize_terms(base, query)
+        stripped.to_owned()
     }
+}
+
+fn strip_leading_global_boilerplate(mut text: &str) -> &str {
+    loop {
+        let trimmed = text.trim_start();
+        let next = strip_one_leading_boilerplate_block(trimmed);
+        if next == trimmed {
+            return trimmed;
+        }
+        text = next;
+    }
+}
+
+fn strip_one_leading_boilerplate_block(text: &str) -> &str {
+    if let Some(rest) = strip_agents_header_line(text) {
+        return rest;
+    }
+
+    for tag in [
+        "INSTRUCTIONS",
+        "environment_context",
+        "permissions instructions",
+        "collaboration_mode",
+    ] {
+        if let Some(rest) = strip_tag_block(text, tag) {
+            return rest;
+        }
+    }
+
+    text
+}
+
+fn strip_agents_header_line(text: &str) -> Option<&str> {
+    let header = [
+        "AGENTS.md instructions for ",
+        "# AGENTS.md instructions for ",
+    ]
+    .into_iter()
+    .find(|header| text.starts_with(header))?;
+    let rest = &text[header.len()..];
+    match rest.find('\n') {
+        Some(newline) => Some(&rest[newline + 1..]),
+        None => Some(""),
+    }
+}
+
+fn strip_tag_block<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let rest = text.strip_prefix(&open)?;
+    let end = rest.find(&close)?;
+    Some(&rest[end + close.len()..])
 }
 
 fn emphasize_terms(text: &str, query: &str) -> String {
@@ -592,8 +655,8 @@ fn replace_case_insensitive(haystack: &str, needle: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        emphasize_terms, matches_scope, paths_equal, paths_equal_windows, replace_case_insensitive,
-        Scope,
+        emphasize_terms, fallback_snippet, matches_scope, paths_equal, paths_equal_windows,
+        replace_case_insensitive, snippet_display_text, Scope,
     };
     use crate::index::writer::StoredSession;
     use crate::parse::{Agent, DerivationType};
@@ -740,6 +803,25 @@ mod tests {
     fn global_scope_matches_everything() {
         let session = stub_session("/any/path", Some("/another/path"));
         assert!(matches_scope(&Scope::Global, &session));
+    }
+
+    #[test]
+    fn snippet_display_text_skips_leading_agents_instructions_block() {
+        let snippet = snippet_display_text(
+            "AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>You are running on Android Termux.\nUse $PREFIX/tmp instead of /tmp.\n</INSTRUCTIONS>\n\nImplement the Codex resume preview logic.",
+        );
+
+        assert_eq!(snippet, "Implement the Codex resume preview logic.");
+    }
+
+    #[test]
+    fn fallback_snippet_prefers_session_specific_request_over_agents_preamble() {
+        let mut session = stub_session("/repo", Some("/repo"));
+        session.first_user_msg_content = "AGENTS.md instructions for /repo\n<INSTRUCTIONS>Use $PREFIX/tmp instead of /tmp.</INSTRUCTIONS>\n\nFix the snippet parser.".to_owned();
+
+        let snippet = fallback_snippet(&session, "parser");
+
+        assert_eq!(snippet, "Fix the snippet <b>parser</b>.");
     }
 
     #[test]

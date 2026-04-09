@@ -36,6 +36,12 @@ pub struct StoredSession {
     pub custom_title: Option<String>,
 }
 
+impl StoredSession {
+    pub fn has_resume_preview(&self) -> bool {
+        !self.first_user_msg_content.trim().is_empty()
+    }
+}
+
 impl From<&Session> for StoredSession {
     fn from(session: &Session) -> Self {
         Self {
@@ -282,12 +288,28 @@ fn add_session_document(
     let stored_json = serde_json::to_string(&stored).context("failed to serialize session")?;
 
     document.add_text(fields.file_path, &normalize_path_key(&session.file_path));
-    document.add_text(fields.content, &session.content);
+    document.add_text(fields.content, &searchable_content(session));
     document.add_u64(fields.modified_ts, session.modified_ts);
     document.add_text(fields.session_json, &stored_json);
 
     writer.add_document(document)?;
     Ok(())
+}
+
+fn searchable_content(session: &Session) -> String {
+    let mut chunks = Vec::with_capacity(3);
+    if let Some(title) = session.custom_title.as_deref() {
+        if !title.trim().is_empty() {
+            chunks.push(title.trim());
+        }
+    }
+    if !session.first_user_msg_content.trim().is_empty() {
+        chunks.push(session.first_user_msg_content.trim());
+    }
+    if !session.content.trim().is_empty() {
+        chunks.push(session.content.trim());
+    }
+    chunks.join("\n\n")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

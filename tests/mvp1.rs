@@ -169,6 +169,11 @@ fn parses_codex_old_format() -> Result<()> {
 #[test]
 fn parses_codex_new_format_and_decodes_tool_arguments() -> Result<()> {
     let temp = TempDir::new()?;
+    copy_fixture(
+        &temp,
+        "tests/fixtures/sessions/codex/session_index.jsonl",
+        ".codex/session_index.jsonl",
+    )?;
     let path = copy_fixture(
         &temp,
         "tests/fixtures/sessions/codex/new_format.jsonl",
@@ -181,6 +186,10 @@ fn parses_codex_new_format_and_decodes_tool_arguments() -> Result<()> {
         session.first_user_msg_content,
         "Create a simple hello world Express server in index.js"
     );
+    assert_eq!(
+        session.custom_title.as_deref(),
+        Some("express server rename")
+    );
     assert!(session
         .content
         .contains("npm init -y && npm install express"));
@@ -192,8 +201,73 @@ fn parses_codex_new_format_and_decodes_tool_arguments() -> Result<()> {
 }
 
 #[test]
+fn codex_prefers_event_preview_and_strips_user_message_prefix() -> Result<()> {
+    let temp = TempDir::new()?;
+    let path = temp
+        .path()
+        .join(".codex/sessions/2026/04/08/rollout-prefix.jsonl");
+    write_text_file(
+        &path,
+        concat!(
+            "{\"timestamp\":\"2026-04-08T12:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"prefix-session\",\"timestamp\":\"2026-04-08T12:00:00.000Z\",\"cwd\":\"/work/demo\"}}\n",
+            "{\"timestamp\":\"2026-04-08T12:00:00.100Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"fallback response item prompt\"}]}}\n",
+            "{\"timestamp\":\"2026-04-08T12:00:00.200Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"prefix noise ## My request for Codex: actual prompt\",\"images\":[]}}\n",
+            "{\"timestamp\":\"2026-04-08T12:00:00.300Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n"
+        ),
+    )?;
+
+    let session = parse_codex_session_file(&path)?.expect("expected Codex session");
+    assert_eq!(session.first_user_msg_content, "actual prompt");
+    assert_eq!(session.first_msg_content, "fallback response item prompt");
+    assert!(session.has_resume_preview());
+    Ok(())
+}
+
+#[test]
+fn codex_uses_response_item_fallback_when_event_preview_is_missing() -> Result<()> {
+    let temp = TempDir::new()?;
+    let path = copy_fixture(
+        &temp,
+        "tests/fixtures/sessions/codex/minimal.jsonl",
+        ".codex/sessions/2026/01/15/rollout-minimal.jsonl",
+    )?;
+
+    let session = parse_codex_session_file(&path)?.expect("expected Codex session");
+    assert_eq!(session.first_user_msg_content, "What is 2 + 2?");
+    assert!(session.has_resume_preview());
+    Ok(())
+}
+
+#[test]
+fn codex_without_real_user_preview_stays_parseable_but_is_not_resume_eligible() -> Result<()> {
+    let temp = TempDir::new()?;
+    let path = temp
+        .path()
+        .join(".codex/sessions/2026/04/08/rollout-no-user.jsonl");
+    write_text_file(
+        &path,
+        concat!(
+            "{\"timestamp\":\"2026-04-08T12:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"no-user-session\",\"timestamp\":\"2026-04-08T12:00:00.000Z\",\"cwd\":\"/work/demo\"}}\n",
+            "{\"timestamp\":\"2026-04-08T12:00:00.100Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<environment_context>\\n  <cwd>/work/demo</cwd>\\n</environment_context>\"}]}}\n",
+            "{\"timestamp\":\"2026-04-08T12:00:00.200Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"still parse me\"}]}}\n"
+        ),
+    )?;
+
+    let session = parse_codex_session_file(&path)?.expect("expected Codex session");
+    assert_eq!(session.first_user_msg_content, "");
+    assert!(!session.has_resume_preview());
+    assert_eq!(session.last_msg_content, "still parse me");
+    Ok(())
+}
+
+#[test]
 fn parses_codex_latest_format_and_custom_tool_calls() -> Result<()> {
     let temp = TempDir::new()?;
+    copy_fixture(
+        &temp,
+        "tests/fixtures/sessions/codex/session_index.jsonl",
+        ".codex/session_index.jsonl",
+    )?;
     let path = copy_fixture(
         &temp,
         "tests/fixtures/sessions/codex/latest_format.jsonl",
@@ -207,6 +281,7 @@ fn parses_codex_latest_format_and_custom_tool_calls() -> Result<()> {
         session.first_user_msg_content,
         "Add a health check endpoint to src/main.rs that returns JSON {\"status\": \"ok\"}"
     );
+    assert_eq!(session.custom_title.as_deref(), Some("health check thread"));
     assert!(session.content.contains("/health"));
     assert!(session.content.contains("cargo check 2>&1"));
     assert!(session.content.contains("\"status\": \"ok\""));

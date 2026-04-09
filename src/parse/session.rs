@@ -144,6 +144,12 @@ pub struct Session {
     pub content: String,
 }
 
+impl Session {
+    pub fn has_resume_preview(&self) -> bool {
+        !self.first_user_msg_content.trim().is_empty()
+    }
+}
+
 pub fn parse_timestamp_str(raw: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
         .ok()
