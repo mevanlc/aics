@@ -8,6 +8,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use tui_textarea::TextArea;
 
+use crate::ring_cursor::RingCursor;
 use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::layout;
 use crate::tui::theme::Theme;
@@ -159,17 +160,6 @@ pub enum HelpTab {
 }
 
 impl HelpTab {
-    fn next(self) -> Self {
-        match self {
-            Self::SessionList => Self::Viewer,
-            Self::Viewer => Self::SessionList,
-        }
-    }
-
-    fn previous(self) -> Self {
-        self.next()
-    }
-
     fn label(self) -> &'static str {
         match self {
             Self::SessionList => "Session List",
@@ -212,7 +202,7 @@ pub enum HelpOutcome {
 }
 
 pub struct HelpModalState {
-    tab: HelpTab,
+    tab: RingCursor<HelpTab>,
     selected: usize,
     filter: TextArea<'static>,
 }
@@ -230,14 +220,14 @@ impl fmt::Debug for HelpModalState {
 impl HelpModalState {
     pub fn new(tab: HelpTab) -> Self {
         Self {
-            tab,
+            tab: help_tab_cursor(tab),
             selected: 0,
             filter: build_filter_input(),
         }
     }
 
     pub fn tab(&self) -> HelpTab {
-        self.tab
+        *self.tab.current()
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> HelpOutcome {
@@ -306,7 +296,7 @@ impl HelpModalState {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(theme.border_style(true))
-            .title(block_title(self.tab.title()));
+            .title(block_title(self.tab.current().title()));
         frame.render_widget(left_block.clone(), left_area);
 
         let left_inner = padded_inner(left_area);
@@ -419,11 +409,11 @@ impl HelpModalState {
     }
 
     fn switch_tab(&mut self, forward: bool) {
-        self.tab = if forward {
-            self.tab.next()
+        if forward {
+            self.tab.move_next();
         } else {
-            self.tab.previous()
-        };
+            self.tab.move_prev();
+        }
         self.selected = 0;
     }
 
@@ -440,6 +430,7 @@ impl HelpModalState {
     fn filtered_items(&self) -> Vec<&'static HelpItem> {
         let filter = self.filter_text().trim().to_ascii_lowercase();
         self.tab
+            .current()
             .items()
             .iter()
             .filter(|item| {
@@ -502,7 +493,7 @@ impl HelpModalState {
             if index > 0 {
                 spans.push(Span::styled("  ", Style::default().fg(theme.muted)));
             }
-            let selected = tab == self.tab;
+            let selected = self.tab == tab;
             let style = if selected {
                 Style::default()
                     .fg(theme.text)
@@ -522,6 +513,12 @@ fn build_filter_input() -> TextArea<'static> {
     filter.set_cursor_line_style(Style::default());
     filter.set_placeholder_text("type to filter");
     filter
+}
+
+fn help_tab_cursor(selected: HelpTab) -> RingCursor<HelpTab> {
+    let mut cursor = RingCursor::new(vec![HelpTab::SessionList, HelpTab::Viewer]);
+    assert!(cursor.set(&selected));
+    cursor
 }
 
 fn padded_inner(area: Rect) -> Rect {
@@ -597,10 +594,10 @@ mod tests {
         let mut help = HelpModalState::new(HelpTab::SessionList);
 
         help.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(help.tab, HelpTab::Viewer);
+        assert_eq!(help.tab(), HelpTab::Viewer);
 
         help.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert_eq!(help.tab, HelpTab::SessionList);
+        assert_eq!(help.tab(), HelpTab::SessionList);
     }
 
     #[test]

@@ -3,6 +3,7 @@ pub mod fs_safename;
 pub mod index;
 pub mod live;
 pub mod parse;
+pub mod ring_cursor;
 pub mod scan;
 pub mod search_query;
 pub mod settings;

@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState};
 use ratatui::Frame;
 
+use crate::ring_cursor::RingCursor;
 use crate::tui::layout;
 use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
@@ -34,7 +35,7 @@ pub enum SessionAction {
 
 #[derive(Debug, Clone)]
 pub struct ActionMenuState {
-    pub selected: usize,
+    pub selected: RingCursor<SessionAction>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,19 +47,21 @@ pub enum ActionOutcome {
 
 impl ActionMenuState {
     pub fn new() -> Self {
-        Self { selected: 0 }
+        Self {
+            selected: RingCursor::new(ACTIONS.iter().map(|item| item.action).collect()),
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> ActionOutcome {
         match key.code {
             KeyCode::Esc => ActionOutcome::Close,
-            KeyCode::Enter => ActionOutcome::Run(ACTIONS[self.selected].action),
+            KeyCode::Enter => ActionOutcome::Run(*self.selected.current()),
             KeyCode::Up | KeyCode::Char('k') => {
-                self.selected = self.selected.saturating_sub(1);
+                self.selected.move_prev();
                 ActionOutcome::Stay
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.selected = (self.selected + 1).min(ACTIONS.len().saturating_sub(1));
+                self.selected.move_next();
                 ActionOutcome::Stay
             }
             KeyCode::Char(ch) => ACTIONS
@@ -104,7 +107,7 @@ impl ActionMenuState {
             );
 
         let mut state = ListState::default();
-        state.select(Some(self.selected));
+        state.select(Some(self.selected.index()));
         frame.render_stateful_widget(list, popup, &mut state);
     }
 }
@@ -119,5 +122,33 @@ struct ActionItem {
 impl ActionItem {
     const fn new(action: SessionAction, key: char, label: &'static str) -> Self {
         Self { action, key, label }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::{ActionMenuState, ActionOutcome, SessionAction};
+
+    #[test]
+    fn up_wraps_to_last_action() {
+        let mut state = ActionMenuState::new();
+
+        let outcome = state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+
+        assert!(matches!(outcome, ActionOutcome::Stay));
+        assert!(state.selected == SessionAction::Fork);
+    }
+
+    #[test]
+    fn down_wraps_from_last_action_to_first() {
+        let mut state = ActionMenuState::new();
+        assert!(state.selected.set(&SessionAction::Fork));
+
+        let outcome = state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        assert!(matches!(outcome, ActionOutcome::Stay));
+        assert!(state.selected == SessionAction::View);
     }
 }

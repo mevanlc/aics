@@ -40,6 +40,7 @@ impl Theme {
             ThemeName::Lazygit => Self::lazygit(),
             ThemeName::Aics => Self::aics(),
             ThemeName::Sunset => Self::sunset(),
+            ThemeName::LateSh => Self::late_sh(),
         }
     }
 
@@ -144,6 +145,48 @@ impl Theme {
             bubble_summary: Color::Rgb(92, 67, 31),
             tool: codex,
             bubble_tool: Color::Rgb(24, 55, 55),
+        }
+    }
+
+    /// Theme sampled from the user's "late.sh" screenshots with Pillow:
+    /// black surfaces, copper framing, ash text, amber highlights, and muted
+    /// olive/violet secondary accents.
+    pub fn late_sh() -> Self {
+        let border = Color::Rgb(96, 64, 32);
+        let focus_border = Color::Rgb(184, 120, 40);
+        let text = Color::Rgb(136, 128, 120);
+        let muted = Color::Rgb(112, 104, 104);
+        let muted_greater = Color::Rgb(64, 56, 56);
+        let list_header_bg = Color::Rgb(8, 8, 8);
+        let list_body_bg = Color::Rgb(0, 0, 0);
+        let selection = Color::Rgb(64, 40, 24);
+        let highlight = Color::Rgb(208, 166, 89);
+        let claude = Color::Rgb(184, 120, 40);
+        let codex = Color::Rgb(104, 136, 88);
+        let tool = Color::Rgb(104, 72, 128);
+
+        Self {
+            border,
+            focus_border,
+            text,
+            muted,
+            muted_greater,
+            accent: focus_border,
+            selection,
+            highlight,
+            search_match_bg: Color::Rgb(80, 56, 24),
+            active_match_bg: Color::Rgb(120, 80, 32),
+            list_header_bg,
+            list_body_bg,
+            claude,
+            codex,
+            bubble_user: Color::Rgb(16, 12, 10),
+            bubble_claude: Color::Rgb(32, 20, 12),
+            bubble_codex: Color::Rgb(18, 24, 16),
+            bubble_system: Color::Rgb(16, 16, 16),
+            bubble_summary: Color::Rgb(24, 30, 18),
+            tool,
+            bubble_tool: Color::Rgb(24, 18, 32),
         }
     }
 

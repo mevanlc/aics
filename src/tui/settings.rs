@@ -7,6 +7,7 @@ use ratatui::Frame;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
+use crate::ring_cursor::RingCursor;
 use crate::settings::{Settings, ThemeName};
 use crate::tui::layout;
 use crate::tui::theme::Theme;
@@ -21,32 +22,10 @@ enum SettingsField {
     SnippetLineCount,
 }
 
-impl SettingsField {
-    fn next(self) -> Self {
-        match self {
-            Self::Theme => Self::ClaudeCommand,
-            Self::ClaudeCommand => Self::CodexCommand,
-            Self::CodexCommand => Self::SessionSeparator,
-            Self::SessionSeparator => Self::SnippetLineCount,
-            Self::SnippetLineCount => Self::Theme,
-        }
-    }
-
-    fn prev(self) -> Self {
-        match self {
-            Self::Theme => Self::SnippetLineCount,
-            Self::ClaudeCommand => Self::Theme,
-            Self::CodexCommand => Self::ClaudeCommand,
-            Self::SessionSeparator => Self::CodexCommand,
-            Self::SnippetLineCount => Self::SessionSeparator,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct SettingsModalState {
-    field: SettingsField,
-    theme: ThemeName,
+    field: RingCursor<SettingsField>,
+    theme: RingCursor<ThemeName>,
     claude_input: Input,
     codex_input: Input,
     separator_input: Input,
@@ -64,8 +43,8 @@ pub enum SettingsOutcome {
 impl SettingsModalState {
     pub fn new(settings: &Settings) -> Self {
         Self {
-            field: SettingsField::Theme,
-            theme: settings.theme,
+            field: settings_field_cursor(SettingsField::Theme),
+            theme: theme_name_cursor(settings.theme),
             claude_input: Input::default().with_value(settings.claude_command.clone()),
             codex_input: Input::default().with_value(settings.codex_command.clone()),
             separator_input: Input::default().with_value(settings.session_separator.clone()),
@@ -76,7 +55,7 @@ impl SettingsModalState {
     }
 
     pub fn current_theme(&self) -> ThemeName {
-        self.theme
+        *self.theme.current()
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsOutcome {
@@ -91,38 +70,62 @@ impl SettingsModalState {
             _ => {}
         }
 
-        match self.field {
+        match *self.field.current() {
             SettingsField::Theme => match key.code {
-                KeyCode::Tab | KeyCode::Down => self.field = self.field.next(),
-                KeyCode::BackTab | KeyCode::Up => self.field = self.field.prev(),
-                KeyCode::Left | KeyCode::Char('h') => self.theme = self.theme.prev(),
-                KeyCode::Right | KeyCode::Char('l') => self.theme = self.theme.next(),
+                KeyCode::Tab | KeyCode::Down => {
+                    self.field.move_next();
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    self.field.move_prev();
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    self.theme.move_prev();
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    self.theme.move_next();
+                }
                 _ => {}
             },
             SettingsField::ClaudeCommand => match key.code {
-                KeyCode::Tab | KeyCode::Down => self.field = self.field.next(),
-                KeyCode::BackTab | KeyCode::Up => self.field = self.field.prev(),
+                KeyCode::Tab | KeyCode::Down => {
+                    self.field.move_next();
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    self.field.move_prev();
+                }
                 _ => {
                     self.claude_input.handle_event(&Event::Key(key));
                 }
             },
             SettingsField::CodexCommand => match key.code {
-                KeyCode::Tab | KeyCode::Down => self.field = self.field.next(),
-                KeyCode::BackTab | KeyCode::Up => self.field = self.field.prev(),
+                KeyCode::Tab | KeyCode::Down => {
+                    self.field.move_next();
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    self.field.move_prev();
+                }
                 _ => {
                     self.codex_input.handle_event(&Event::Key(key));
                 }
             },
             SettingsField::SessionSeparator => match key.code {
-                KeyCode::Tab | KeyCode::Down => self.field = self.field.next(),
-                KeyCode::BackTab | KeyCode::Up => self.field = self.field.prev(),
+                KeyCode::Tab | KeyCode::Down => {
+                    self.field.move_next();
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    self.field.move_prev();
+                }
                 _ => {
                     self.separator_input.handle_event(&Event::Key(key));
                 }
             },
             SettingsField::SnippetLineCount => match key.code {
-                KeyCode::Tab | KeyCode::Down => self.field = self.field.next(),
-                KeyCode::BackTab | KeyCode::Up => self.field = self.field.prev(),
+                KeyCode::Tab | KeyCode::Down => {
+                    self.field.move_next();
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    self.field.move_prev();
+                }
                 _ => {
                     self.snippet_line_count_input.handle_event(&Event::Key(key));
                 }
@@ -267,7 +270,7 @@ impl SettingsModalState {
             if i > 0 {
                 spans.push(Span::styled("  ", Style::default().fg(theme.muted)));
             }
-            let is_selected = *name == self.theme;
+            let is_selected = self.theme == *name;
             let style = if is_selected && focused {
                 Style::default()
                     .fg(theme.text)
@@ -327,7 +330,7 @@ impl SettingsModalState {
             .parse::<usize>()
             .unwrap_or(self.base.snippet_line_count);
         Settings {
-            theme: self.theme,
+            theme: *self.theme.current(),
             claude_command: self.claude_input.value().to_owned(),
             codex_command: self.codex_input.value().to_owned(),
             session_separator: self.separator_input.value().to_owned(),
@@ -335,6 +338,24 @@ impl SettingsModalState {
             ..self.base.clone()
         }
     }
+}
+
+fn settings_field_cursor(selected: SettingsField) -> RingCursor<SettingsField> {
+    let mut cursor = RingCursor::new(vec![
+        SettingsField::Theme,
+        SettingsField::ClaudeCommand,
+        SettingsField::CodexCommand,
+        SettingsField::SessionSeparator,
+        SettingsField::SnippetLineCount,
+    ]);
+    assert!(cursor.set(&selected));
+    cursor
+}
+
+fn theme_name_cursor(selected: ThemeName) -> RingCursor<ThemeName> {
+    let mut cursor = RingCursor::new(ThemeName::ALL.to_vec());
+    assert!(cursor.set(&selected));
+    cursor
 }
 
 #[cfg(test)]
@@ -347,8 +368,8 @@ mod tests {
     #[test]
     fn enter_applies_settings_from_theme_field() {
         let mut state = SettingsModalState::new(&Settings::default());
-        state.theme = ThemeName::Sunset;
-        state.field = SettingsField::Theme;
+        assert!(state.theme.set(&ThemeName::Sunset));
+        assert!(state.field.set(&SettingsField::Theme));
 
         let outcome = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
 

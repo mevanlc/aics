@@ -11,32 +11,23 @@ pub enum ThemeName {
     Lazygit,
     Aics,
     Sunset,
+    LateSh,
 }
 
 impl ThemeName {
-    pub const ALL: [ThemeName; 3] = [ThemeName::Lazygit, ThemeName::Aics, ThemeName::Sunset];
+    pub const ALL: [ThemeName; 4] = [
+        ThemeName::Lazygit,
+        ThemeName::Aics,
+        ThemeName::Sunset,
+        ThemeName::LateSh,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             ThemeName::Lazygit => "lazygit",
             ThemeName::Aics => "aics",
             ThemeName::Sunset => "sunset",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            ThemeName::Lazygit => ThemeName::Aics,
-            ThemeName::Aics => ThemeName::Sunset,
-            ThemeName::Sunset => ThemeName::Lazygit,
-        }
-    }
-
-    pub fn prev(self) -> Self {
-        match self {
-            ThemeName::Lazygit => ThemeName::Sunset,
-            ThemeName::Aics => ThemeName::Lazygit,
-            ThemeName::Sunset => ThemeName::Aics,
+            ThemeName::LateSh => "late.sh",
         }
     }
 }
@@ -160,6 +151,7 @@ fn settings_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ring_cursor::RingCursor;
 
     #[test]
     fn default_settings_round_trip() {
@@ -190,11 +182,14 @@ mod tests {
 
     #[test]
     fn theme_name_cycles() {
-        assert_eq!(ThemeName::Lazygit.next(), ThemeName::Aics);
-        assert_eq!(ThemeName::Aics.next(), ThemeName::Sunset);
-        assert_eq!(ThemeName::Sunset.next(), ThemeName::Lazygit);
-        assert_eq!(ThemeName::Lazygit.prev(), ThemeName::Sunset);
-        assert_eq!(ThemeName::Sunset.prev(), ThemeName::Aics);
+        let mut theme = RingCursor::new(ThemeName::ALL.to_vec());
+        assert_eq!(*theme.current(), ThemeName::Lazygit);
+        assert_eq!(*theme.move_next(), ThemeName::Aics);
+        assert_eq!(*theme.move_next(), ThemeName::Sunset);
+        assert_eq!(*theme.move_next(), ThemeName::LateSh);
+        assert_eq!(*theme.move_next(), ThemeName::Lazygit);
+        assert_eq!(*theme.move_prev(), ThemeName::LateSh);
+        assert_eq!(*theme.move_prev(), ThemeName::Sunset);
     }
 
     #[test]

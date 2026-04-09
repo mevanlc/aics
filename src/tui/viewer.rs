@@ -58,10 +58,9 @@ enum MatchDirection {
 }
 
 impl ViewerState {
-    const HINTS: [KeymapHint; 6] = [
+    const HINTS: [KeymapHint; 5] = [
         KeymapHint::new("↑↓/PgUp/PgDn/Home/End", "scroll"),
         KeymapHint::new("n/p", "matches"),
-        KeymapHint::new("/", "search"),
         KeymapHint::new("Enter", "done"),
         KeymapHint::new("?", "help"),
         KeymapHint::new("Esc", "close"),
@@ -99,7 +98,10 @@ impl ViewerState {
     ) -> ViewerOutcome {
         if self.editing_search {
             match key.code {
-                KeyCode::Esc => self.handle_escape(),
+                KeyCode::Esc => {
+                    self.editing_search = false;
+                    ViewerOutcome::Stay
+                }
                 KeyCode::Enter => {
                     self.editing_search = false;
                     ViewerOutcome::Stay
@@ -116,6 +118,7 @@ impl ViewerState {
             }
         } else {
             match key.code {
+                KeyCode::Char('q') if key.modifiers.is_empty() => ViewerOutcome::Close,
                 KeyCode::Esc => self.handle_escape(),
                 KeyCode::Char('/') if key.modifiers.is_empty() => {
                     self.editing_search = true;
@@ -203,27 +206,29 @@ impl ViewerState {
         ])
         .split(chunks[1]);
 
-        let search_label = "Search";
-        let search_bar = Paragraph::new(Line::from(vec![
-            Span::styled(search_label, Style::default().fg(theme.muted)),
-            Span::styled(": ", Style::default().fg(theme.muted)),
-            Span::styled(self.search.value(), Style::default().fg(theme.text)),
-        ]))
+        let search_bar = Paragraph::new(Line::from(Span::styled(
+            self.search.value().to_owned(),
+            Style::default().fg(theme.text),
+        )))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(theme.border_style(self.editing_search)),
+                .border_style(theme.border_style(self.editing_search))
+                .title(block_title(Span::styled(
+                    "Search",
+                    Style::default().fg(theme.accent),
+                )))
+                .title(search_focus_title(self.editing_search, theme)),
         );
         frame.render_widget(search_bar, footer_chunks[0]);
 
         keymap_hint::render(frame, footer_chunks[1], &Self::HINTS, theme, "");
 
         if self.editing_search {
-            // border(1) + "Search: "(8) = 9
             let cursor_x = footer_chunks[0]
                 .x
-                .saturating_add(9 + self.search.visual_cursor() as u16)
+                .saturating_add(1 + self.search.visual_cursor() as u16)
                 .min(footer_chunks[0].right().saturating_sub(1));
             frame.set_cursor_position((cursor_x, footer_chunks[0].y.saturating_add(1)));
         }
@@ -338,6 +343,28 @@ fn split_viewer(area: Rect) -> [Rect; 2] {
     let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(VIEWER_FOOTER_HEIGHT)])
         .split(area);
     [chunks[0], chunks[1]]
+}
+
+fn search_focus_title(editing_search: bool, theme: &Theme) -> Line<'static> {
+    if editing_search {
+        return Line::from(vec![
+            Span::styled(
+                "Focused",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+            Span::styled("─", Style::default().fg(theme.border)),
+        ])
+        .right_aligned();
+    }
+
+    Line::from(vec![
+        Span::styled("/", Style::default().fg(theme.accent)),
+        Span::styled(" Focus", Style::default().fg(theme.muted)),
+        Span::styled("─", Style::default().fg(theme.border)),
+    ])
+    .right_aligned()
 }
 
 fn scroll_progress_percent(scroll: usize, viewport_height: usize, total_rows: usize) -> usize {
@@ -504,6 +531,7 @@ mod tests {
 
     use chrono::Utc;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Alignment;
     use ratatui::layout::Rect;
     use tui_input::Input;
 
@@ -513,7 +541,7 @@ mod tests {
 
     use super::{
         collect_match_rows, match_scrolloff, next_match_index, previous_match_index,
-        scroll_for_match, scroll_progress_percent, ViewerOutcome, ViewerState,
+        scroll_for_match, scroll_progress_percent, search_focus_title, ViewerOutcome, ViewerState,
     };
 
     #[test]
@@ -575,6 +603,35 @@ mod tests {
     }
 
     #[test]
+    fn search_focus_title_is_right_aligned() {
+        let idle = search_focus_title(false, &Theme::default());
+        let focused = search_focus_title(true, &Theme::default());
+
+        assert_eq!(idle.alignment, Some(Alignment::Right));
+        assert_eq!(focused.alignment, Some(Alignment::Right));
+        assert_eq!(
+            idle.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "/ Focus─"
+        );
+        assert_eq!(
+            focused
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "Focused─"
+        );
+    }
+
+    #[test]
+    fn viewer_hints_no_longer_include_search_hint() {
+        assert!(ViewerState::HINTS.iter().all(|hint| hint.key != "/"));
+    }
+
+    #[test]
     fn escape_clears_search_before_closing_viewer() {
         let area = Rect::new(0, 0, 80, 20);
         let session = sample_session();
@@ -618,8 +675,25 @@ mod tests {
             ThemeName::Lazygit,
         );
         assert_eq!(outcome, ViewerOutcome::Stay);
-        assert!(state.search_query().is_empty());
+        assert_eq!(state.search_query(), "alpha");
         assert!(!state.is_editing_search());
+    }
+
+    #[test]
+    fn q_closes_viewer_when_search_is_unfocused() {
+        let area = Rect::new(0, 0, 80, 20);
+        let session = sample_session();
+        let mut state = ViewerState::new();
+
+        let outcome = state.handle_key(
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            area,
+            Some(&session),
+            &Theme::default(),
+            ThemeName::Lazygit,
+        );
+
+        assert_eq!(outcome, ViewerOutcome::Close);
     }
 
     #[test]

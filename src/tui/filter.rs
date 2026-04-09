@@ -11,6 +11,7 @@ use tui_input::Input;
 
 use crate::index::{Scope, SearchFilters, SortMode};
 use crate::parse::Agent;
+use crate::ring_cursor::RingCursor;
 use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::layout;
 use crate::tui::theme::Theme;
@@ -49,7 +50,7 @@ pub enum FilterField {
 
 #[derive(Debug, Clone)]
 pub struct FilterModalState {
-    pub selected: FilterField,
+    pub selected: RingCursor<FilterField>,
     scope_global: bool,
     agent: Option<Agent>,
     branch: Input,
@@ -81,7 +82,7 @@ pub enum FilterOutcome {
 impl FilterModalState {
     pub fn new(scope: &Scope, filters: &SearchFilters, sort: SortMode) -> Self {
         Self {
-            selected: FilterField::Scope,
+            selected: filter_field_cursor(FilterField::Scope),
             scope_global: matches!(scope, Scope::Global),
             agent: filters.agent,
             branch: Input::default().with_value(filters.branch.clone().unwrap_or_default()),
@@ -115,15 +116,15 @@ impl FilterModalState {
             KeyCode::Esc => Ok(FilterOutcome::Close),
             KeyCode::Enter => Ok(FilterOutcome::Apply(self.build_update(local_scope)?)),
             KeyCode::Tab | KeyCode::Down | KeyCode::Char('j')
-                if !self.selected.is_text() || key.modifiers.is_empty() =>
+                if !self.selected.current().is_text() || key.modifiers.is_empty() =>
             {
-                self.selected = self.selected.next();
+                self.selected.move_next();
                 Ok(FilterOutcome::Stay)
             }
             KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k')
-                if !self.selected.is_text() || key.modifiers.is_empty() =>
+                if !self.selected.current().is_text() || key.modifiers.is_empty() =>
             {
-                self.selected = self.selected.previous();
+                self.selected.move_prev();
                 Ok(FilterOutcome::Stay)
             }
             KeyCode::Left => {
@@ -170,7 +171,7 @@ impl FilterModalState {
 
         let mut rows = Vec::new();
         for field in FIELD_ORDER {
-            let selected = field == self.selected;
+            let selected = self.selected == field;
             let prefix = if selected { "› " } else { "  " };
             let style = if selected {
                 Style::default()
@@ -219,7 +220,7 @@ impl FilterModalState {
         .split(right_inner);
 
         let title = Paragraph::new(Line::from(Span::styled(
-            self.selected.label(),
+            self.selected.current().label(),
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         )));
         frame.render_widget(title, desc_chunks[0]);
@@ -235,7 +236,7 @@ impl FilterModalState {
         );
 
         let description = Paragraph::new(Span::styled(
-            self.selected.description(),
+            self.selected.current().description(),
             Style::default().fg(theme.muted),
         ))
         .wrap(Wrap { trim: false });
@@ -271,7 +272,7 @@ impl FilterModalState {
     }
 
     fn current_input_mut(&mut self) -> Option<&mut Input> {
-        match self.selected {
+        match *self.selected.current() {
             FilterField::Branch => Some(&mut self.branch),
             FilterField::After => Some(&mut self.after),
             FilterField::Before => Some(&mut self.before),
@@ -281,7 +282,7 @@ impl FilterModalState {
     }
 
     fn adjust_current(&mut self, forward: bool) {
-        match self.selected {
+        match *self.selected.current() {
             FilterField::Scope => self.scope_global = !self.scope_global,
             FilterField::Agent => {
                 self.agent = match (self.agent, forward) {
@@ -311,8 +312,8 @@ impl FilterModalState {
     fn cursor_position(&self, rows_area: Rect) -> Option<(u16, u16)> {
         let row_index = FIELD_ORDER
             .iter()
-            .position(|field| *field == self.selected)? as u16;
-        let input = match self.selected {
+            .position(|field| self.selected == *field)? as u16;
+        let input = match *self.selected.current() {
             FilterField::Branch => &self.branch,
             FilterField::After => &self.after,
             FilterField::Before => &self.before,
@@ -331,22 +332,6 @@ impl FilterModalState {
 }
 
 impl FilterField {
-    fn next(self) -> Self {
-        let index = FIELD_ORDER
-            .iter()
-            .position(|field| *field == self)
-            .expect("field should exist");
-        FIELD_ORDER[(index + 1) % FIELD_ORDER.len()]
-    }
-
-    fn previous(self) -> Self {
-        let index = FIELD_ORDER
-            .iter()
-            .position(|field| *field == self)
-            .expect("field should exist");
-        FIELD_ORDER[(index + FIELD_ORDER.len() - 1) % FIELD_ORDER.len()]
-    }
-
     fn is_text(self) -> bool {
         matches!(
             self,
@@ -416,6 +401,12 @@ impl FilterField {
             },
         }
     }
+}
+
+fn filter_field_cursor(selected: FilterField) -> RingCursor<FilterField> {
+    let mut cursor = RingCursor::new(FIELD_ORDER.to_vec());
+    assert!(cursor.set(&selected));
+    cursor
 }
 
 fn on_off(value: bool) -> String {
