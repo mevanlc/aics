@@ -58,7 +58,7 @@ enum MatchDirection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MessageDirection {
+pub(crate) enum MessageDirection {
     Next,
     Previous,
 }
@@ -139,7 +139,7 @@ impl ViewerState {
                     self.jump_to_match(MatchDirection::Previous, area, session, theme, theme_name);
                     ViewerOutcome::Stay
                 }
-                KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
                     self.jump_to_message(
                         MessageDirection::Previous,
                         area,
@@ -149,7 +149,7 @@ impl ViewerState {
                     );
                     ViewerOutcome::Stay
                 }
-                KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
                     self.jump_to_message(MessageDirection::Next, area, session, theme, theme_name);
                     ViewerOutcome::Stay
                 }
@@ -492,7 +492,7 @@ fn collect_match_rows(session: &Session, theme: &Theme, query: &str, width: u16)
     rows
 }
 
-fn collect_message_rows(session: &Session, theme: &Theme, width: u16) -> Vec<usize> {
+pub(crate) fn collect_message_rows(session: &Session, theme: &Theme, width: u16) -> Vec<usize> {
     if width == 0 {
         return Vec::new();
     }
@@ -611,7 +611,7 @@ fn previous_match_index(matches: &[usize], active_match: Option<usize>, scroll: 
         .unwrap_or(matches.len() - 1)
 }
 
-fn message_row_for_scroll(
+pub(crate) fn message_row_for_scroll(
     rows: &[usize],
     scroll: usize,
     direction: MessageDirection,
@@ -625,8 +625,7 @@ fn message_row_for_scroll(
         MessageDirection::Previous => rows
             .iter()
             .copied()
-            .rfind(|row| *row < scroll)
-            .or_else(|| rows.last().copied()),
+            .rfind(|row| *row < scroll),
     }
 }
 
@@ -688,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn message_navigation_wraps_in_both_directions() {
+    fn message_navigation_next_wraps_previous_clamps() {
         let rows = vec![0, 4, 9];
 
         assert_eq!(
@@ -711,9 +710,10 @@ mod tests {
             message_row_for_scroll(&rows, 3, MessageDirection::Previous),
             Some(0)
         );
+        // Previous at the first boundary returns None (no wraparound)
         assert_eq!(
             message_row_for_scroll(&rows, 0, MessageDirection::Previous),
-            Some(9)
+            None
         );
     }
 
@@ -888,7 +888,7 @@ mod tests {
         let mut state = ViewerState::new();
 
         state.handle_key(
-            KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
             area,
             Some(&session),
             &Theme::default(),
@@ -897,7 +897,7 @@ mod tests {
         assert_eq!(state.scroll, 6);
 
         state.handle_key(
-            KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
             area,
             Some(&session),
             &Theme::default(),

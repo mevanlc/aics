@@ -1,11 +1,12 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::ring_cursor::RingCursor;
+use crate::tui::keymap_hint;
 use crate::tui::layout;
 use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
@@ -74,8 +75,28 @@ impl ActionMenuState {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let popup = layout::centered_rect(area, 42, 50);
+        let popup = layout::centered_rect_fixed_width(area, 66, 50);
         frame.render_widget(Clear, popup);
+
+        // Outer block provides the border; list is rendered inside separately.
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(theme.border_style(true))
+            .title(block_title("Actions"));
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+
+        // Split inner area: list (fills available space) | separator | hint line | hotkey note
+        let chunks = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+        // List (no block — border lives on the outer block above)
         let items = ACTIONS
             .iter()
             .map(|item| {
@@ -83,21 +104,15 @@ impl ActionMenuState {
                     Span::styled(
                         format!("{} ", item.key),
                         Style::default()
-                            .fg(theme.highlight)
+                            .fg(theme.accent)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(item.label, Style::default().fg(theme.text)),
                 ]))
             })
             .collect::<Vec<_>>();
+
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(theme.border_style(true))
-                    .title(block_title("Actions")),
-            )
             .highlight_symbol("› ")
             .highlight_style(
                 Style::default()
@@ -108,7 +123,31 @@ impl ActionMenuState {
 
         let mut state = ListState::default();
         state.select(Some(self.selected.index()));
-        frame.render_stateful_widget(list, popup, &mut state);
+        frame.render_stateful_widget(list, chunks[0], &mut state);
+
+        // Separator line
+        frame.render_widget(
+            Paragraph::new("─".repeat(inner.width as usize))
+                .style(Style::default().fg(theme.focus_border)),
+            chunks[1],
+        );
+
+        // Hint line 1: navigation keys
+        const HINTS: [keymap_hint::KeymapHint; 3] = [
+            keymap_hint::KeymapHint::new("↑↓", "select"),
+            keymap_hint::KeymapHint::new("⏎", "OK"),
+            keymap_hint::KeymapHint::new("Esc", "cancel"),
+        ];
+        keymap_hint::render(frame, chunks[2], &HINTS, theme, "");
+
+        // Hint line 2: hotkey shortcut note
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " or press the menu item's hotkey to execute it immediately",
+                Style::default().fg(theme.muted),
+            )),
+            chunks[3],
+        );
     }
 }
 

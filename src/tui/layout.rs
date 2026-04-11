@@ -37,6 +37,17 @@ pub fn split(area: Rect, preview_width_pct: u16, show_preview: bool) -> AppLayou
     }
 }
 
+/// Centre a popup with a fixed column `width` and a percentage-based height.
+/// Gracefully caps to the terminal dimensions when the terminal is small.
+pub fn centered_rect_fixed_width(area: Rect, width: u16, height_pct: u16) -> Rect {
+    let h_pct = height_pct.min(100);
+    let height = ((area.height as u32 * h_pct as u32) / 100).max(1) as u16;
+    let w = width.min(area.width);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Rect::new(x, y, w, height)
+}
+
 pub fn centered_rect(area: Rect, width_pct: u16, height_pct: u16) -> Rect {
     let popup_layout = Layout::vertical([
         Constraint::Percentage((100u16.saturating_sub(height_pct)).saturating_div(2)),

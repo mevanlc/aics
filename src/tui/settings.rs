@@ -10,6 +10,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::ring_cursor::RingCursor;
 use crate::settings::{Settings, ThemeName};
+use crate::tui::keymap_hint;
 use crate::tui::layout;
 use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
@@ -163,9 +164,9 @@ impl SettingsModalState {
             Constraint::Length(1), // 12 spacing
             Constraint::Length(1), // 13 snippet lines label
             Constraint::Length(1), // 14 snippet lines input
-            Constraint::Length(1), // 15 spacing
-            Constraint::Length(1), // 16 hint
-            Constraint::Min(0),    // 17 fill
+            Constraint::Min(0),    // 15 fill
+            Constraint::Length(1), // 16 separator line
+            Constraint::Length(1), // 17 hint
         ])
         .split(inner);
 
@@ -255,14 +256,18 @@ impl SettingsModalState {
             snip_focused,
         );
 
-        // Hint
+        // Separator + hint
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "  Enter save · ^S save · Esc cancel",
-                Style::default().fg(theme.muted),
-            ))),
+            Paragraph::new("─".repeat(inner.width as usize))
+                .style(Style::default().fg(theme.focus_border)),
             rows[16],
         );
+        const HINTS: [keymap_hint::KeymapHint; 3] = [
+            keymap_hint::KeymapHint::new("Tab/↑↓", "navigate"),
+            keymap_hint::KeymapHint::new("⏎/^S", "save"),
+            keymap_hint::KeymapHint::new("Esc", "cancel"),
+        ];
+        keymap_hint::render(frame, rows[17], &HINTS, theme, "");
     }
 
     fn render_theme_selector(&self, width: u16, theme: &Theme, focused: bool) -> Line<'static> {
