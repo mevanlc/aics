@@ -15,6 +15,91 @@ pub struct SessionRoots {
     pub codex_sessions: PathBuf,
 }
 
+impl SessionRoots {
+    pub fn profile_hash_input(&self) -> String {
+        format!(
+            "claude_projects={}\ncodex_sessions={}\n",
+            self.claude_projects.display(),
+            self.codex_sessions.display()
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentHomes {
+    pub claude_home: PathBuf,
+    pub codex_home: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPaths {
+    pub homes: AgentHomes,
+    pub roots: SessionRoots,
+    pub claude_sessions: PathBuf,
+}
+
+impl ResolvedPaths {
+    pub fn discover(
+        claude_home_override: Option<&Path>,
+        codex_home_override: Option<&Path>,
+    ) -> Result<Self> {
+        let base_dirs = BaseDirs::new().context("failed to locate home directory")?;
+        let home = base_dirs.home_dir();
+        let current_dir = env::current_dir().context("failed to resolve current directory")?;
+
+        let cli_claude_home = claude_home_override
+            .map(|path| resolve_path(path.to_path_buf(), &current_dir))
+            .transpose()?;
+        let cli_codex_home = codex_home_override
+            .map(|path| resolve_path(path.to_path_buf(), &current_dir))
+            .transpose()?;
+
+        let claude_home = match cli_claude_home.clone() {
+            Some(path) => path,
+            None => {
+                let path =
+                    env_override("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude"));
+                resolve_path(path, &current_dir)?
+            }
+        };
+        let codex_home = match cli_codex_home.clone() {
+            Some(path) => path,
+            None => {
+                let path = env_override("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
+                resolve_path(path, &current_dir)?
+            }
+        };
+
+        let claude_projects = if cli_claude_home.is_some() {
+            claude_home.join("projects")
+        } else {
+            env_override("AICS_CLAUDE_PROJECTS_DIR").unwrap_or_else(|| claude_home.join("projects"))
+        };
+        let claude_sessions = if cli_claude_home.is_some() {
+            claude_home.join("sessions")
+        } else {
+            env_override("AICS_CLAUDE_SESSIONS_DIR").unwrap_or_else(|| claude_home.join("sessions"))
+        };
+        let codex_sessions = if cli_codex_home.is_some() {
+            codex_home.join("sessions")
+        } else {
+            env_override("AICS_CODEX_SESSIONS_DIR").unwrap_or_else(|| codex_home.join("sessions"))
+        };
+
+        Ok(Self {
+            homes: AgentHomes {
+                claude_home,
+                codex_home,
+            },
+            roots: SessionRoots {
+                claude_projects,
+                codex_sessions,
+            },
+            claude_sessions,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionFile {
     pub path: PathBuf,
@@ -34,21 +119,25 @@ impl ScanProgressObserver for NoopScanProgress {
 }
 
 pub fn default_session_roots() -> Result<SessionRoots> {
-    let base_dirs = BaseDirs::new().context("failed to locate home directory")?;
-    let home = base_dirs.home_dir();
-
-    Ok(SessionRoots {
-        claude_projects: env_override("AICS_CLAUDE_PROJECTS_DIR")
-            .unwrap_or_else(|| home.join(".claude").join("projects")),
-        codex_sessions: env_override("AICS_CODEX_SESSIONS_DIR")
-            .unwrap_or_else(|| home.join(".codex").join("sessions")),
-    })
+    Ok(ResolvedPaths::discover(None, None)?.roots)
 }
 
 fn env_override(name: &str) -> Option<PathBuf> {
     env::var_os(name)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+fn resolve_path(path: PathBuf, current_dir: &Path) -> Result<PathBuf> {
+    let path = if path.is_absolute() {
+        path
+    } else {
+        current_dir.join(path)
+    };
+    match path.canonicalize() {
+        Ok(canonical) => Ok(canonical),
+        Err(_) => Ok(path),
+    }
 }
 
 pub fn scan_default_session_files() -> Result<Vec<SessionFile>> {

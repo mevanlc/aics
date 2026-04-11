@@ -154,6 +154,10 @@ impl SearchEngine {
     }
 
     pub fn search(&self, request: &SearchRequest) -> Result<Vec<SearchHit>> {
+        // Keep long-lived readers in sync with in-process index mutations such as delete actions.
+        self.reader
+            .reload()
+            .context("failed to reload tantivy reader")?;
         let searcher = self.reader.searcher();
         if searcher.num_docs() == 0 {
             return Ok(Vec::new());

@@ -12,7 +12,9 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use aics::index::{
     IndexManager, Scope, SearchFilters, SearchRequest, SortMode, SyncOutcome, SyncProgress,
 };
+use aics::live::LiveSessionTracker;
 use aics::parse::Agent;
+use aics::scan::ResolvedPaths;
 use aics::settings::Settings;
 use aics::tui::run_app;
 
@@ -106,6 +108,18 @@ struct Cli {
         help = "Rebuild the local search index before searching"
     )]
     rebuild_index: bool,
+    #[arg(
+        long = "claude-home",
+        value_name = "PATH",
+        help = "Override the Claude Code home directory for this run"
+    )]
+    claude_home: Option<PathBuf>,
+    #[arg(
+        long = "codex-home",
+        value_name = "PATH",
+        help = "Override the Codex CLI home directory for this run"
+    )]
+    codex_home: Option<PathBuf>,
     #[arg(long = "delete-index", conflicts_with = "rebuild_index")]
     delete_index: bool,
     #[arg(long = "progress", value_enum, default_value_t = CliProgress::Err)]
@@ -139,28 +153,37 @@ impl From<CliSort> for SortMode {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("warn")).init();
     let cli = Cli::parse();
-    let manager = IndexManager::new()?;
+    let resolved_paths =
+        ResolvedPaths::discover(cli.claude_home.as_deref(), cli.codex_home.as_deref())?;
+    let manager = IndexManager::with_paths(aics::index::IndexPaths::discover_for_roots(
+        &resolved_paths.roots,
+    )?);
     if cli.delete_index {
         manager.delete_index()?;
         return Ok(());
     }
     validate_terminal_mode(&cli)?;
     let settings = Settings::load().unwrap_or_default();
+    manager.write_profile_metadata(&resolved_paths)?;
     let sync_outcome = if let Some(draw_target) = progress_draw_target(cli.progress, cli.json) {
         let mut progress = StartupProgress::new(draw_target);
-        let outcome = manager.sync_best_effort_with_progress(cli.rebuild_index, |event| {
-            progress.update(event);
-        });
+        let outcome = manager.sync_with_roots_and_progress(
+            &resolved_paths.roots,
+            cli.rebuild_index,
+            |event| progress.update(event),
+        );
         progress.finish();
-        outcome?
+        SyncOutcome::Completed(outcome?)
     } else {
-        manager.sync_best_effort(cli.rebuild_index)?
+        manager.sync_with_roots_best_effort(&resolved_paths.roots, cli.rebuild_index)?
     };
     match sync_outcome {
         SyncOutcome::Completed(_) | SyncOutcome::Busy => {}
     }
     let request = build_request(&cli)?;
-    let search_engine = manager.open_search_engine()?;
+    let search_engine = manager.open_search_engine_with_live_sessions(
+        LiveSessionTracker::from_claude_sessions_dir(resolved_paths.claude_sessions.clone()),
+    )?;
 
     if cli.json {
         for hit in search_engine.search(&request)? {
@@ -169,7 +192,13 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    run_app(manager, search_engine, request, settings)
+    run_app(
+        manager,
+        search_engine,
+        request,
+        settings,
+        resolved_paths.homes,
+    )
 }
 
 fn validate_terminal_mode(cli: &Cli) -> Result<()> {
@@ -443,6 +472,8 @@ mod tests {
 
         assert!(help.contains("Search across all indexed sessions"));
         assert!(help.contains("Optional search query to run immediately"));
+        assert!(help.contains("--claude-home <PATH>"));
+        assert!(help.contains("--codex-home <PATH>"));
         assert!(help.contains("Examples:"));
         assert!(help.contains("YYYY-MM-DD or RFC3339"));
     }

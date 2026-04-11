@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -8,14 +9,17 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tantivy::directory::error::LockError;
 use tantivy::{Index, TantivyDocument, TantivyError, Term};
 
 use crate::index::reader::SearchEngine;
 use crate::index::schema::IndexSchema;
+use crate::live::LiveSessionTracker;
 use crate::parse::{parse_session_file, Agent, DerivationType, MessageRole, Session};
 use crate::scan::{
-    default_session_roots, scan_session_files_with_progress, SessionFile, SessionRoots,
+    default_session_roots, scan_session_files_with_progress, ResolvedPaths, SessionFile,
+    SessionRoots,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,16 +127,26 @@ pub struct IndexPaths {
     pub cache_root: PathBuf,
     pub index_dir: PathBuf,
     pub state_file: PathBuf,
+    pub profile_file: PathBuf,
+    pub hashed_input_file: PathBuf,
 }
 
 impl IndexPaths {
     pub fn discover() -> Result<Self> {
+        let roots = default_session_roots()?;
+        Self::discover_for_roots(&roots)
+    }
+
+    pub fn discover_for_roots(roots: &SessionRoots) -> Result<Self> {
         if let Some(cache_root) = env_override("AICS_CACHE_ROOT") {
-            return Ok(Self::from_root(cache_root));
+            return Ok(Self::from_cache_root_and_roots(cache_root, roots));
         }
         let project_dirs =
             ProjectDirs::from("", "", "aics").context("failed to locate cache directory")?;
-        Ok(Self::from_root(project_dirs.cache_dir()))
+        Ok(Self::from_cache_root_and_roots(
+            project_dirs.cache_dir(),
+            roots,
+        ))
     }
 
     pub fn from_root(cache_root: impl Into<PathBuf>) -> Self {
@@ -140,8 +154,18 @@ impl IndexPaths {
         Self {
             index_dir: cache_root.join("index"),
             state_file: cache_root.join("index_state.json"),
+            profile_file: cache_root.join("profile.json"),
+            hashed_input_file: cache_root.join("hashed-input.txt"),
             cache_root,
         }
+    }
+
+    pub fn from_cache_root_and_roots(cache_root: impl Into<PathBuf>, roots: &SessionRoots) -> Self {
+        let cache_root = cache_root.into();
+        let profile_root = cache_root
+            .join("profiles")
+            .join(profile_id_from_roots(roots));
+        Self::from_root(profile_root)
     }
 }
 
@@ -159,6 +183,30 @@ impl IndexManager {
 
     pub fn with_paths(paths: IndexPaths) -> Self {
         Self { paths }
+    }
+
+    pub fn write_profile_metadata(&self, resolved: &ResolvedPaths) -> Result<()> {
+        fs::create_dir_all(&self.paths.cache_root)
+            .with_context(|| format!("failed to create {}", self.paths.cache_root.display()))?;
+
+        let metadata = ProfileMetadata {
+            version: 1,
+            claude_home: resolved.homes.claude_home.clone(),
+            codex_home: resolved.homes.codex_home.clone(),
+            claude_projects: resolved.roots.claude_projects.clone(),
+            claude_sessions: resolved.claude_sessions.clone(),
+            codex_sessions: resolved.roots.codex_sessions.clone(),
+        };
+        let metadata_json = serde_json::to_string_pretty(&metadata)
+            .context("failed to serialize profile metadata")?;
+        fs::write(&self.paths.profile_file, metadata_json)
+            .with_context(|| format!("failed to write {}", self.paths.profile_file.display()))?;
+        fs::write(
+            &self.paths.hashed_input_file,
+            resolved.roots.profile_hash_input(),
+        )
+        .with_context(|| format!("failed to write {}", self.paths.hashed_input_file.display()))?;
+        Ok(())
     }
 
     pub fn sync(&self, rebuild: bool) -> Result<SyncStats> {
@@ -360,6 +408,13 @@ impl IndexManager {
         SearchEngine::open(&self.paths)
     }
 
+    pub fn open_search_engine_with_live_sessions(
+        &self,
+        live_sessions: LiveSessionTracker,
+    ) -> Result<SearchEngine> {
+        SearchEngine::open_with_live_sessions(&self.paths, live_sessions)
+    }
+
     fn open_or_create_index(&self) -> Result<(Index, IndexSchema)> {
         let schema = IndexSchema::new();
         fs::create_dir_all(&self.paths.index_dir)
@@ -503,6 +558,25 @@ fn save_state(path: &Path, state: &IndexState) -> Result<()> {
 
 fn normalize_path_key(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProfileMetadata {
+    version: u32,
+    claude_home: PathBuf,
+    codex_home: PathBuf,
+    claude_projects: PathBuf,
+    claude_sessions: PathBuf,
+    codex_sessions: PathBuf,
+}
+
+fn profile_id_from_roots(roots: &SessionRoots) -> String {
+    let digest = Sha256::digest(roots.profile_hash_input().as_bytes());
+    let mut output = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
 }
 
 fn env_override(name: &str) -> Option<PathBuf> {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use log::{debug, trace};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -37,6 +38,7 @@ use crate::index::{
     SyncOutcome,
 };
 use crate::parse::{parse_session_file, MessageRole, Session};
+use crate::scan::AgentHomes;
 use crate::settings::{Settings, ThemeName};
 use crate::tui::actions::{ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::filter::{FilterModalState, FilterOutcome};
@@ -78,6 +80,7 @@ struct ExternalCommand {
     program: String,
     args: Vec<String>,
     cwd: Option<PathBuf>,
+    env: Vec<(String, String)>,
 }
 
 struct PreviewRenderCache {
@@ -105,9 +108,10 @@ pub fn run_app(
     search_engine: SearchEngine,
     initial_request: SearchRequest,
     settings: Settings,
+    homes: AgentHomes,
 ) -> Result<()> {
     let worker = SearchWorker::spawn(search_engine)?;
-    let mut app = App::new(manager, worker, initial_request, settings);
+    let mut app = App::new(manager, worker, initial_request, settings, homes);
     match app.run()? {
         AppExit::Normal => Ok(()),
         AppExit::Handoff(command) => execute_handoff(command),
@@ -163,6 +167,7 @@ pub struct App {
     selected: usize,
     list_offset: usize,
     preview_cache: HashMap<PathBuf, Option<Session>>,
+    hidden_deleted_paths: HashSet<PathBuf>,
     preview_render_cache: Option<PreviewRenderCache>,
     committed_query: String,
     pending_search: bool,
@@ -182,6 +187,7 @@ pub struct App {
     handoff: Option<ExternalCommand>,
     settings: Settings,
     theme: Theme,
+    homes: AgentHomes,
 }
 
 impl App {
@@ -202,6 +208,7 @@ impl App {
         worker: SearchWorker,
         initial_request: SearchRequest,
         settings: Settings,
+        homes: AgentHomes,
     ) -> Self {
         let local_scope = match &initial_request.scope {
             Scope::CurrentDir(path, canonical) => {
@@ -227,6 +234,7 @@ impl App {
             selected: 0,
             list_offset: 0,
             preview_cache: HashMap::new(),
+            hidden_deleted_paths: HashSet::new(),
             preview_render_cache: None,
             committed_query: initial_request.query,
             pending_search: true,
@@ -248,6 +256,7 @@ impl App {
             handoff: None,
             theme: Theme::from_name(settings.theme),
             settings,
+            homes,
         }
     }
 
@@ -756,6 +765,16 @@ impl App {
         let request_id = self.next_search_id;
         self.next_search_id = self.next_search_id.saturating_add(1);
         self.committed_query = self.query.value().to_owned();
+        debug!(
+            "dispatch_search id={} query={:?} scope={:?} sort={:?} limit={} current_results={} hidden_deleted_paths={}",
+            request_id,
+            self.committed_query,
+            self.scope,
+            self.sort,
+            self.result_limit.max(1),
+            self.results.len(),
+            self.hidden_deleted_paths.len()
+        );
         self.worker
             .request_tx
             .send(SearchCommand {
@@ -784,14 +803,70 @@ impl App {
         loop {
             match self.worker.response_rx.try_recv() {
                 Ok(response) => {
+                    trace!(
+                        "collect_search_responses received id={} latest_search_id={:?}",
+                        response.request_id,
+                        self.latest_search_id
+                    );
                     if Some(response.request_id) != self.latest_search_id {
+                        debug!(
+                            "ignoring stale search response id={} latest_search_id={:?}",
+                            response.request_id,
+                            self.latest_search_id
+                        );
                         continue;
                     }
 
                     self.search_in_flight = false;
                     match response.result {
                         Ok(results) => {
-                            self.results = results;
+                            let raw_count = results.len();
+                            let mut hidden_still_present = HashSet::new();
+                            let mut dropped_missing = 0usize;
+                            let mut dropped_hidden = 0usize;
+                            let mut next_results = Vec::with_capacity(raw_count);
+                            for result in results {
+                                if !result.session.file_path.exists() {
+                                    dropped_missing += 1;
+                                    trace!(
+                                        "dropping missing-file hit id={} path={}",
+                                        response.request_id,
+                                        result.session.file_path.display()
+                                    );
+                                    continue;
+                                }
+                                if self
+                                    .hidden_deleted_paths
+                                    .contains(&result.session.file_path)
+                                {
+                                    dropped_hidden += 1;
+                                    hidden_still_present
+                                        .insert(result.session.file_path.clone());
+                                    trace!(
+                                        "dropping hidden-deleted hit id={} path={}",
+                                        response.request_id,
+                                        result.session.file_path.display()
+                                    );
+                                    continue;
+                                }
+                                next_results.push(result);
+                            }
+                            self.results = next_results;
+                            self.hidden_deleted_paths
+                                .retain(|path| hidden_still_present.contains(path));
+                            debug!(
+                                "applied search response id={} raw_results={} kept={} dropped_missing={} dropped_hidden={} hidden_deleted_paths_remaining={} first_result={}",
+                                response.request_id,
+                                raw_count,
+                                self.results.len(),
+                                dropped_missing,
+                                dropped_hidden,
+                                self.hidden_deleted_paths.len(),
+                                self.results
+                                    .first()
+                                    .map(|hit| hit.session.file_path.display().to_string())
+                                    .unwrap_or_else(|| "<none>".to_owned())
+                            );
                             self.preview_render_cache = None;
                             if self.results.is_empty() {
                                 self.selected = 0;
@@ -805,6 +880,10 @@ impl App {
                             self.search_error = None;
                         }
                         Err(error) => {
+                            debug!(
+                                "search response id={} failed: {}",
+                                response.request_id, error
+                            );
                             self.search_error = Some(error);
                         }
                     }
@@ -905,6 +984,22 @@ impl App {
         self.pending_search = false;
         self.last_edit_at = None;
         self.dispatch_search()
+    }
+
+    fn cancel_pending_searches(&mut self) {
+        debug!(
+            "cancel_pending_searches latest_search_id={:?} next_search_id={} pending_search={} search_in_flight={}",
+            self.latest_search_id,
+            self.next_search_id,
+            self.pending_search,
+            self.search_in_flight
+        );
+        self.latest_search_id = Some(self.next_search_id);
+        self.next_search_id = self.next_search_id.saturating_add(1);
+        self.pending_search = false;
+        self.last_edit_at = None;
+        self.search_in_flight = false;
+        self.search_error = None;
     }
 
     fn open_settings(&mut self) {
@@ -1066,14 +1161,14 @@ impl App {
                 let Some(hit) = self.selected_hit() else {
                     return Ok(());
                 };
-                self.handoff = Some(build_resume_command(&hit, &self.settings)?);
+                self.handoff = Some(build_resume_command(&hit, &self.settings, &self.homes)?);
                 self.should_quit = true;
             }
             SessionAction::Fork => {
                 let Some(hit) = self.selected_hit() else {
                     return Ok(());
                 };
-                self.handoff = Some(build_fork_command(&hit, &self.settings)?);
+                self.handoff = Some(build_fork_command(&hit, &self.settings, &self.homes)?);
                 self.should_quit = true;
             }
         }
@@ -1094,6 +1189,12 @@ impl App {
         let Some(hit) = self.selected_hit() else {
             return Ok(());
         };
+        debug!(
+            "delete_selected_session selected={} results_before={} path={}",
+            self.selected,
+            self.results.len(),
+            hit.session.file_path.display()
+        );
         let file_already_missing = match fs::remove_file(&hit.session.file_path) {
             Ok(()) => false,
             Err(error) if error.kind() == io::ErrorKind::NotFound => true,
@@ -1110,9 +1211,23 @@ impl App {
         }
         self.preview_scroll = 0;
         self.preview_cache.remove(&hit.session.file_path);
+        self.hidden_deleted_paths
+            .insert(hit.session.file_path.clone());
         self.preview_render_cache = None;
+        self.cancel_pending_searches();
+        debug!(
+            "delete_selected_session local_remove path={} file_already_missing={} results_after={} hidden_deleted_paths={}",
+            hit.session.file_path.display(),
+            file_already_missing,
+            self.results.len(),
+            self.hidden_deleted_paths.len()
+        );
         match self.manager.sync_best_effort(false)? {
             SyncOutcome::Completed(_) => {
+                debug!(
+                    "delete_selected_session sync_completed path={}",
+                    hit.session.file_path.display()
+                );
                 self.status_message = Some(if file_already_missing {
                     format!(
                         "removed missing session {}",
@@ -1121,9 +1236,12 @@ impl App {
                 } else {
                     format!("deleted {}", hit.session.file_path.display())
                 });
-                self.trigger_search_now()?;
             }
             SyncOutcome::Busy => {
+                debug!(
+                    "delete_selected_session sync_busy path={}",
+                    hit.session.file_path.display()
+                );
                 self.status_message = Some(if file_already_missing {
                     format!(
                         "removed missing session {} · index refresh deferred",
@@ -1213,13 +1331,49 @@ fn search_worker_loop(
     response_tx: Sender<SearchResponse>,
 ) {
     while let Ok(mut command) = request_rx.recv() {
+        trace!(
+            "search_worker_loop received request id={} query={:?}",
+            command.request_id,
+            command.request.query
+        );
         for newer in request_rx.try_iter() {
+            debug!(
+                "search_worker_loop superseding request id={} with newer id={}",
+                command.request_id,
+                newer.request_id
+            );
             command = newer;
         }
 
-        let result = search_engine
-            .search(&command.request)
-            .map_err(|error| format!("{error:#}"));
+        debug!(
+            "search_worker_loop executing request id={} query={:?} scope={:?} sort={:?} limit={}",
+            command.request_id,
+            command.request.query,
+            command.request.scope,
+            command.request.sort,
+            command.request.limit
+        );
+        let result = match search_engine.search(&command.request) {
+            Ok(results) => {
+                debug!(
+                    "search_worker_loop completed request id={} results={} first_result={}",
+                    command.request_id,
+                    results.len(),
+                    results
+                        .first()
+                        .map(|hit| hit.session.file_path.display().to_string())
+                        .unwrap_or_else(|| "<none>".to_owned())
+                );
+                Ok(results)
+            }
+            Err(error) => {
+                debug!(
+                    "search_worker_loop failed request id={}: {error:#}",
+                    command.request_id
+                );
+                Err(format!("{error:#}"))
+            }
+        };
         if response_tx
             .send(SearchResponse {
                 request_id: command.request_id,
@@ -1285,7 +1439,11 @@ fn is_help_key(key: KeyEvent) -> bool {
         && !key.modifiers.contains(KeyModifiers::ALT)
 }
 
-fn build_resume_command(hit: &SearchHit, settings: &Settings) -> Result<ExternalCommand> {
+fn build_resume_command(
+    hit: &SearchHit,
+    settings: &Settings,
+    homes: &AgentHomes,
+) -> Result<ExternalCommand> {
     let cwd = hit
         .session
         .cwd
@@ -1297,18 +1455,38 @@ fn build_resume_command(hit: &SearchHit, settings: &Settings) -> Result<External
         crate::parse::Agent::Claude => {
             let (program, mut args) = settings.claude_program_and_args();
             args.extend(["--resume".to_owned(), hit.session.session_id.clone()]);
-            ExternalCommand { program, args, cwd }
+            ExternalCommand {
+                program,
+                args,
+                cwd,
+                env: vec![(
+                    "CLAUDE_CONFIG_DIR".to_owned(),
+                    homes.claude_home.display().to_string(),
+                )],
+            }
         }
         crate::parse::Agent::Codex => {
             let (program, mut args) = settings.codex_program_and_args();
             args.extend(["resume".to_owned(), hit.session.session_id.clone()]);
-            ExternalCommand { program, args, cwd }
+            ExternalCommand {
+                program,
+                args,
+                cwd,
+                env: vec![(
+                    "CODEX_HOME".to_owned(),
+                    homes.codex_home.display().to_string(),
+                )],
+            }
         }
     };
     Ok(command)
 }
 
-fn build_fork_command(hit: &SearchHit, settings: &Settings) -> Result<ExternalCommand> {
+fn build_fork_command(
+    hit: &SearchHit,
+    settings: &Settings,
+    homes: &AgentHomes,
+) -> Result<ExternalCommand> {
     let cwd = hit
         .session
         .cwd
@@ -1324,12 +1502,28 @@ fn build_fork_command(hit: &SearchHit, settings: &Settings) -> Result<ExternalCo
                 hit.session.session_id.clone(),
                 "--fork-session".to_owned(),
             ]);
-            ExternalCommand { program, args, cwd }
+            ExternalCommand {
+                program,
+                args,
+                cwd,
+                env: vec![(
+                    "CLAUDE_CONFIG_DIR".to_owned(),
+                    homes.claude_home.display().to_string(),
+                )],
+            }
         }
         crate::parse::Agent::Codex => {
             let (program, mut args) = settings.codex_program_and_args();
             args.extend(["fork".to_owned(), hit.session.session_id.clone()]);
-            ExternalCommand { program, args, cwd }
+            ExternalCommand {
+                program,
+                args,
+                cwd,
+                env: vec![(
+                    "CODEX_HOME".to_owned(),
+                    homes.codex_home.display().to_string(),
+                )],
+            }
         }
     };
     Ok(command)
@@ -1404,6 +1598,9 @@ fn execute_handoff(command: ExternalCommand) -> Result<()> {
 
     let mut process = Command::new(&command.program);
     process.args(&command.args);
+    for (key, value) in &command.env {
+        process.env(key, value);
+    }
     if let Some(cwd) = command.cwd {
         process.current_dir(cwd);
     }
@@ -1415,6 +1612,9 @@ fn execute_handoff(command: ExternalCommand) -> Result<()> {
 fn execute_handoff(command: ExternalCommand) -> Result<()> {
     let mut process = Command::new(&command.program);
     process.args(&command.args);
+    for (key, value) in &command.env {
+        process.env(key, value);
+    }
     if let Some(cwd) = command.cwd {
         process.current_dir(cwd);
     }
@@ -1448,31 +1648,45 @@ mod tests {
 
     use super::{
         build_fork_command, build_resume_command, export_stem_for_session, finalize_run_result,
-        write_session_export, App, AppExit, SearchWorker, PAGE_STEP,
+        write_session_export, App, AppExit, SearchResponse, SearchWorker, PAGE_STEP,
     };
+    use crate::scan::AgentHomes;
 
     #[test]
     fn builds_resume_commands_for_both_agents() {
         let settings = Settings::default();
-        let claude = build_resume_command(&sample_hit(Agent::Claude), &settings).unwrap();
+        let homes = sample_homes();
+        let claude = build_resume_command(&sample_hit(Agent::Claude), &settings, &homes).unwrap();
         assert_eq!(claude.program, "claude");
         assert_eq!(claude.args, vec!["--resume", "session-123"]);
+        assert_eq!(
+            claude.env,
+            vec![(
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                "/tmp/claude-home".to_owned()
+            )]
+        );
 
-        let codex = build_resume_command(&sample_hit(Agent::Codex), &settings).unwrap();
+        let codex = build_resume_command(&sample_hit(Agent::Codex), &settings, &homes).unwrap();
         assert_eq!(codex.program, "codex");
         assert_eq!(codex.args, vec!["resume", "session-123"]);
+        assert_eq!(
+            codex.env,
+            vec![("CODEX_HOME".to_owned(), "/tmp/codex-home".to_owned())]
+        );
     }
 
     #[test]
     fn builds_fork_commands_for_both_agents() {
         let settings = Settings::default();
-        let claude = build_fork_command(&sample_hit(Agent::Claude), &settings).unwrap();
+        let homes = sample_homes();
+        let claude = build_fork_command(&sample_hit(Agent::Claude), &settings, &homes).unwrap();
         assert_eq!(
             claude.args,
             vec!["--resume", "session-123", "--fork-session"]
         );
 
-        let codex = build_fork_command(&sample_hit(Agent::Codex), &settings).unwrap();
+        let codex = build_fork_command(&sample_hit(Agent::Codex), &settings, &homes).unwrap();
         assert_eq!(codex.args, vec!["fork", "session-123"]);
     }
 
@@ -1483,14 +1697,15 @@ mod tests {
             codex_command: "/usr/local/bin/codex".to_owned(),
             ..Settings::default()
         };
-        let claude = build_resume_command(&sample_hit(Agent::Claude), &settings).unwrap();
+        let homes = sample_homes();
+        let claude = build_resume_command(&sample_hit(Agent::Claude), &settings, &homes).unwrap();
         assert_eq!(claude.program, "claude");
         assert_eq!(
             claude.args,
             vec!["--profile", "work", "--resume", "session-123"]
         );
 
-        let codex = build_resume_command(&sample_hit(Agent::Codex), &settings).unwrap();
+        let codex = build_resume_command(&sample_hit(Agent::Codex), &settings, &homes).unwrap();
         assert_eq!(codex.program, "/usr/local/bin/codex");
         assert_eq!(codex.args, vec!["resume", "session-123"]);
     }
@@ -1705,6 +1920,91 @@ mod tests {
     }
 
     #[test]
+    fn delete_cancels_pending_and_in_flight_searches() {
+        let temp = TempDir::new().unwrap();
+        let deleted_path = temp.path().join("deleted-session.jsonl");
+        let surviving_path = temp.path().join("surviving-session.jsonl");
+        fs::write(&deleted_path, "{}\n").unwrap();
+        fs::write(&surviving_path, "{}\n").unwrap();
+        let (mut app, response_tx) = test_app_with_response_sender();
+        app.results = vec![sample_hit_with_path(Agent::Claude, deleted_path.clone())];
+        app.selected = 0;
+        app.pending_search = true;
+        app.search_in_flight = true;
+        app.latest_search_id = Some(4);
+        app.next_search_id = 5;
+
+        app.delete_selected_session().unwrap();
+
+        assert!(app.results.is_empty());
+        assert!(!app.pending_search);
+        assert!(!app.search_in_flight);
+        assert_eq!(app.latest_search_id, Some(5));
+        assert_eq!(app.next_search_id, 6);
+
+        response_tx
+            .send(SearchResponse {
+                request_id: 4,
+                result: Ok(vec![sample_hit_with_path(Agent::Codex, surviving_path)]),
+            })
+            .unwrap();
+
+        assert!(!app.collect_search_responses().unwrap());
+        assert!(app.results.is_empty());
+    }
+
+    #[test]
+    fn stale_search_response_cannot_restore_deleted_session() {
+        let temp = TempDir::new().unwrap();
+        let deleted_path = temp.path().join("deleted-session.jsonl");
+        let surviving_path = temp.path().join("surviving-session.jsonl");
+        fs::write(&deleted_path, "{}\n").unwrap();
+        fs::write(&surviving_path, "{}\n").unwrap();
+        let (mut app, response_tx) = test_app_with_response_sender();
+        app.latest_search_id = Some(7);
+        app.hidden_deleted_paths.insert(deleted_path.clone());
+
+        response_tx
+            .send(SearchResponse {
+                request_id: 7,
+                result: Ok(vec![sample_hit_with_path(Agent::Claude, deleted_path.clone())]),
+            })
+            .unwrap();
+
+        assert!(app.collect_search_responses().unwrap());
+        assert!(app.results.is_empty());
+        assert!(app.hidden_deleted_paths.contains(&deleted_path));
+
+        response_tx
+            .send(SearchResponse {
+                request_id: 7,
+                result: Ok(vec![sample_hit_with_path(Agent::Codex, surviving_path)]),
+            })
+            .unwrap();
+
+        assert!(app.collect_search_responses().unwrap());
+        assert_eq!(app.results.len(), 1);
+        assert!(!app.hidden_deleted_paths.contains(&deleted_path));
+    }
+
+    #[test]
+    fn search_response_skips_hits_whose_files_are_missing() {
+        let missing_path = PathBuf::from("/tmp/demo/missing-session.jsonl");
+        let (mut app, response_tx) = test_app_with_response_sender();
+        app.latest_search_id = Some(11);
+
+        response_tx
+            .send(SearchResponse {
+                request_id: 11,
+                result: Ok(vec![sample_hit_with_path(Agent::Claude, missing_path)]),
+            })
+            .unwrap();
+
+        assert!(app.collect_search_responses().unwrap());
+        assert!(app.results.is_empty());
+    }
+
+    #[test]
     fn export_rejects_windows_reserved_titles() {
         let mut hit = sample_hit(Agent::Claude);
         hit.session.custom_title = Some("NUL".to_owned());
@@ -1777,28 +2077,43 @@ mod tests {
     }
 
     fn test_app() -> App {
+        test_app_with_response_sender().0
+    }
+
+    fn test_app_with_response_sender() -> (App, mpsc::Sender<SearchResponse>) {
         let temp = TempDir::new().unwrap();
         let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path()));
         let (request_tx, request_rx) = mpsc::channel();
         std::thread::spawn(move || while request_rx.recv().is_ok() {});
-        let (_response_tx, response_rx) = mpsc::channel();
+        let (response_tx, response_rx) = mpsc::channel();
         let worker = SearchWorker {
             request_tx,
             response_rx,
         };
 
-        App::new(
-            manager,
-            worker,
-            SearchRequest {
-                query: String::new(),
-                scope: Scope::Global,
-                limit: 10,
-                sort: SortMode::Time,
-                filters: SearchFilters::default(),
-            },
-            Settings::default(),
+        (
+            App::new(
+                manager,
+                worker,
+                SearchRequest {
+                    query: String::new(),
+                    scope: Scope::Global,
+                    limit: 10,
+                    sort: SortMode::Time,
+                    filters: SearchFilters::default(),
+                },
+                Settings::default(),
+                sample_homes(),
+            ),
+            response_tx,
         )
+    }
+
+    fn sample_homes() -> AgentHomes {
+        AgentHomes {
+            claude_home: PathBuf::from("/tmp/claude-home"),
+            codex_home: PathBuf::from("/tmp/codex-home"),
+        }
     }
 
     fn crossterm_key(code: KeyCode) -> ratatui::crossterm::event::KeyEvent {
