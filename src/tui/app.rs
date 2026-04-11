@@ -47,7 +47,9 @@ use crate::tui::profile;
 use crate::tui::settings::{SettingsModalState, SettingsOutcome};
 use crate::tui::theme::Theme;
 use crate::tui::util::{block_title, session_display_title, wrapped_text_height};
-use crate::tui::viewer::{ViewerOutcome, ViewerState};
+use crate::tui::viewer::{
+    collect_message_rows, message_row_for_scroll, MessageDirection, ViewerOutcome, ViewerState,
+};
 use crate::tui::{keymap_hint, layout, list, preview, search};
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -191,15 +193,16 @@ pub struct App {
 }
 
 impl App {
-    const MAIN_HINTS: [keymap_hint::KeymapHint; 9] = [
+    const MAIN_HINTS: [keymap_hint::KeymapHint; 10] = [
+        keymap_hint::KeymapHint::new("?", "help"),
         keymap_hint::KeymapHint::new("↑↓", "select"),
         keymap_hint::KeymapHint::new("⏎", "actions"),
         keymap_hint::KeymapHint::new("^F", "filters"),
         keymap_hint::KeymapHint::new("^S", "settings"),
-        keymap_hint::KeymapHint::new("?", "help"),
         keymap_hint::KeymapHint::new("^T", "toggle"),
         keymap_hint::KeymapHint::new("^H/^L", "resize"),
         keymap_hint::KeymapHint::new("^C", "quit"),
+        keymap_hint::KeymapHint::new("Esc", "Cancel"),
         keymap_hint::KeymapHint::new("PgUp/PgDn", "scroll"),
     ];
 
@@ -546,6 +549,16 @@ impl App {
             }
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_filters()
+            }
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                if self.preview_available() {
+                    self.jump_preview_message(MessageDirection::Next);
+                }
+            }
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                if self.preview_available() {
+                    self.jump_preview_message(MessageDirection::Previous);
+                }
             }
             KeyCode::Down => self.move_selection(1),
             KeyCode::Up => self.move_selection(-1),
@@ -980,6 +993,32 @@ impl App {
         self.last_layout.map_or(false, |l| l.preview.is_some())
     }
 
+    fn jump_preview_message(&mut self, direction: MessageDirection) {
+        let Some(layout) = self.last_layout else {
+            return;
+        };
+        let Some(preview_area) = layout.preview else {
+            return;
+        };
+        let width = preview_area.width.saturating_sub(2);
+        let theme = self.current_frame_theme();
+        let rows = {
+            let Some(session) = self.selected_preview() else {
+                return;
+            };
+            collect_message_rows(session, &theme, width)
+        };
+        if let Some(target) = message_row_for_scroll(&rows, self.preview_scroll, direction) {
+            let moved = match direction {
+                MessageDirection::Next => target > self.preview_scroll,
+                MessageDirection::Previous => target < self.preview_scroll,
+            };
+            if moved {
+                self.preview_scroll = target;
+            }
+        }
+    }
+
     fn trigger_search_now(&mut self) -> Result<()> {
         self.pending_search = false;
         self.last_edit_at = None;
@@ -1287,10 +1326,23 @@ impl App {
                 "This removes the JSONL file and refreshes the index.",
                 Style::default().fg(theme.muted),
             )),
-            Line::from(Span::styled(
-                "Press y to delete or Esc to cancel.",
-                Style::default().fg(theme.muted),
-            )),
+            Line::from(vec![
+                Span::styled("Press ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    "y",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" to delete or ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    "Esc",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" to cancel.", Style::default().fg(theme.muted)),
+            ]),
         ])
         .block(
             Block::default()
