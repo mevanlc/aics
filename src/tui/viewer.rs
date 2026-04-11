@@ -18,7 +18,7 @@ use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::preview::{render_message_body, render_session_text};
 use crate::tui::profile;
 use crate::tui::theme::Theme;
-use crate::tui::util::{block_title, wrapped_text_height};
+use crate::tui::util::{block_title, session_message_label, wrapped_text_height};
 
 const VIEWER_PAGE_STEP: usize = 12;
 const VIEWER_SEARCH_HEIGHT: u16 = 3; // bordered search input
@@ -57,9 +57,16 @@ enum MatchDirection {
     Previous,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageDirection {
+    Next,
+    Previous,
+}
+
 impl ViewerState {
-    const HINTS: [KeymapHint; 5] = [
+    const HINTS: [KeymapHint; 6] = [
         KeymapHint::new("↑↓/PgUp/PgDn/Home/End", "scroll"),
+        KeymapHint::new("^Up/^Dn", "message"),
         KeymapHint::new("n/p", "matches"),
         KeymapHint::new("Enter", "done"),
         KeymapHint::new("?", "help"),
@@ -130,6 +137,20 @@ impl ViewerState {
                 }
                 KeyCode::Char('p') => {
                     self.jump_to_match(MatchDirection::Previous, area, session, theme, theme_name);
+                    ViewerOutcome::Stay
+                }
+                KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.jump_to_message(
+                        MessageDirection::Previous,
+                        area,
+                        session,
+                        theme,
+                        theme_name,
+                    );
+                    ViewerOutcome::Stay
+                }
+                KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.jump_to_message(MessageDirection::Next, area, session, theme, theme_name);
                     ViewerOutcome::Stay
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -298,6 +319,29 @@ impl ViewerState {
         self.scroll = scroll_for_match(matches[next_index], viewport_height, max_scroll);
     }
 
+    fn jump_to_message(
+        &mut self,
+        direction: MessageDirection,
+        area: Rect,
+        session: Option<&Session>,
+        theme: &Theme,
+        theme_name: ThemeName,
+    ) {
+        let Some(session) = session else {
+            return;
+        };
+
+        let body_area = Self::body_area(area);
+        let viewport_width = body_area.width.saturating_sub(2);
+        let rows = collect_message_rows(session, theme, viewport_width);
+        let Some(target_row) = message_row_for_scroll(&rows, self.scroll, direction) else {
+            return;
+        };
+
+        let max_scroll = self.max_scroll(area, session, theme, theme_name);
+        self.scroll = target_row.min(max_scroll);
+    }
+
     fn render_cache(
         &mut self,
         area: Rect,
@@ -448,6 +492,48 @@ fn collect_match_rows(session: &Session, theme: &Theme, query: &str, width: u16)
     rows
 }
 
+fn collect_message_rows(session: &Session, theme: &Theme, width: u16) -> Vec<usize> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let width = width as usize;
+    let mut rows = Vec::with_capacity(session.messages.len());
+    let mut row_offset = 0usize;
+
+    for message in &session.messages {
+        rows.push(row_offset);
+        row_offset += wrapped_line_height(&message_header_text(message), width);
+
+        let rendered = render_message_body(
+            session.agent,
+            message.role,
+            message.content.as_str(),
+            theme,
+            None,
+        );
+        for line in &rendered.lines {
+            row_offset += wrapped_rendered_line_height(line, width);
+        }
+        row_offset += 1;
+    }
+
+    rows
+}
+
+fn message_header_text(message: &crate::parse::SessionMessage) -> String {
+    let label = session_message_label(message);
+    let timestamp = message
+        .timestamp
+        .map(|timestamp| timestamp.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default();
+    if timestamp.is_empty() {
+        label
+    } else {
+        format!("{label} {timestamp}")
+    }
+}
+
 fn collect_line_match_rows(line: &str, width: usize, terms: &[String]) -> Vec<usize> {
     if width == 0 {
         return Vec::new();
@@ -525,6 +611,25 @@ fn previous_match_index(matches: &[usize], active_match: Option<usize>, scroll: 
         .unwrap_or(matches.len() - 1)
 }
 
+fn message_row_for_scroll(
+    rows: &[usize],
+    scroll: usize,
+    direction: MessageDirection,
+) -> Option<usize> {
+    match direction {
+        MessageDirection::Next => rows
+            .iter()
+            .copied()
+            .find(|row| *row > scroll)
+            .or_else(|| rows.first().copied()),
+        MessageDirection::Previous => rows
+            .iter()
+            .copied()
+            .rfind(|row| *row < scroll)
+            .or_else(|| rows.last().copied()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -540,8 +645,9 @@ mod tests {
     use crate::tui::theme::Theme;
 
     use super::{
-        collect_match_rows, match_scrolloff, next_match_index, previous_match_index,
-        scroll_for_match, scroll_progress_percent, search_focus_title, ViewerOutcome, ViewerState,
+        collect_match_rows, collect_message_rows, match_scrolloff, message_row_for_scroll,
+        next_match_index, previous_match_index, scroll_for_match, scroll_progress_percent,
+        search_focus_title, MessageDirection, ViewerOutcome, ViewerState,
     };
 
     #[test]
@@ -561,6 +667,14 @@ mod tests {
     }
 
     #[test]
+    fn collect_message_rows_tracks_header_boundaries() {
+        let session = sample_session();
+        let rows = collect_message_rows(&session, &Theme::default(), 12);
+
+        assert_eq!(rows, vec![0, 6]);
+    }
+
+    #[test]
     fn match_navigation_wraps_in_both_directions() {
         let matches = vec![1, 5, 9];
 
@@ -571,6 +685,36 @@ mod tests {
         assert_eq!(previous_match_index(&matches, None, 5), 0);
         assert_eq!(previous_match_index(&matches, Some(0), 0), 2);
         assert_eq!(previous_match_index(&matches, Some(2), 0), 1);
+    }
+
+    #[test]
+    fn message_navigation_wraps_in_both_directions() {
+        let rows = vec![0, 4, 9];
+
+        assert_eq!(
+            message_row_for_scroll(&rows, 0, MessageDirection::Next),
+            Some(4)
+        );
+        assert_eq!(
+            message_row_for_scroll(&rows, 3, MessageDirection::Next),
+            Some(4)
+        );
+        assert_eq!(
+            message_row_for_scroll(&rows, 9, MessageDirection::Next),
+            Some(0)
+        );
+        assert_eq!(
+            message_row_for_scroll(&rows, 9, MessageDirection::Previous),
+            Some(4)
+        );
+        assert_eq!(
+            message_row_for_scroll(&rows, 3, MessageDirection::Previous),
+            Some(0)
+        );
+        assert_eq!(
+            message_row_for_scroll(&rows, 0, MessageDirection::Previous),
+            Some(9)
+        );
     }
 
     #[test]
@@ -734,6 +878,31 @@ mod tests {
             ThemeName::Lazygit,
         );
         assert_eq!(state.active_match, Some(0));
+        assert_eq!(state.scroll, 0);
+    }
+
+    #[test]
+    fn control_up_and_down_jump_between_message_boundaries() {
+        let session = sample_session();
+        let area = Rect::new(0, 0, 14, 10);
+        let mut state = ViewerState::new();
+
+        state.handle_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL),
+            area,
+            Some(&session),
+            &Theme::default(),
+            ThemeName::Lazygit,
+        );
+        assert_eq!(state.scroll, 6);
+
+        state.handle_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL),
+            area,
+            Some(&session),
+            &Theme::default(),
+            ThemeName::Lazygit,
+        );
         assert_eq!(state.scroll, 0);
     }
 

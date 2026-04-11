@@ -458,11 +458,7 @@ fn maybe_capture_event_preview(raw: &str, preview: &mut Option<String>) {
     *preview = normalize_codex_user_message(raw);
 }
 
-fn maybe_capture_response_item_preview(
-    role: &str,
-    raw: &str,
-    preview: &mut Option<String>,
-) {
+fn maybe_capture_response_item_preview(role: &str, raw: &str, preview: &mut Option<String>) {
     if preview.is_some() || role != "user" || should_skip_display_message(role, raw) {
         return;
     }
@@ -499,14 +495,11 @@ fn load_thread_name_cache(index_path: &Path) -> Result<HashMap<String, String>> 
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
         Err(error) => {
-            return Err(error).with_context(|| {
-                format!("failed to read metadata for {}", index_path.display())
-            });
+            return Err(error)
+                .with_context(|| format!("failed to read metadata for {}", index_path.display()));
         }
     };
-    let modified = metadata
-        .modified()
-        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
     let size = metadata.len();
     let cache_key = index_path.to_path_buf();
     let cache = thread_name_cache();
@@ -535,8 +528,7 @@ fn load_thread_name_cache(index_path: &Path) -> Result<HashMap<String, String>> 
 }
 
 fn thread_name_cache() -> &'static Mutex<HashMap<std::path::PathBuf, CachedThreadNames>> {
-    static CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, CachedThreadNames>>> =
-        OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, CachedThreadNames>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

@@ -95,7 +95,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 13] = [
     ),
 ];
 
-const VIEWER_ITEMS: [HelpItem; 11] = [
+const VIEWER_ITEMS: [HelpItem; 12] = [
     HelpItem::new(
         "?",
         "open this help",
@@ -125,6 +125,11 @@ const VIEWER_ITEMS: [HelpItem; 11] = [
         "p / ^P",
         "previous match",
         "Jump to the previous highlighted match in the viewer. Navigation wraps when you move backward from the first match.",
+    ),
+    HelpItem::new(
+        "^Up / ^Dn",
+        "jump message/event",
+        "Jump between message or event boundaries in the viewer. Ctrl+Up moves to the previous entry and Ctrl+Down moves to the next one, with wraparound at the ends.",
     ),
     HelpItem::new(
         "↑↓ / j/k",

@@ -9,7 +9,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_truncate::UnicodeTruncateStr;
 
 use crate::index::SearchHit;
-use crate::parse::{normalize_session_path, Agent, MessageRole};
+use crate::parse::{normalize_session_path, Agent, MessageRole, SessionMessage};
 use crate::search_query::extract_highlight_terms;
 use crate::tui::theme::Theme;
 
@@ -113,6 +113,16 @@ pub fn role_label(role: MessageRole) -> &'static str {
         MessageRole::Summary => "Summary",
         MessageRole::ToolCall => "Tool",
         MessageRole::ToolResult => "Result",
+    }
+}
+
+pub fn session_message_label(message: &SessionMessage) -> String {
+    match (&message.role, &message.tool_name) {
+        (MessageRole::ToolCall, Some(name)) => format!("\u{203a} {name}"),
+        (MessageRole::ToolResult, Some(name)) => format!("\u{2039} {name}"),
+        (MessageRole::ToolCall, None) => "\u{203a} tool".to_owned(),
+        (MessageRole::ToolResult, None) => "\u{2039} result".to_owned(),
+        _ => role_label(message.role).to_owned(),
     }
 }
 

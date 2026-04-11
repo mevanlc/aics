@@ -9,7 +9,7 @@ use crate::tui::app::App;
 use crate::tui::markdown::render_markdown_message;
 use crate::tui::profile;
 use crate::tui::theme::Theme;
-use crate::tui::util::{block_title, role_label, wrapped_text_height};
+use crate::tui::util::{block_title, session_message_label, wrapped_text_height};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let _profile = profile::scope("preview.render");
@@ -61,13 +61,7 @@ pub fn render_session_text(
     let mut lines = Vec::new();
     for message in &session.messages {
         let (label_color, _) = message_colors(session.agent, message.role, theme);
-        let label = match (&message.role, &message.tool_name) {
-            (MessageRole::ToolCall, Some(name)) => format!("\u{203a} {name}"),
-            (MessageRole::ToolResult, Some(name)) => format!("\u{2039} {name}"),
-            (MessageRole::ToolCall, None) => "\u{203a} tool".to_owned(),
-            (MessageRole::ToolResult, None) => "\u{2039} result".to_owned(),
-            _ => role_label(message.role).to_owned(),
-        };
+        let label = session_message_label(message);
         lines.push(Line::from(vec![
             Span::styled(
                 label,

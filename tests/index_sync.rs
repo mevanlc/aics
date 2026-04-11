@@ -70,9 +70,9 @@ fn sync_progress_reports_discovery_then_reindex_count() -> Result<()> {
 
     let mut first_events = Vec::new();
     manager.sync_with_roots_and_progress(&roots, true, |event| first_events.push(event))?;
-    assert!(first_events
-        .iter()
-        .any(|event| matches!(event, SyncProgress::Discovering { discovered } if *discovered >= 1)));
+    assert!(first_events.iter().any(
+        |event| matches!(event, SyncProgress::Discovering { discovered } if *discovered >= 1)
+    ));
     assert!(first_events
         .iter()
         .any(|event| matches!(event, SyncProgress::IndexingStarted { total } if *total == 2)));
