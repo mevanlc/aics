@@ -5,20 +5,37 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::parse::{Agent, MessageRole, Session};
+use crate::summary::{Fingerprint, SummarySidecar};
 use crate::tui::app::App;
 use crate::tui::markdown::render_markdown_message;
 use crate::tui::profile;
 use crate::tui::theme::Theme;
 use crate::tui::util::{block_title, session_message_label, wrapped_text_height};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewMode {
+    Session,
+    Summary,
+}
+
+impl Default for PreviewMode {
+    fn default() -> Self {
+        PreviewMode::Session
+    }
+}
+
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let _profile = profile::scope("preview.render");
+    let title_text = match app.preview_mode() {
+        PreviewMode::Session => "Preview",
+        PreviewMode::Summary => "Preview · Summary",
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme.border_style(false))
         .title(block_title(Span::styled(
-            "Preview",
+            title_text,
             Style::default().fg(theme.accent),
         )));
 
@@ -90,6 +107,86 @@ pub fn render_session_text(
         lines.push(Line::default());
     }
     Text::from(lines)
+}
+
+/// Render a summary sidecar into a `Text` suitable for the preview pane.
+/// Prepends a single metadata line (backend · generated · FRESH/STALE) then
+/// the markdown body.
+pub fn render_summary_text(
+    sidecar: &SummarySidecar,
+    current_fingerprint: Option<&Fingerprint>,
+    theme: &Theme,
+) -> Text<'static> {
+    let _profile = profile::scope("preview.render_summary_text");
+    let fresh = current_fingerprint
+        .map(|fp| sidecar.is_fresh(fp))
+        .unwrap_or(true);
+    let (badge, badge_style) = if fresh {
+        (
+            "FRESH".to_owned(),
+            Style::default()
+                .fg(theme.highlight)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        let added = current_fingerprint
+            .map(|fp| fp.line_count.saturating_sub(sidecar.line_count))
+            .unwrap_or(0);
+        let label = if added > 0 {
+            format!("STALE · +{added} lines")
+        } else {
+            "STALE".to_owned()
+        };
+        (
+            label,
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        )
+    };
+
+    let header = Line::from(vec![
+        Span::styled(
+            sidecar.backend.as_str().to_owned(),
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" · ", Style::default().fg(theme.muted)),
+        Span::styled(
+            sidecar
+                .generated_at
+                .format("%Y-%m-%d %H:%M")
+                .to_string(),
+            Style::default().fg(theme.muted),
+        ),
+        Span::styled(" · ", Style::default().fg(theme.muted)),
+        Span::styled(badge, badge_style),
+    ]);
+
+    let base = Style::default().fg(theme.text);
+    let body = render_markdown_message(&sidecar.body, theme, base, None);
+
+    let mut lines = Vec::with_capacity(body.lines.len() + 2);
+    lines.push(header);
+    lines.push(Line::default());
+    lines.extend(body.lines);
+    Text::from(lines)
+}
+
+/// Rendered when `PreviewMode::Summary` is active but no sidecar is present
+/// (or it could not be read).
+pub fn render_summary_missing(theme: &Theme, message: &str) -> Text<'static> {
+    Text::from(vec![
+        Line::default(),
+        Line::from(Span::styled(
+            message.to_owned(),
+            Style::default().fg(theme.muted),
+        )),
+        Line::default(),
+        Line::from(Span::styled(
+            "Press Enter → s to generate one.",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ])
 }
 
 pub(crate) fn render_message_body(

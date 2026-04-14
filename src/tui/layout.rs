@@ -12,11 +12,12 @@ pub fn split(area: Rect, preview_width_pct: u16, show_preview: bool) -> AppLayou
     let vertical = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(0),
-        Constraint::Length(2), // 2 rows for keymap hints, no border
+        Constraint::Length(2),
     ])
     .split(area);
 
-    let show_preview = show_preview && vertical[1].width > 44;
+    let body_index = 1;
+    let show_preview = show_preview && vertical[body_index].width > 44;
     let body = if show_preview {
         let preview_width_pct = preview_width_pct.clamp(25, 75);
         let list_width_pct = 100u16.saturating_sub(preview_width_pct);
@@ -24,9 +25,9 @@ pub fn split(area: Rect, preview_width_pct: u16, show_preview: bool) -> AppLayou
             Constraint::Percentage(list_width_pct),
             Constraint::Percentage(preview_width_pct),
         ])
-        .split(vertical[1])
+        .split(vertical[body_index])
     } else {
-        Layout::horizontal([Constraint::Percentage(100)]).split(vertical[1])
+        Layout::horizontal([Constraint::Percentage(100)]).split(vertical[body_index])
     };
 
     AppLayout {

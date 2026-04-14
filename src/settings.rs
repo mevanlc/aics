@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+use crate::summary::{prompt::DEFAULT_PROMPT, SummarizeBackend};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeName {
@@ -54,6 +56,12 @@ pub struct Settings {
     pub session_separator: String,
     #[serde(default = "default_snippet_line_count")]
     pub snippet_line_count: usize,
+    #[serde(default)]
+    pub summarize_backend: SummarizeBackend,
+    #[serde(default)]
+    pub summarize_command_custom: String,
+    #[serde(default = "default_summarize_prompt")]
+    pub summarize_prompt: String,
 }
 
 fn default_claude_command() -> String {
@@ -80,6 +88,10 @@ fn default_snippet_line_count() -> usize {
     3
 }
 
+fn default_summarize_prompt() -> String {
+    DEFAULT_PROMPT.to_owned()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -90,6 +102,9 @@ impl Default for Settings {
             preview_width_pct: default_preview_width_pct(),
             session_separator: default_session_separator(),
             snippet_line_count: default_snippet_line_count(),
+            summarize_backend: SummarizeBackend::default(),
+            summarize_command_custom: String::new(),
+            summarize_prompt: default_summarize_prompt(),
         }
     }
 }
@@ -136,6 +151,20 @@ impl Settings {
 
     pub fn codex_program_and_args(&self) -> (String, Vec<String>) {
         Self::parse_command(&self.codex_command)
+    }
+
+    /// Effective shell command template for the currently-selected summarize
+    /// backend. For built-ins this is the baked-in template; for `Custom` it
+    /// is the user's `summarize_command_custom` (empty string if unset).
+    pub fn summarize_command_template(&self) -> String {
+        match self.summarize_backend {
+            SummarizeBackend::Claude | SummarizeBackend::Codex => self
+                .summarize_backend
+                .builtin_template()
+                .expect("builtin backends have templates")
+                .to_owned(),
+            SummarizeBackend::Custom => self.summarize_command_custom.clone(),
+        }
     }
 }
 

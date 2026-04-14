@@ -11,8 +11,9 @@ use crate::tui::layout;
 use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
 
-const ACTIONS: [ActionItem; 8] = [
+const ACTIONS: [ActionItem; 9] = [
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
+    ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
     ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
     ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
     ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
@@ -25,6 +26,7 @@ const ACTIONS: [ActionItem; 8] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionAction {
     View,
+    Summarize,
     Export,
     CopyId,
     CopyPath,

@@ -387,9 +387,13 @@ impl SettingsModalState {
         };
 
         let style = if focused {
-            Style::default().fg(theme.text)
+            Style::default()
+                .fg(theme.settings_input_fg(true))
+                .bg(theme.settings_input_bg(true))
         } else {
-            Style::default().fg(theme.muted)
+            Style::default()
+                .fg(theme.settings_input_fg(false))
+                .bg(theme.settings_input_bg(false))
         };
 
         let display_value = input.value();

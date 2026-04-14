@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use log::{debug, trace};
+use log::{debug, trace, warn};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -40,11 +40,18 @@ use crate::index::{
 use crate::parse::{parse_session_file, MessageRole, Session};
 use crate::scan::AgentHomes;
 use crate::settings::{Settings, ThemeName};
+use crate::summary::sidecar::sidecar_path;
+use crate::summary::staleness::fingerprint as compute_fingerprint;
+use crate::summary::{
+    Fingerprint, SummaryCommand, SummaryEvent, SummarySidecar, SummaryWorker,
+};
 use crate::tui::actions::{ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::filter::{FilterModalState, FilterOutcome};
 use crate::tui::help::{HelpModalState, HelpOutcome, HelpTab};
+use crate::tui::preview::PreviewMode;
 use crate::tui::profile;
 use crate::tui::settings::{SettingsModalState, SettingsOutcome};
+use crate::tui::statusline;
 use crate::tui::theme::Theme;
 use crate::tui::util::{block_title, session_display_title, wrapped_text_height};
 use crate::tui::viewer::{
@@ -75,6 +82,7 @@ enum Overlay {
     Viewer(ViewerState),
     Settings(SettingsModalState),
     ConfirmDelete,
+    ConfirmExit,
 }
 
 #[derive(Debug, Clone)]
@@ -90,8 +98,15 @@ struct PreviewRenderCache {
     query: String,
     width: u16,
     theme_name: ThemeName,
+    mode: PreviewMode,
     wrapped_height: Option<usize>,
     text: Text<'static>,
+}
+
+#[derive(Debug, Clone)]
+struct SummaryCacheEntry {
+    sidecar: SummarySidecar,
+    fingerprint: Fingerprint,
 }
 
 pub struct PreviewRenderState<'a> {
@@ -113,7 +128,15 @@ pub fn run_app(
     homes: AgentHomes,
 ) -> Result<()> {
     let worker = SearchWorker::spawn(search_engine)?;
-    let mut app = App::new(manager, worker, initial_request, settings, homes);
+    let summary_worker = SummaryWorker::spawn()?;
+    let mut app = App::new(
+        manager,
+        worker,
+        summary_worker,
+        initial_request,
+        settings,
+        homes,
+    );
     match app.run()? {
         AppExit::Normal => Ok(()),
         AppExit::Handoff(command) => execute_handoff(command),
@@ -161,6 +184,11 @@ pub struct App {
     pub preview_scroll: usize,
     manager: IndexManager,
     worker: SearchWorker,
+    summary_worker: SummaryWorker,
+    summary_cache: HashMap<PathBuf, Option<SummaryCacheEntry>>,
+    summary_inflight: HashSet<PathBuf>,
+    preview_mode: PreviewMode,
+    statusline: Option<statusline::Entry>,
     scope: Scope,
     local_scope: Scope,
     filters: SearchFilters,
@@ -177,7 +205,6 @@ pub struct App {
     next_search_id: u64,
     latest_search_id: Option<u64>,
     search_in_flight: bool,
-    search_error: Option<String>,
     should_quit: bool,
     preview_visible: bool,
     preview_width_pct: u16,
@@ -185,7 +212,6 @@ pub struct App {
     last_layout: Option<layout::AppLayout>,
     overlay: Overlay,
     help: Option<HelpModalState>,
-    status_message: Option<String>,
     handoff: Option<ExternalCommand>,
     settings: Settings,
     theme: Theme,
@@ -193,13 +219,14 @@ pub struct App {
 }
 
 impl App {
-    const MAIN_HINTS: [keymap_hint::KeymapHint; 10] = [
+    const MAIN_HINTS: [keymap_hint::KeymapHint; 11] = [
         keymap_hint::KeymapHint::new("?", "help"),
         keymap_hint::KeymapHint::new("↑↓", "select"),
         keymap_hint::KeymapHint::new("⏎", "actions"),
         keymap_hint::KeymapHint::new("^F", "filters"),
         keymap_hint::KeymapHint::new("^S", "settings"),
         keymap_hint::KeymapHint::new("^T", "toggle"),
+        keymap_hint::KeymapHint::new("^Y", "summary"),
         keymap_hint::KeymapHint::new("^H/^L", "resize"),
         keymap_hint::KeymapHint::new("^C", "quit"),
         keymap_hint::KeymapHint::new("Esc", "Cancel"),
@@ -209,6 +236,7 @@ impl App {
     fn new(
         manager: IndexManager,
         worker: SearchWorker,
+        summary_worker: SummaryWorker,
         initial_request: SearchRequest,
         settings: Settings,
         homes: AgentHomes,
@@ -229,6 +257,11 @@ impl App {
             preview_scroll: 0,
             manager,
             worker,
+            summary_worker,
+            summary_cache: HashMap::new(),
+            summary_inflight: HashSet::new(),
+            statusline: None,
+            preview_mode: PreviewMode::default(),
             scope: initial_request.scope,
             local_scope,
             filters: initial_request.filters,
@@ -245,7 +278,6 @@ impl App {
             next_search_id: 0,
             latest_search_id: None,
             search_in_flight: false,
-            search_error: None,
             should_quit: false,
             preview_visible: settings.show_preview,
             preview_width_pct: settings
@@ -255,7 +287,6 @@ impl App {
             last_layout: None,
             overlay: Overlay::None,
             help: None,
-            status_message: None,
             handoff: None,
             theme: Theme::from_name(settings.theme),
             settings,
@@ -275,6 +306,9 @@ impl App {
                     needs_redraw = true;
                 }
                 if self.collect_search_responses()? {
+                    needs_redraw = true;
+                }
+                if self.collect_summary_events() {
                     needs_redraw = true;
                 }
 
@@ -350,6 +384,16 @@ impl App {
         if matches!(self.sort, SortMode::Time) {
             text.push_str(" · time sort");
         }
+        let inflight = self.summary_inflight.len();
+        if inflight > 0 {
+            text.push_str(&format!(" · summarizing {inflight}"));
+        }
+        if let Some(entry) = self.statusline.as_ref() {
+            if !entry.expired() {
+                text.push_str(" · ");
+                text.push_str(&entry.label);
+            }
+        }
         text
     }
 
@@ -359,6 +403,10 @@ impl App {
 
     pub fn show_search_cursor(&self) -> bool {
         matches!(self.overlay, Overlay::None)
+    }
+
+    pub fn preview_mode(&self) -> PreviewMode {
+        self.preview_mode
     }
 
     pub fn selected_preview(&mut self) -> Option<&Session> {
@@ -385,25 +433,31 @@ impl App {
         let query = self.committed_query.clone();
         let width = area.width.saturating_sub(2);
         let theme_name = self.current_frame_theme_name();
+        let mode = self.preview_mode;
 
         let cache_miss = self.preview_render_cache.as_ref().is_none_or(|cache| {
             cache.path != path
                 || cache.query != query
                 || cache.width != width
                 || cache.theme_name != theme_name
+                || cache.mode != mode
         });
         if cache_miss {
             profile::event("preview.cache.miss");
             let highlight_query = (!query.is_empty()).then_some(query.as_str());
-            let text = {
-                let session = self.selected_preview()?;
-                preview::render_session_text(session, theme, highlight_query)
+            let text = match mode {
+                PreviewMode::Session => {
+                    let session = self.selected_preview()?;
+                    preview::render_session_text(session, theme, highlight_query)
+                }
+                PreviewMode::Summary => self.build_summary_preview_text(&path, theme),
             };
             self.preview_render_cache = Some(PreviewRenderCache {
                 path: path.clone(),
                 query: query.clone(),
                 width,
                 theme_name,
+                mode,
                 wrapped_height: None,
                 text,
             });
@@ -478,8 +532,7 @@ impl App {
             preview::render(frame, self, preview_area, &theme);
         }
 
-        let status_base = self.status_text();
-        keymap_hint::render(frame, areas.status, &Self::MAIN_HINTS, &theme, &status_base);
+        keymap_hint::render(frame, areas.status, &Self::MAIN_HINTS, &theme, "");
 
         let local_scope_label = self.local_scope_label();
         let viewer_theme_name = self.current_frame_theme_name();
@@ -503,6 +556,7 @@ impl App {
             }
             Overlay::Settings(settings_state) => settings_state.render(frame, frame.area(), &theme),
             Overlay::ConfirmDelete => self.render_delete_confirm(frame, frame.area(), &theme),
+            Overlay::ConfirmExit => self.render_exit_confirm(frame, frame.area(), &theme),
         }
         if let Some(help_state) = &mut self.help {
             help_state.render(frame, frame.area(), &theme);
@@ -511,7 +565,7 @@ impl App {
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.should_quit = true;
+            self.request_quit();
             return Ok(());
         }
 
@@ -539,7 +593,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 if self.query.value().is_empty() {
-                    self.should_quit = true;
+                    self.request_quit();
                 } else {
                     self.clear_query();
                 }
@@ -597,6 +651,9 @@ impl App {
             }
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.toggle_preview()
+            }
+            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_preview_mode()
             }
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.resize_preview(-5)
@@ -657,7 +714,8 @@ impl App {
                 ActionOutcome::Run(action) => {
                     self.overlay = Overlay::None;
                     if let Err(error) = self.run_session_action(action) {
-                        self.status_message = Some(format!("{error:#}"));
+                        self.statusline =
+                            Some(statusline::Entry::failed(format!("{error:#}")));
                     }
                 }
             },
@@ -686,14 +744,31 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Enter => {
                     self.overlay = Overlay::None;
                     if let Err(error) = self.delete_selected_session() {
-                        self.status_message = Some(format!("{error:#}"));
+                        self.statusline =
+                            Some(statusline::Entry::failed(format!("{error:#}")));
                     }
+                }
+                _ => {}
+            },
+            Overlay::ConfirmExit => match key.code {
+                KeyCode::Esc | KeyCode::Char('n') => self.overlay = Overlay::None,
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    self.overlay = Overlay::None;
+                    self.should_quit = true;
                 }
                 _ => {}
             },
             Overlay::None => {}
         }
         Ok(())
+    }
+
+    fn request_quit(&mut self) {
+        if self.summary_inflight.is_empty() {
+            self.should_quit = true;
+        } else {
+            self.overlay = Overlay::ConfirmExit;
+        }
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
@@ -804,7 +879,6 @@ impl App {
 
         self.latest_search_id = Some(request_id);
         self.search_in_flight = true;
-        self.search_error = None;
         self.pending_search = false;
         self.last_edit_at = None;
         Ok(())
@@ -890,14 +964,13 @@ impl App {
                                 self.ensure_selection_visible();
                             }
                             self.preview_scroll = 0;
-                            self.search_error = None;
                         }
                         Err(error) => {
                             debug!(
                                 "search response id={} failed: {}",
                                 response.request_id, error
                             );
-                            self.search_error = Some(error);
+                            self.statusline = Some(statusline::Entry::failed(error));
                         }
                     }
                     changed = true;
@@ -919,6 +992,14 @@ impl App {
             }
         }
         if self.search_in_flight {
+            return SEARCH_POLL_INTERVAL;
+        }
+        if !self.summary_inflight.is_empty()
+            || self
+                .statusline
+                .as_ref()
+                .is_some_and(|entry| !entry.expired())
+        {
             return SEARCH_POLL_INTERVAL;
         }
         Duration::from_secs(5)
@@ -1038,7 +1119,6 @@ impl App {
         self.pending_search = false;
         self.last_edit_at = None;
         self.search_in_flight = false;
-        self.search_error = None;
     }
 
     fn open_settings(&mut self) {
@@ -1061,9 +1141,11 @@ impl App {
         self.preview_render_cache = None;
         self.settings = new_settings;
         if let Err(err) = self.settings.save() {
-            self.status_message = Some(format!("settings error: {err:#}"));
+            self.statusline = Some(statusline::Entry::failed(format!(
+                "settings error: {err:#}"
+            )));
         } else {
-            self.status_message = Some("settings saved".to_owned());
+            self.statusline = Some(statusline::Entry::completed("settings saved"));
         }
         Ok(())
     }
@@ -1110,6 +1192,122 @@ impl App {
         self.save_layout_prefs();
     }
 
+    fn toggle_preview_mode(&mut self) {
+        self.preview_mode = match self.preview_mode {
+            PreviewMode::Session => PreviewMode::Summary,
+            PreviewMode::Summary => PreviewMode::Session,
+        };
+        self.preview_render_cache = None;
+        self.preview_scroll = 0;
+    }
+
+    fn build_summary_preview_text(&mut self, path: &Path, theme: &Theme) -> Text<'static> {
+        self.ensure_summary_cache(path);
+        match self.summary_cache.get(path).and_then(|opt| opt.as_ref()) {
+            Some(entry) => preview::render_summary_text(
+                &entry.sidecar,
+                Some(&entry.fingerprint),
+                theme,
+            ),
+            None => {
+                let msg = if self.summary_inflight.contains(path) {
+                    "Summary is being generated…"
+                } else {
+                    "No summary for this session."
+                };
+                preview::render_summary_missing(theme, msg)
+            }
+        }
+    }
+
+    fn ensure_summary_cache(&mut self, path: &Path) {
+        if self.summary_cache.contains_key(path) {
+            return;
+        }
+        let entry = load_summary_cache_entry(path);
+        self.summary_cache.insert(path.to_path_buf(), entry);
+    }
+
+    fn invalidate_summary_cache(&mut self, path: &Path) {
+        self.summary_cache.remove(path);
+        if self
+            .preview_render_cache
+            .as_ref()
+            .is_some_and(|cache| cache.path == path && cache.mode == PreviewMode::Summary)
+        {
+            self.preview_render_cache = None;
+        }
+    }
+
+    fn dispatch_summarize(&mut self, hit: &SearchHit) -> Result<()> {
+        let path = hit.session.file_path.clone();
+        if self.summary_inflight.contains(&path) {
+            return Ok(());
+        }
+
+        let template = self.settings.summarize_command_template();
+        if template.trim().is_empty() {
+            self.statusline = Some(statusline::Entry::failed(
+                "summarize backend is custom but no command is configured".to_owned(),
+            ));
+            return Ok(());
+        }
+
+        let command = SummaryCommand {
+            jsonl_path: path.clone(),
+            backend: self.settings.summarize_backend,
+            command_template: template,
+            prompt_template: self.settings.summarize_prompt.clone(),
+            claude_command: self.settings.claude_command.clone(),
+            codex_command: self.settings.codex_command.clone(),
+        };
+        self.summary_worker.send(command)?;
+        self.summary_inflight.insert(path);
+        Ok(())
+    }
+
+    fn collect_summary_events(&mut self) -> bool {
+        let mut changed = false;
+        while let Some(event) = self.summary_worker.try_recv() {
+            changed = true;
+            match event {
+                SummaryEvent::Started { path } => {
+                    debug!("summary started: {}", path.display());
+                }
+                SummaryEvent::Completed { path, sidecar_path } => {
+                    self.summary_inflight.remove(&path);
+                    self.invalidate_summary_cache(&path);
+                    self.statusline = Some(statusline::Entry::completed(format!(
+                        "summarized {}",
+                        file_label(&path)
+                    )));
+                    debug!(
+                        "summary completed: {} (sidecar {})",
+                        path.display(),
+                        sidecar_path.display()
+                    );
+                }
+                SummaryEvent::Failed { path, error } => {
+                    self.summary_inflight.remove(&path);
+                    self.statusline = Some(statusline::Entry::failed(format!(
+                        "summary failed for {}: {error}",
+                        file_label(&path)
+                    )));
+                }
+            }
+        }
+        // Clear expired terminal entries so the statusline reclaims its row.
+        if self
+            .statusline
+            .as_ref()
+            .is_some_and(|entry| entry.expired())
+        {
+            self.statusline = None;
+            changed = true;
+        }
+        changed
+    }
+
     fn resize_preview(&mut self, delta: i16) {
         let next = (self.preview_width_pct as i16 + delta)
             .clamp(PREVIEW_WIDTH_MIN as i16, PREVIEW_WIDTH_MAX as i16);
@@ -1121,7 +1319,9 @@ impl App {
         self.settings.show_preview = self.preview_visible;
         self.settings.preview_width_pct = self.preview_width_pct;
         if let Err(err) = self.settings.save() {
-            self.status_message = Some(format!("settings error: {err:#}"));
+            self.statusline = Some(statusline::Entry::failed(format!(
+                "settings error: {err:#}"
+            )));
         }
     }
 
@@ -1167,6 +1367,12 @@ impl App {
     fn run_session_action(&mut self, action: SessionAction) -> Result<()> {
         match action {
             SessionAction::View => self.open_viewer(),
+            SessionAction::Summarize => {
+                let Some(hit) = self.selected_hit() else {
+                    return Ok(());
+                };
+                self.dispatch_summarize(&hit)?;
+            }
             SessionAction::Export => self.export_selected_session()?,
             SessionAction::CopyId => {
                 let Some(hit) = self.selected_hit() else {
@@ -1220,7 +1426,10 @@ impl App {
         };
         let rendered = session_to_plain_text(&session);
         let path = write_session_export(&session, &rendered)?;
-        self.status_message = Some(format!("exported {}", path.display()));
+        self.statusline = Some(statusline::Entry::completed(format!(
+            "exported {}",
+            file_label(&path)
+        )));
         Ok(())
     }
 
@@ -1267,31 +1476,28 @@ impl App {
                     "delete_selected_session sync_completed path={}",
                     hit.session.file_path.display()
                 );
-                self.status_message = Some(if file_already_missing {
-                    format!(
-                        "removed missing session {}",
-                        hit.session.file_path.display()
-                    )
+                self.statusline = Some(statusline::Entry::completed(if file_already_missing {
+                    format!("removed missing session {}", file_label(&hit.session.file_path))
                 } else {
-                    format!("deleted {}", hit.session.file_path.display())
-                });
+                    format!("deleted {}", file_label(&hit.session.file_path))
+                }));
             }
             SyncOutcome::Busy => {
                 debug!(
                     "delete_selected_session sync_busy path={}",
                     hit.session.file_path.display()
                 );
-                self.status_message = Some(if file_already_missing {
+                self.statusline = Some(statusline::Entry::completed(if file_already_missing {
                     format!(
                         "removed missing session {} · index refresh deferred",
-                        hit.session.file_path.display()
+                        file_label(&hit.session.file_path)
                     )
                 } else {
                     format!(
                         "deleted {} · index refresh deferred",
-                        hit.session.file_path.display()
+                        file_label(&hit.session.file_path)
                     )
-                });
+                }));
             }
         }
         Ok(())
@@ -1299,7 +1505,7 @@ impl App {
 
     fn copy_to_clipboard(&mut self, value: &str, label: &str) -> Result<()> {
         crate::clipboard::set_text(value).context("failed to set clipboard contents")?;
-        self.status_message = Some(format!("copied {label}"));
+        self.statusline = Some(statusline::Entry::completed(format!("copied {label}")));
         Ok(())
     }
 
@@ -1354,27 +1560,49 @@ impl App {
         frame.render_widget(paragraph, popup);
     }
 
-    fn status_text(&self) -> String {
-        let mut text = String::new();
-        if self.pending_search {
-            text.push_str("pending");
-        } else if self.search_in_flight {
-            text.push_str("searching");
-        }
-        if let Some(error) = &self.search_error {
-            if !text.is_empty() {
-                text.push_str(" · ");
-            }
-            text.push_str(error);
-        }
-        if let Some(message) = &self.status_message {
-            if !text.is_empty() {
-                text.push_str(" · ");
-            }
-            text.push_str(message);
-        }
-        text
+    fn render_exit_confirm(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let popup = layout::centered_rect(area, 50, 22);
+        frame.render_widget(Clear, popup);
+        let count = self.summary_inflight.len();
+        let noun = if count == 1 { "summary" } else { "summaries" };
+        let paragraph = Paragraph::new(vec![
+            Line::from(Span::styled(
+                format!("{count} {noun} still running"),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "Quitting now will discard the in-flight work.",
+                Style::default().fg(theme.muted),
+            )),
+            Line::default(),
+            Line::from(vec![
+                Span::styled("Press ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    "y",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" to quit anyway or ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    "Esc",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" to keep waiting.", Style::default().fg(theme.muted)),
+            ]),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme.border_style(true))
+                .title(block_title("Confirm Exit")),
+        );
+        frame.render_widget(paragraph, popup);
     }
+
 }
 
 fn search_worker_loop(
@@ -1483,6 +1711,40 @@ fn install_panic_hook() {
 
 fn contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
+}
+
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn load_summary_cache_entry(path: &Path) -> Option<SummaryCacheEntry> {
+    let sidecar_target = sidecar_path(path);
+    if !sidecar_target.exists() {
+        return None;
+    }
+    let sidecar = match SummarySidecar::read(&sidecar_target) {
+        Ok(s) => s,
+        Err(err) => {
+            warn!(
+                "failed to read sidecar {}: {err:#}",
+                sidecar_target.display()
+            );
+            return None;
+        }
+    };
+    let fingerprint = match compute_fingerprint(path) {
+        Ok(fp) => fp,
+        Err(err) => {
+            warn!("failed to fingerprint {}: {err:#}", path.display());
+            return None;
+        }
+    };
+    Some(SummaryCacheEntry {
+        sidecar,
+        fingerprint,
+    })
 }
 
 fn is_help_key(key: KeyEvent) -> bool {
@@ -1703,6 +1965,7 @@ mod tests {
         write_session_export, App, AppExit, SearchResponse, SearchWorker, PAGE_STEP,
     };
     use crate::scan::AgentHomes;
+    use crate::summary::SummaryWorker;
 
     #[test]
     fn builds_resume_commands_for_both_agents() {
@@ -1966,9 +2229,9 @@ mod tests {
         assert!(app.results.is_empty());
         assert_eq!(app.selected_index(), None);
         assert!(app
-            .status_message
-            .as_deref()
-            .is_some_and(|message| message.contains("removed missing session")));
+            .statusline
+            .as_ref()
+            .is_some_and(|entry| entry.label.contains("removed missing session")));
     }
 
     #[test]
@@ -2103,9 +2366,9 @@ mod tests {
 
         assert!(matches!(app.overlay, super::Overlay::None));
         assert!(app
-            .status_message
-            .as_deref()
-            .is_some_and(|message| message.contains("failed to delete")));
+            .statusline
+            .as_ref()
+            .is_some_and(|entry| entry.label.contains("failed to delete")));
     }
 
     #[test]
@@ -2143,10 +2406,13 @@ mod tests {
             response_rx,
         };
 
+        let summary_worker =
+            SummaryWorker::spawn().expect("spawn summary worker in test harness");
         (
             App::new(
                 manager,
                 worker,
+                summary_worker,
                 SearchRequest {
                     query: String::new(),
                     scope: Scope::Global,

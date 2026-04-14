@@ -3,6 +3,12 @@ use ratatui::style::{Color, Modifier, Style};
 use crate::settings::ThemeName;
 use crate::tui::color_ext::ColorExt;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaletteEntry {
+    pub name: &'static str,
+    pub color: Color,
+}
+
 #[derive(Debug, Clone)]
 pub struct Theme {
     pub border: Color,
@@ -10,6 +16,10 @@ pub struct Theme {
     pub text: Color,
     pub muted: Color,
     pub muted_greater: Color,
+    pub unselected_textarea_fg: Color,
+    pub unselected_textarea_bg: Color,
+    pub selected_textarea_fg: Color,
+    pub selected_textarea_bg: Color,
     pub accent: Color,
     pub selection: Color,
     pub highlight: Color,
@@ -50,15 +60,21 @@ impl Theme {
         let list_body_bg = list_header_bg.darken(0.223);
         let selection = list_body_bg.brighten(0.485);
         let muted_greater = Color::Rgb(50, 53, 58);
+        let text = Color::Rgb(230, 232, 236);
+        let muted = muted_greater.brighten(1.600);
         let codex = Color::Rgb(86, 194, 131);
         let tool = Color::Rgb(100, 200, 210);
 
         Self {
             border: muted_greater.brighten(0.449),
             focus_border,
-            text: Color::Rgb(230, 232, 236),
-            muted: muted_greater.brighten(1.600),
+            text,
+            muted,
             muted_greater,
+            unselected_textarea_fg: text,
+            unselected_textarea_bg: muted_greater,
+            selected_textarea_fg: text,
+            selected_textarea_bg: muted,
             accent: focus_border,
             selection,
             highlight: Color::Rgb(255, 215, 90),
@@ -84,6 +100,9 @@ impl Theme {
         let border = Color::Rgb(68, 68, 68);
         let focus_border = Color::Rgb(50, 205, 50);
         let highlight = Color::Rgb(255, 255, 0);
+        let text = border.brighten(2.545);
+        let muted = border.brighten(1.059);
+        let muted_greater = border.darken(0.236);
         let claude = Color::Rgb(242, 153, 74);
         let codex = Color::Rgb(86, 194, 131);
         let tool = Color::Rgb(80, 190, 200);
@@ -91,9 +110,13 @@ impl Theme {
         Self {
             border,
             focus_border,
-            text: border.brighten(2.545),
-            muted: border.brighten(1.059),
-            muted_greater: border.darken(0.236),
+            text,
+            muted,
+            muted_greater,
+            unselected_textarea_fg: text,
+            unselected_textarea_bg: muted_greater,
+            selected_textarea_fg: text,
+            selected_textarea_bg: muted,
             accent: focus_border,
             selection: Color::Rgb(0, 0, 128),
             highlight,
@@ -119,6 +142,8 @@ impl Theme {
         let focus_border = Color::Rgb(255, 122, 89);
         let codex = Color::Rgb(108, 210, 196);
         let muted = Color::Rgb(164, 155, 162);
+        let text = Color::Rgb(248, 239, 234);
+        let muted_greater = muted.darken(0.622);
         let list_header_bg = Color::Rgb(43, 36, 49);
         let selection = list_header_bg.brighten(0.445);
         let bubble_claude = Color::Rgb(87, 49, 31);
@@ -126,9 +151,13 @@ impl Theme {
         Self {
             border: Color::Rgb(88, 80, 96),
             focus_border,
-            text: Color::Rgb(248, 239, 234),
+            text,
             muted,
-            muted_greater: muted.darken(0.622),
+            muted_greater,
+            unselected_textarea_fg: text,
+            unselected_textarea_bg: muted_greater,
+            selected_textarea_fg: text,
+            selected_textarea_bg: muted,
             accent: focus_border,
             selection,
             highlight: Color::Rgb(255, 209, 102),
@@ -171,6 +200,10 @@ impl Theme {
             text,
             muted,
             muted_greater,
+            unselected_textarea_fg: text,
+            unselected_textarea_bg: muted_greater,
+            selected_textarea_fg: text.brighten(0.5),
+            selected_textarea_bg: muted,
             accent: focus_border,
             selection,
             highlight,
@@ -188,6 +221,111 @@ impl Theme {
             tool,
             bubble_tool: Color::Rgb(24, 18, 32),
         }
+    }
+
+    pub fn palette_entries(&self) -> [PaletteEntry; 25] {
+        [
+            PaletteEntry {
+                name: "border",
+                color: self.border,
+            },
+            PaletteEntry {
+                name: "focus_border",
+                color: self.focus_border,
+            },
+            PaletteEntry {
+                name: "text",
+                color: self.text,
+            },
+            PaletteEntry {
+                name: "muted",
+                color: self.muted,
+            },
+            PaletteEntry {
+                name: "muted_greater",
+                color: self.muted_greater,
+            },
+            PaletteEntry {
+                name: "unselected_textarea_fg",
+                color: self.unselected_textarea_fg,
+            },
+            PaletteEntry {
+                name: "unselected_textarea_bg",
+                color: self.unselected_textarea_bg,
+            },
+            PaletteEntry {
+                name: "selected_textarea_fg",
+                color: self.selected_textarea_fg,
+            },
+            PaletteEntry {
+                name: "selected_textarea_bg",
+                color: self.selected_textarea_bg,
+            },
+            PaletteEntry {
+                name: "accent",
+                color: self.accent,
+            },
+            PaletteEntry {
+                name: "selection",
+                color: self.selection,
+            },
+            PaletteEntry {
+                name: "highlight",
+                color: self.highlight,
+            },
+            PaletteEntry {
+                name: "search_match_bg",
+                color: self.search_match_bg,
+            },
+            PaletteEntry {
+                name: "active_match_bg",
+                color: self.active_match_bg,
+            },
+            PaletteEntry {
+                name: "list_header_bg",
+                color: self.list_header_bg,
+            },
+            PaletteEntry {
+                name: "list_body_bg",
+                color: self.list_body_bg,
+            },
+            PaletteEntry {
+                name: "claude",
+                color: self.claude,
+            },
+            PaletteEntry {
+                name: "codex",
+                color: self.codex,
+            },
+            PaletteEntry {
+                name: "bubble_user",
+                color: self.bubble_user,
+            },
+            PaletteEntry {
+                name: "bubble_claude",
+                color: self.bubble_claude,
+            },
+            PaletteEntry {
+                name: "bubble_codex",
+                color: self.bubble_codex,
+            },
+            PaletteEntry {
+                name: "bubble_system",
+                color: self.bubble_system,
+            },
+            PaletteEntry {
+                name: "bubble_summary",
+                color: self.bubble_summary,
+            },
+            PaletteEntry {
+                name: "tool",
+                color: self.tool,
+            },
+            PaletteEntry {
+                name: "bubble_tool",
+                color: self.bubble_tool,
+            },
+        ]
     }
 
     pub fn border_style(&self, focused: bool) -> Style {
@@ -212,6 +350,22 @@ impl Theme {
         self.list_body_bg.brighten(1.0)
     }
 
+    pub fn settings_input_fg(&self, focused: bool) -> Color {
+        if focused {
+            self.selected_textarea_fg
+        } else {
+            self.unselected_textarea_fg
+        }
+    }
+
+    pub fn settings_input_bg(&self, focused: bool) -> Color {
+        if focused {
+            self.selected_textarea_bg
+        } else {
+            self.unselected_textarea_bg
+        }
+    }
+
     pub fn search_match_style(&self) -> Style {
         Style::default()
             .bg(self.search_match_bg)
@@ -224,6 +378,7 @@ mod tests {
     use ratatui::style::Color;
 
     use super::Theme;
+    use crate::tui::color_ext::ColorExt;
 
     #[test]
     fn selected_list_colors_are_fifty_percent_brighter() {
@@ -231,5 +386,21 @@ mod tests {
 
         assert_eq!(theme.selected_list_header_bg(), Color::Rgb(64, 72, 86));
         assert_eq!(theme.selected_list_body_bg(), Color::Rgb(48, 54, 66));
+    }
+
+    #[test]
+    fn palette_entries_cover_all_theme_fields() {
+        let entries = Theme::aics().palette_entries();
+
+        assert_eq!(entries.len(), 25);
+        assert_eq!(entries[0].name, "border");
+        assert_eq!(entries[24].name, "bubble_tool");
+    }
+
+    #[test]
+    fn late_sh_selected_textarea_fg_is_brighter_than_text() {
+        let theme = Theme::late_sh();
+
+        assert_eq!(theme.selected_textarea_fg, theme.text.brighten(0.5));
     }
 }

@@ -7,4 +7,5 @@ pub mod ring_cursor;
 pub mod scan;
 pub mod search_query;
 pub mod settings;
+pub mod summary;
 pub mod tui;

@@ -8,6 +8,7 @@ use chrono::{Local, NaiveDate, TimeZone, Utc};
 use clap::{Parser, ValueEnum};
 use env_logger::Env;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use ratatui::style::Color;
 
 use aics::index::{
     IndexManager, Scope, SearchFilters, SearchRequest, SortMode, SyncOutcome, SyncProgress,
@@ -17,6 +18,7 @@ use aics::parse::Agent;
 use aics::scan::ResolvedPaths;
 use aics::settings::Settings;
 use aics::tui::run_app;
+use aics::tui::theme::{PaletteEntry, Theme};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -26,6 +28,11 @@ use aics::tui::run_app;
     after_help = "Examples:\n  aics deploy\n      Search sessions for the current directory and open the TUI.\n\n  aics -g --agent claude --after 2026-03-01 deploy\n      Search all Claude sessions after 2026-03-01.\n\n  aics --json -g --sort-by relevance \"vector db\"\n      Print matching sessions as JSONL instead of launching the TUI.\n\nDate filters:\n  --after and --before accept YYYY-MM-DD or RFC3339 timestamps.\n\nScope:\n  By default, searches are scoped to the current directory.\n  Use --global to search everything, or --dir PATH[:BRANCH] to target a project."
 )]
 struct Cli {
+    #[arg(
+        long = "print-palettes",
+        help = "Print built-in theme palettes as ANSI color cards and exit"
+    )]
+    print_palettes: bool,
     #[arg(
         short = 'g',
         long = "global",
@@ -153,6 +160,10 @@ impl From<CliSort> for SortMode {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("warn")).init();
     let cli = Cli::parse();
+    if cli.print_palettes {
+        print!("{}", render_palettes());
+        return Ok(());
+    }
     let resolved_paths =
         ResolvedPaths::discover(cli.claude_home.as_deref(), cli.codex_home.as_deref())?;
     let manager = IndexManager::with_paths(aics::index::IndexPaths::discover_for_roots(
@@ -360,16 +371,231 @@ fn parse_date(raw: &str, end_of_day: bool) -> Result<u64> {
     Ok(local.with_timezone(&Utc).timestamp().max(0) as u64)
 }
 
+fn render_palettes() -> String {
+    let theme_specs: Vec<_> = aics::settings::ThemeName::ALL
+        .into_iter()
+        .map(|name| (name.label(), Theme::from_name(name)))
+        .collect();
+    let shared_pairs = palette_pairs(
+        &theme_specs
+            .iter()
+            .map(|(_, theme)| theme.palette_entries().to_vec())
+            .collect::<Vec<_>>(),
+    );
+    let columns: Vec<_> = theme_specs
+        .into_iter()
+        .map(|(label, theme)| render_palette_column(label, theme, &shared_pairs))
+        .collect();
+    let body_rows = columns.iter().map(|column| column.lines.len()).max().unwrap_or(0);
+
+    let mut out = String::new();
+    out.push_str(&join_row(
+        &columns
+            .iter()
+            .map(|column| pad_plain(column.label, column.width))
+            .collect::<Vec<_>>(),
+        " │ ",
+    ));
+    out.push('\n');
+    out.push_str(&join_row(
+        &columns
+            .iter()
+            .map(|column| "─".repeat(column.width))
+            .collect::<Vec<_>>(),
+        "─┼─",
+    ));
+    out.push('\n');
+
+    for row in 0..body_rows {
+        out.push_str(&join_row(
+            &columns
+                .iter()
+                .map(|column| {
+                    column
+                        .lines
+                        .get(row)
+                        .cloned()
+                        .unwrap_or_else(|| pad_plain("", column.width))
+                })
+                .collect::<Vec<_>>(),
+            " │ ",
+        ));
+        out.push('\n');
+    }
+
+    out
+}
+
+#[derive(Debug, Clone)]
+struct PaletteColumn {
+    label: &'static str,
+    width: usize,
+    lines: Vec<String>,
+}
+
+fn render_palette_column(
+    label: &'static str,
+    theme: Theme,
+    shared_pairs: &[(&'static str, &'static str)],
+) -> PaletteColumn {
+    let entries = theme.palette_entries();
+    let width = shared_pairs
+        .iter()
+        .flat_map(|(bg_name, fg_name)| [format!("fg={fg_name}"), format!("bg={bg_name}")])
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(label.chars().count());
+    let mut lines = Vec::with_capacity(shared_pairs.len() * 2);
+
+    for (bg_name, fg_name) in shared_pairs {
+        let bg = find_palette_entry(&entries, bg_name);
+        let fg = find_palette_entry(&entries, fg_name);
+        lines.push(colorize_line(
+            &format!("fg={fg_name}"),
+            fg.color,
+            bg.color,
+            width,
+        ));
+        lines.push(colorize_line(
+            &format!("bg={bg_name}"),
+            fg.color,
+            bg.color,
+            width,
+        ));
+    }
+
+    PaletteColumn { label, width, lines }
+}
+
+fn find_palette_entry(entries: &[PaletteEntry], name: &str) -> PaletteEntry {
+    entries
+        .iter()
+        .find(|entry| entry.name == name)
+        .copied()
+        .unwrap_or_else(|| panic!("missing palette entry `{name}`"))
+}
+
+fn palette_pairs(theme_entries: &[Vec<PaletteEntry>]) -> Vec<(&'static str, &'static str)> {
+    let backgrounds = theme_entries
+        .first()
+        .expect("at least one theme palette is required");
+    let mut foregrounds = backgrounds.to_vec();
+    foregrounds.sort_by(|left, right| {
+        average_brightness(theme_entries, right.name)
+            .partial_cmp(&average_brightness(theme_entries, left.name))
+            .unwrap()
+            .then_with(|| left.name.cmp(right.name))
+    });
+
+    let best_rotation = (0..foregrounds.len())
+        .filter_map(|rotation| {
+            let mut score = 0.0;
+            for (index, background) in backgrounds.iter().enumerate() {
+                let foreground = foregrounds[(index + rotation) % foregrounds.len()];
+                if foreground.name == background.name {
+                    return None;
+                }
+                score += average_contrast(theme_entries, background.name, foreground.name);
+            }
+            Some((rotation, score))
+        })
+        .max_by(|left, right| left.1.partial_cmp(&right.1).unwrap())
+        .map(|(rotation, _)| rotation)
+        .unwrap_or(0);
+
+    backgrounds
+        .iter()
+        .enumerate()
+        .map(|(index, background)| {
+            let foreground = foregrounds[(index + best_rotation) % foregrounds.len()];
+            (background.name, foreground.name)
+        })
+        .collect()
+}
+
+fn colorize_line(text: &str, fg: Color, bg: Color, width: usize) -> String {
+    let (fg_r, fg_g, fg_b) = rgb_components(fg);
+    let (bg_r, bg_g, bg_b) = rgb_components(bg);
+    format!(
+        "\x1b[38;2;{fg_r};{fg_g};{fg_b}m\x1b[48;2;{bg_r};{bg_g};{bg_b}m{}\x1b[0m",
+        pad_plain(text, width)
+    )
+}
+
+fn join_row(cells: &[String], separator: &str) -> String {
+    cells.join(separator)
+}
+
+fn pad_plain(text: &str, width: usize) -> String {
+    format!("{text:<width$}")
+}
+
+fn contrast_score(left: Color, right: Color) -> f32 {
+    (brightness(left) - brightness(right)).abs()
+}
+
+fn average_contrast(theme_entries: &[Vec<PaletteEntry>], background_name: &str, foreground_name: &str) -> f32 {
+    let total: f32 = theme_entries
+        .iter()
+        .map(|entries| {
+            let background = find_palette_entry(entries, background_name);
+            let foreground = find_palette_entry(entries, foreground_name);
+            contrast_score(background.color, foreground.color)
+        })
+        .sum();
+    total / theme_entries.len() as f32
+}
+
+fn average_brightness(theme_entries: &[Vec<PaletteEntry>], name: &str) -> f32 {
+    let total: f32 = theme_entries
+        .iter()
+        .map(|entries| brightness(find_palette_entry(entries, name).color))
+        .sum();
+    total / theme_entries.len() as f32
+}
+
+fn brightness(color: Color) -> f32 {
+    let (r, g, b) = rgb_components(color);
+    (0.2126 * r as f32) + (0.7152 * g as f32) + (0.0722 * b as f32)
+}
+
+fn rgb_components(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Black => (0, 0, 0),
+        Color::Red => (128, 0, 0),
+        Color::Green => (0, 128, 0),
+        Color::Yellow => (128, 128, 0),
+        Color::Blue => (0, 0, 128),
+        Color::Magenta => (128, 0, 128),
+        Color::Cyan => (0, 128, 128),
+        Color::Gray => (192, 192, 192),
+        Color::DarkGray => (128, 128, 128),
+        Color::LightRed => (255, 0, 0),
+        Color::LightGreen => (0, 255, 0),
+        Color::LightYellow => (255, 255, 0),
+        Color::LightBlue => (0, 0, 255),
+        Color::LightMagenta => (255, 0, 255),
+        Color::LightCyan => (0, 255, 255),
+        Color::White => (255, 255, 255),
+        Color::Reset => (0, 0, 0),
+        Color::Indexed(index) => (index, index, index),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};
+    use std::collections::HashSet;
 
     use super::{
-        build_request, parse_after_date, parse_before_date, parse_dir_arg, validate_terminal_mode,
-        Cli, CliProgress,
+        build_request, palette_pairs, parse_after_date, parse_before_date, parse_dir_arg,
+        render_palettes, validate_terminal_mode, Cli, CliProgress,
     };
     use aics::index::{Scope, SortMode};
     use aics::parse::Agent;
+    use aics::tui::theme::Theme;
 
     #[test]
     fn parses_dir_branch_and_builds_request() {
@@ -476,5 +702,50 @@ mod tests {
         assert!(help.contains("--codex-home <PATH>"));
         assert!(help.contains("Examples:"));
         assert!(help.contains("YYYY-MM-DD or RFC3339"));
+    }
+
+    #[test]
+    fn renders_palette_headers() {
+        let rendered = render_palettes();
+
+        assert!(rendered.contains("lazygit"));
+        assert!(rendered.contains("aics"));
+        assert!(rendered.contains("sunset"));
+        assert!(rendered.contains("late.sh"));
+        assert!(rendered.contains("fg="));
+        assert!(rendered.contains("bg="));
+    }
+
+    #[test]
+    fn palette_pairs_use_each_constant_once_for_fg_and_bg() {
+        let themes = aics::settings::ThemeName::ALL
+            .into_iter()
+            .map(|name| Theme::from_name(name).palette_entries().to_vec())
+            .collect::<Vec<_>>();
+        let entries = Theme::aics().palette_entries();
+        let pairs = palette_pairs(&themes);
+        let bg_names: Vec<_> = pairs.iter().map(|(bg, _)| *bg).collect();
+        let fg_names: Vec<_> = pairs.iter().map(|(_, fg)| *fg).collect();
+
+        assert_eq!(pairs.len(), entries.len());
+        assert_eq!(bg_names.iter().copied().collect::<HashSet<_>>().len(), entries.len());
+        assert_eq!(fg_names.iter().copied().collect::<HashSet<_>>().len(), entries.len());
+        assert!(pairs.iter().all(|(bg, fg)| bg != fg));
+    }
+
+    #[test]
+    fn palette_pairs_keep_background_order_stable_across_themes() {
+        let themes = aics::settings::ThemeName::ALL
+            .into_iter()
+            .map(|name| Theme::from_name(name).palette_entries().to_vec())
+            .collect::<Vec<_>>();
+        let pairs = palette_pairs(&themes);
+        let names: Vec<_> = Theme::aics()
+            .palette_entries()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+
+        assert_eq!(pairs.iter().map(|(bg, _)| *bg).collect::<Vec<_>>(), names);
     }
 }

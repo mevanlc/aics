@@ -11,6 +11,7 @@ pub mod preview;
 pub mod profile;
 pub mod search;
 pub mod settings;
+pub mod statusline;
 pub mod theme;
 pub mod util;
 pub mod viewer;
