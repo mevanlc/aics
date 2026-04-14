@@ -6,7 +6,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
-use tui_textarea::TextArea;
+use ratatui_textarea::TextArea;
 
 use crate::ring_cursor::RingCursor;
 use crate::tui::keymap_hint::{self, KeymapHint};
