@@ -2,7 +2,7 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
 use tui_input::backend::crossterm::EventHandler;
@@ -23,9 +23,10 @@ enum SettingsField {
     SessionSeparator,
     SnippetLineCount,
     ClaudeCommand,
+    ClaudeArgs,
     CodexCommand,
-    SummarizeBackend,
-    SummarizeCommandCustom,
+    CodexArgs,
+    SummarizeCommand,
     SummarizePrompt,
 }
 
@@ -35,11 +36,13 @@ pub struct SettingsModalState {
     theme: RingCursor<ThemeName>,
     separator_input: Input,
     snippet_line_count_input: Input,
-    claude_input: Input,
-    codex_input: Input,
-    backend: RingCursor<SummarizeBackend>,
-    custom_command_textarea: TextArea<'static>,
+    claude_command_input: Input,
+    claude_args_input: Input,
+    codex_command_input: Input,
+    codex_args_input: Input,
+    summarize_command_textarea: TextArea<'static>,
     prompt_textarea: TextArea<'static>,
+    picker: Option<TemplatePicker>,
     base: Settings,
 }
 
@@ -58,11 +61,13 @@ impl SettingsModalState {
             separator_input: Input::default().with_value(settings.session_separator.clone()),
             snippet_line_count_input: Input::default()
                 .with_value(settings.snippet_line_count.to_string()),
-            claude_input: Input::default().with_value(settings.claude_command.clone()),
-            codex_input: Input::default().with_value(settings.codex_command.clone()),
-            backend: backend_cursor(settings.summarize_backend),
-            custom_command_textarea: build_textarea(&settings.summarize_command_custom),
+            claude_command_input: Input::default().with_value(settings.claude_command.clone()),
+            claude_args_input: Input::default().with_value(settings.claude_args.clone()),
+            codex_command_input: Input::default().with_value(settings.codex_command.clone()),
+            codex_args_input: Input::default().with_value(settings.codex_args.clone()),
+            summarize_command_textarea: build_textarea(&settings.summarize_command),
             prompt_textarea: build_textarea(&settings.summarize_prompt),
+            picker: None,
             base: settings.clone(),
         }
     }
@@ -72,6 +77,20 @@ impl SettingsModalState {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsOutcome {
+        if let Some(picker) = self.picker.as_mut() {
+            match picker.handle_key(key) {
+                TemplatePickerOutcome::Stay => {}
+                TemplatePickerOutcome::Cancel => {
+                    self.picker = None;
+                }
+                TemplatePickerOutcome::Insert(text) => {
+                    self.summarize_command_textarea = build_textarea(&text);
+                    self.picker = None;
+                }
+            }
+            return SettingsOutcome::Stay;
+        }
+
         match key.code {
             KeyCode::Esc => return SettingsOutcome::Close,
             KeyCode::Enter if key.modifiers.is_empty() => {
@@ -79,6 +98,13 @@ impl SettingsModalState {
             }
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return SettingsOutcome::Apply(self.build_settings());
+            }
+            KeyCode::Char('t') | KeyCode::Char('T')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.field.set(&SettingsField::SummarizeCommand);
+                self.picker = Some(TemplatePicker::new(detect_shell()));
+                return SettingsOutcome::Stay;
             }
             KeyCode::Tab | KeyCode::Down => {
                 self.field.move_next();
@@ -108,22 +134,19 @@ impl SettingsModalState {
                 self.snippet_line_count_input.handle_event(&Event::Key(key));
             }
             SettingsField::ClaudeCommand => {
-                self.claude_input.handle_event(&Event::Key(key));
+                self.claude_command_input.handle_event(&Event::Key(key));
+            }
+            SettingsField::ClaudeArgs => {
+                self.claude_args_input.handle_event(&Event::Key(key));
             }
             SettingsField::CodexCommand => {
-                self.codex_input.handle_event(&Event::Key(key));
+                self.codex_command_input.handle_event(&Event::Key(key));
             }
-            SettingsField::SummarizeBackend => match key.code {
-                KeyCode::Left | KeyCode::Char('h') => {
-                    self.backend.move_prev();
-                }
-                KeyCode::Right | KeyCode::Char('l') => {
-                    self.backend.move_next();
-                }
-                _ => {}
-            },
-            SettingsField::SummarizeCommandCustom => {
-                self.custom_command_textarea.input(key);
+            SettingsField::CodexArgs => {
+                self.codex_args_input.handle_event(&Event::Key(key));
+            }
+            SettingsField::SummarizeCommand => {
+                self.summarize_command_textarea.input(key);
             }
             SettingsField::SummarizePrompt => {
                 self.prompt_textarea.input(key);
@@ -147,29 +170,24 @@ impl SettingsModalState {
         let rows = Layout::vertical([
             Constraint::Length(1), // 0  padding
             Constraint::Length(1), // 1  Theme inline (label + radio)
-            Constraint::Length(1), // 2  spacing
-            Constraint::Length(1), // 3  Session Separator label
-            Constraint::Length(1), // 4  Session Separator input
-            Constraint::Length(1), // 5  spacing
-            Constraint::Length(1), // 6  Snippet Lines label
-            Constraint::Length(1), // 7  Snippet Lines input
-            Constraint::Length(1), // 8  spacing
-            Constraint::Length(1), // 9  divider
-            Constraint::Length(1), // 10 spacing
-            Constraint::Length(1), // 11 Claude Command label
-            Constraint::Length(1), // 12 Claude Command input
-            Constraint::Length(1), // 13 spacing
-            Constraint::Length(1), // 14 Codex Command label
-            Constraint::Length(1), // 15 Codex Command input
-            Constraint::Length(1), // 16 spacing
-            Constraint::Length(1), // 17 Session summarizer inline (label + radio)
-            Constraint::Length(1), // 18 spacing
-            Constraint::Length(4), // 19 custom command textarea
-            Constraint::Length(1), // 20 spacing
-            Constraint::Length(1), // 21 Session summarizer prompt label
-            Constraint::Min(3),    // 22 prompt textarea (absorbs remaining)
-            Constraint::Length(1), // 23 divider
-            Constraint::Length(1), // 24 hints
+            Constraint::Length(1), // 2  Session Separator inline
+            Constraint::Length(1), // 3  Snippet Lines inline
+            Constraint::Length(1), // 4  spacing
+            Constraint::Length(1), // 5  divider
+            Constraint::Length(1), // 6  spacing
+            Constraint::Length(1), // 7  Claude Code Command inline
+            Constraint::Length(1), // 8  Claude Code Args inline
+            Constraint::Length(1), // 9  spacing
+            Constraint::Length(1), // 10 Codex CLI Command inline
+            Constraint::Length(1), // 11 Codex CLI Args inline
+            Constraint::Length(1), // 12 spacing
+            Constraint::Length(1), // 13 Session summarizer command label
+            Constraint::Length(3), // 14 summarize command textarea
+            Constraint::Length(1), // 15 spacing
+            Constraint::Length(1), // 16 Session summarizer prompt label
+            Constraint::Min(3),    // 17 prompt textarea (absorbs remaining)
+            Constraint::Length(1), // 18 divider
+            Constraint::Length(1), // 19 hints
         ])
         .split(inner);
 
@@ -178,18 +196,24 @@ impl SettingsModalState {
         let theme_line = self.render_inline_theme_row(rows[1].width, theme, theme_focused);
         frame.render_widget(Paragraph::new(theme_line), rows[1]);
 
-        // Session Separator
+        // Session Separator (inline)
         let sep_focused = self.field == SettingsField::SessionSeparator;
-        render_field_label(frame, rows[3], theme, "Session Separator", sep_focused);
-        self.render_text_input(frame, rows[4], theme, &self.separator_input, sep_focused);
-
-        // Snippet Lines
-        let snip_focused = self.field == SettingsField::SnippetLineCount;
-        render_field_label(frame, rows[6], theme, "Snippet Lines", snip_focused);
-        self.render_text_input(
+        self.render_inline_text_field(
             frame,
-            rows[7],
+            rows[2],
             theme,
+            "Session Separator",
+            &self.separator_input,
+            sep_focused,
+        );
+
+        // Snippet Lines (inline)
+        let snip_focused = self.field == SettingsField::SnippetLineCount;
+        self.render_inline_text_field(
+            frame,
+            rows[3],
+            theme,
+            "Snippet Lines",
             &self.snippet_line_count_input,
             snip_focused,
         );
@@ -198,52 +222,80 @@ impl SettingsModalState {
         frame.render_widget(
             Paragraph::new("─".repeat(inner.width as usize))
                 .style(Style::default().fg(theme.focus_border)),
-            rows[9],
+            rows[5],
         );
 
-        // Claude Code Command
-        let claude_focused = self.field == SettingsField::ClaudeCommand;
-        render_field_label(
+        // Claude Code Command + Args
+        let claude_cmd_focused = self.field == SettingsField::ClaudeCommand;
+        self.render_inline_text_field(
+            frame,
+            rows[7],
+            theme,
+            "Claude Code Command",
+            &self.claude_command_input,
+            claude_cmd_focused,
+        );
+        let claude_args_focused = self.field == SettingsField::ClaudeArgs;
+        self.render_inline_text_field(
+            frame,
+            rows[8],
+            theme,
+            "Claude Code Args",
+            &self.claude_args_input,
+            claude_args_focused,
+        );
+
+        // Codex CLI Command + Args
+        let codex_cmd_focused = self.field == SettingsField::CodexCommand;
+        self.render_inline_text_field(
+            frame,
+            rows[10],
+            theme,
+            "Codex CLI Command",
+            &self.codex_command_input,
+            codex_cmd_focused,
+        );
+        let codex_args_focused = self.field == SettingsField::CodexArgs;
+        self.render_inline_text_field(
             frame,
             rows[11],
             theme,
-            "Claude Code Command",
-            claude_focused,
+            "Codex CLI Args",
+            &self.codex_args_input,
+            codex_args_focused,
         );
-        self.render_text_input(frame, rows[12], theme, &self.claude_input, claude_focused);
 
-        // Codex Command
-        let codex_focused = self.field == SettingsField::CodexCommand;
-        render_field_label(frame, rows[14], theme, "Codex Command", codex_focused);
-        self.render_text_input(frame, rows[15], theme, &self.codex_input, codex_focused);
-
-        // Session summarizer backend (inline label + radio)
-        let backend_focused = self.field == SettingsField::SummarizeBackend;
-        let backend_line = self.render_inline_backend_row(rows[17].width, theme, backend_focused);
-        frame.render_widget(Paragraph::new(backend_line), rows[17]);
-
-        // Custom command textarea
-        let custom_focused = self.field == SettingsField::SummarizeCommandCustom;
-        style_textarea(&mut self.custom_command_textarea, theme, custom_focused);
-        frame.render_widget(&self.custom_command_textarea, pad_rect(rows[19]));
+        // Session summarizer command label + textarea
+        let cmd_focused = self.field == SettingsField::SummarizeCommand;
+        let cmd_label = responsive_label(
+            rows[13].width,
+            &[
+                "Session summarizer command (^T to choose a command template)",
+                "Session summarizer command (^T choose template)",
+                "Session summarizer command",
+            ],
+        );
+        render_field_label(frame, rows[13], theme, cmd_label, cmd_focused);
+        style_textarea(&mut self.summarize_command_textarea, theme, cmd_focused);
+        frame.render_widget(&self.summarize_command_textarea, pad_rect(rows[14]));
 
         // Prompt label + textarea
         let prompt_focused = self.field == SettingsField::SummarizePrompt;
         render_field_label(
             frame,
-            rows[21],
+            rows[16],
             theme,
             "Session summarizer prompt",
             prompt_focused,
         );
         style_textarea(&mut self.prompt_textarea, theme, prompt_focused);
-        frame.render_widget(&self.prompt_textarea, pad_rect(rows[22]));
+        frame.render_widget(&self.prompt_textarea, pad_rect(rows[17]));
 
         // Bottom divider + hints
         frame.render_widget(
             Paragraph::new("─".repeat(inner.width as usize))
                 .style(Style::default().fg(theme.focus_border)),
-            rows[23],
+            rows[18],
         );
         const HINTS: [keymap_hint::KeymapHint; 4] = [
             keymap_hint::KeymapHint::new("Tab/↑↓", "navigate"),
@@ -251,7 +303,11 @@ impl SettingsModalState {
             keymap_hint::KeymapHint::new("⏎/^S", "save"),
             keymap_hint::KeymapHint::new("Esc", "cancel"),
         ];
-        keymap_hint::render(frame, rows[24], &HINTS, theme, "");
+        keymap_hint::render(frame, rows[19], &HINTS, theme, "");
+
+        if let Some(picker) = self.picker.as_ref() {
+            picker.render(frame, popup, theme);
+        }
     }
 
     fn render_inline_theme_row(&self, width: u16, theme: &Theme, focused: bool) -> Line<'static> {
@@ -262,21 +318,6 @@ impl SettingsModalState {
                 .map(|name| name.label().to_owned())
                 .collect::<Vec<_>>(),
             self.theme.index(),
-            width,
-            theme,
-            focused,
-        )
-    }
-
-    fn render_inline_backend_row(&self, width: u16, theme: &Theme, focused: bool) -> Line<'static> {
-        let labels: Vec<String> = BACKEND_ORDER
-            .iter()
-            .map(|b| backend_label(*b).to_owned())
-            .collect();
-        inline_radio_row(
-            "Session summarizer",
-            &labels,
-            self.backend.index(),
             width,
             theme,
             focused,
@@ -386,18 +427,53 @@ impl SettingsModalState {
         Line::from(spans)
     }
 
-    fn render_text_input(
+    /// Render a single row with a fixed-width label column on the left and
+    /// a text input filling the rest. Matches the mockup where the two
+    /// columns stay aligned across all single-line fields.
+    fn render_inline_text_field(
         &self,
         frame: &mut Frame,
         area: Rect,
         theme: &Theme,
+        label: &str,
         input: &Input,
         focused: bool,
     ) {
-        let padded = Rect {
-            x: area.x + 2,
-            width: area.width.saturating_sub(4),
-            ..area
+        const LABEL_COL_WIDTH: u16 = 21; // accommodates "Claude Code Command" + trailing space
+        const LEFT_PAD: u16 = 2;
+        const RIGHT_PAD: u16 = 2;
+
+        let label_style = if focused {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD)
+        };
+
+        let label_area = Rect {
+            x: area.x + LEFT_PAD,
+            y: area.y,
+            width: LABEL_COL_WIDTH.min(area.width.saturating_sub(LEFT_PAD)),
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(label.to_owned()).style(label_style),
+            label_area,
+        );
+
+        let input_x = area.x + LEFT_PAD + LABEL_COL_WIDTH;
+        let input_right_edge = area.x + area.width;
+        if input_x + RIGHT_PAD >= input_right_edge {
+            return;
+        }
+        let input_area = Rect {
+            x: input_x,
+            y: area.y,
+            width: input_right_edge - input_x - RIGHT_PAD,
+            height: 1,
         };
 
         let style = if focused {
@@ -409,16 +485,14 @@ impl SettingsModalState {
                 .fg(theme.settings_input_fg(false))
                 .bg(theme.settings_input_bg(false))
         };
-
-        let display_value = input.value();
         let prefix = if focused { "▎" } else { " " };
-        let text = format!("{prefix}{display_value}");
-        frame.render_widget(Paragraph::new(text).style(style), padded);
+        let text = format!("{prefix}{}", input.value());
+        frame.render_widget(Paragraph::new(text).style(style), input_area);
 
         if focused {
-            let cursor_x = padded.x + 1 + input.visual_cursor() as u16;
-            if cursor_x < padded.right() {
-                frame.set_cursor_position((cursor_x, padded.y));
+            let cursor_x = input_area.x + 1 + input.visual_cursor() as u16;
+            if cursor_x < input_area.right() {
+                frame.set_cursor_position((cursor_x, input_area.y));
             }
         }
     }
@@ -431,12 +505,13 @@ impl SettingsModalState {
             .unwrap_or(self.base.snippet_line_count);
         Settings {
             theme: *self.theme.current(),
-            claude_command: self.claude_input.value().to_owned(),
-            codex_command: self.codex_input.value().to_owned(),
+            claude_command: self.claude_command_input.value().to_owned(),
+            claude_args: self.claude_args_input.value().to_owned(),
+            codex_command: self.codex_command_input.value().to_owned(),
+            codex_args: self.codex_args_input.value().to_owned(),
             session_separator: self.separator_input.value().to_owned(),
             snippet_line_count,
-            summarize_backend: *self.backend.current(),
-            summarize_command_custom: self.custom_command_textarea.lines().join("\n"),
+            summarize_command: self.summarize_command_textarea.lines().join("\n"),
             summarize_prompt: self.prompt_textarea.lines().join("\n"),
             ..self.base.clone()
         }
@@ -449,9 +524,10 @@ fn settings_field_cursor(selected: SettingsField) -> RingCursor<SettingsField> {
         SettingsField::SessionSeparator,
         SettingsField::SnippetLineCount,
         SettingsField::ClaudeCommand,
+        SettingsField::ClaudeArgs,
         SettingsField::CodexCommand,
-        SettingsField::SummarizeBackend,
-        SettingsField::SummarizeCommandCustom,
+        SettingsField::CodexArgs,
+        SettingsField::SummarizeCommand,
         SettingsField::SummarizePrompt,
     ]);
     assert!(cursor.set(&selected));
@@ -462,26 +538,6 @@ fn theme_name_cursor(selected: ThemeName) -> RingCursor<ThemeName> {
     let mut cursor = RingCursor::new(ThemeName::ALL.to_vec());
     assert!(cursor.set(&selected));
     cursor
-}
-
-const BACKEND_ORDER: [SummarizeBackend; 3] = [
-    SummarizeBackend::Claude,
-    SummarizeBackend::Codex,
-    SummarizeBackend::Custom,
-];
-
-fn backend_cursor(selected: SummarizeBackend) -> RingCursor<SummarizeBackend> {
-    let mut cursor = RingCursor::new(BACKEND_ORDER.to_vec());
-    assert!(cursor.set(&selected));
-    cursor
-}
-
-fn backend_label(backend: SummarizeBackend) -> &'static str {
-    match backend {
-        SummarizeBackend::Claude => "Claude",
-        SummarizeBackend::Codex => "Codex",
-        SummarizeBackend::Custom => "Custom",
-    }
 }
 
 fn build_textarea(content: &str) -> TextArea<'static> {
@@ -500,6 +556,18 @@ fn pad_rect(area: Rect) -> Rect {
         width: area.width.saturating_sub(4),
         ..area
     }
+}
+
+/// Pick the first variant that fits in `width` (accounting for the 2-col
+/// indent added by `render_field_label`). Falls back to the last variant.
+fn responsive_label<'a>(width: u16, variants: &[&'a str]) -> &'a str {
+    let budget = (width as usize).saturating_sub(2);
+    for v in variants {
+        if UnicodeWidthStr::width(*v) <= budget {
+            return v;
+        }
+    }
+    variants.last().copied().unwrap_or("")
 }
 
 fn render_field_label(frame: &mut Frame, area: Rect, theme: &Theme, text: &str, focused: bool) {
@@ -661,6 +729,251 @@ fn radio_spans(
     ));
 
     spans
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemplateShell {
+    Bash,
+    Zsh,
+}
+
+impl TemplateShell {
+    const ALL: [TemplateShell; 2] = [TemplateShell::Bash, TemplateShell::Zsh];
+
+    fn label(self) -> &'static str {
+        match self {
+            TemplateShell::Bash => "bash",
+            TemplateShell::Zsh => "zsh",
+        }
+    }
+
+    fn prelude(self) -> &'static str {
+        match self {
+            TemplateShell::Bash => concat!(
+                "[ -f \"$HOME/.bash_profile\" ] && . \"$HOME/.bash_profile\"\n",
+                "[ -f \"$HOME/.bashrc\" ] && . \"$HOME/.bashrc\"\n",
+            ),
+            TemplateShell::Zsh => concat!(
+                "[ -f \"$HOME/.zprofile\" ] && . \"$HOME/.zprofile\"\n",
+                "[ -f \"$HOME/.zshrc\" ] && . \"$HOME/.zshrc\"\n",
+            ),
+        }
+    }
+}
+
+fn detect_shell() -> TemplateShell {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let basename = std::path::Path::new(&shell)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    match basename {
+        "bash" => TemplateShell::Bash,
+        "zsh" => TemplateShell::Zsh,
+        _ => TemplateShell::Zsh,
+    }
+}
+
+const PICKER_BACKENDS: [SummarizeBackend; 2] =
+    [SummarizeBackend::Claude, SummarizeBackend::Codex];
+
+fn backend_label(backend: SummarizeBackend) -> &'static str {
+    match backend {
+        SummarizeBackend::Claude => "Claude",
+        SummarizeBackend::Codex => "Codex",
+        SummarizeBackend::Custom => "Custom",
+    }
+}
+
+fn builtin_body(backend: SummarizeBackend) -> &'static str {
+    match backend {
+        SummarizeBackend::Claude => concat!(
+            "cd '{{jsonl_dir}}'\n",
+            "cat '{{prompt_file}}' | '{{claude_command}}' {{claude_args}} ",
+            "-p > '{{output_file}}'\n",
+        ),
+        SummarizeBackend::Codex => concat!(
+            "cd '{{jsonl_dir}}'\n",
+            "cat '{{prompt_file}}' | '{{codex_command}}' {{codex_args}} ",
+            "exec --full-auto --skip-git-repo-check > '{{output_file}}'\n",
+        ),
+        SummarizeBackend::Custom => "",
+    }
+}
+
+fn render_preset_template(shell: TemplateShell, backend: SummarizeBackend) -> String {
+    format!("{}{}", shell.prelude(), builtin_body(backend))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemplatePickerField {
+    Shell,
+    Backend,
+}
+
+#[derive(Debug, Clone)]
+struct TemplatePicker {
+    field: RingCursor<TemplatePickerField>,
+    shell: RingCursor<TemplateShell>,
+    backend: RingCursor<SummarizeBackend>,
+}
+
+enum TemplatePickerOutcome {
+    Stay,
+    Cancel,
+    Insert(String),
+}
+
+impl TemplatePicker {
+    fn new(default_shell: TemplateShell) -> Self {
+        let mut shell = RingCursor::new(TemplateShell::ALL.to_vec());
+        shell.set(&default_shell);
+        let backend = RingCursor::new(PICKER_BACKENDS.to_vec());
+        let field = RingCursor::new(vec![
+            TemplatePickerField::Shell,
+            TemplatePickerField::Backend,
+        ]);
+        Self {
+            field,
+            shell,
+            backend,
+        }
+    }
+
+    fn resolved(&self) -> String {
+        render_preset_template(*self.shell.current(), *self.backend.current())
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> TemplatePickerOutcome {
+        match key.code {
+            KeyCode::Esc => return TemplatePickerOutcome::Cancel,
+            KeyCode::Enter => return TemplatePickerOutcome::Insert(self.resolved()),
+            KeyCode::Tab | KeyCode::Down => {
+                self.field.move_next();
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                self.field.move_prev();
+            }
+            KeyCode::Left | KeyCode::Char('h') => match *self.field.current() {
+                TemplatePickerField::Shell => {
+                    self.shell.move_prev();
+                }
+                TemplatePickerField::Backend => {
+                    self.backend.move_prev();
+                }
+            },
+            KeyCode::Right | KeyCode::Char('l') => match *self.field.current() {
+                TemplatePickerField::Shell => {
+                    self.shell.move_next();
+                }
+                TemplatePickerField::Backend => {
+                    self.backend.move_next();
+                }
+            },
+            _ => {}
+        }
+        TemplatePickerOutcome::Stay
+    }
+
+    /// Render the picker as a popup inset by 1 cell on each edge of
+    /// `host` (the settings dialog rect). This produces the "just inside"
+    /// nested-dialog look instead of a second centered popup that can
+    /// drift well outside the settings frame on tall/narrow terminals.
+    fn render(&self, frame: &mut Frame, host: Rect, theme: &Theme) {
+        let popup = Rect {
+            x: host.x.saturating_add(1),
+            y: host.y.saturating_add(1),
+            width: host.width.saturating_sub(2),
+            height: host.height.saturating_sub(2),
+        };
+        frame.render_widget(Clear, popup);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(theme.border_style(true))
+            .title(block_title("Insert preset template"));
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+
+        let rows = Layout::vertical([
+            Constraint::Length(1), // 0 padding
+            Constraint::Length(1), // 1 shell radio
+            Constraint::Length(1), // 2 spacing
+            Constraint::Length(1), // 3 backend radio
+            Constraint::Length(1), // 4 spacing
+            Constraint::Length(1), // 5 preview label
+            Constraint::Min(3),    // 6 preview
+            Constraint::Length(1), // 7 spacing
+            Constraint::Length(4), // 8 docs
+            Constraint::Length(1), // 9 divider
+            Constraint::Length(1), // 10 hints
+        ])
+        .split(inner);
+
+        let shell_focused = self.field == TemplatePickerField::Shell;
+        let shell_line = inline_radio_row(
+            "Shell",
+            &TemplateShell::ALL
+                .iter()
+                .map(|s| s.label().to_owned())
+                .collect::<Vec<_>>(),
+            self.shell.index(),
+            rows[1].width,
+            theme,
+            shell_focused,
+        );
+        frame.render_widget(Paragraph::new(shell_line), rows[1]);
+
+        let backend_focused = self.field == TemplatePickerField::Backend;
+        let backend_line = inline_radio_row(
+            "Backend",
+            &PICKER_BACKENDS
+                .iter()
+                .map(|b| backend_label(*b).to_owned())
+                .collect::<Vec<_>>(),
+            self.backend.index(),
+            rows[3].width,
+            theme,
+            backend_focused,
+        );
+        frame.render_widget(Paragraph::new(backend_line), rows[3]);
+
+        render_field_label(frame, rows[5], theme, "Preview", false);
+        let preview = self.resolved();
+        let bg = theme.settings_input_bg(false);
+        let preview_style = Style::default().fg(theme.text).bg(bg);
+        frame.render_widget(
+            Paragraph::new(preview)
+                .style(preview_style)
+                .block(Block::default().style(Style::default().bg(bg)))
+                .wrap(Wrap { trim: false }),
+            pad_rect(rows[6]),
+        );
+
+        let docs = concat!(
+            "Placeholders: {{jsonl_dir}}, {{prompt_file}}, {{output_file}},\n",
+            "  {{claude_command}}, {{claude_args}}, {{codex_command}}, {{codex_args}}.\n",
+            "Edit after inserting; we run it verbatim through your shell."
+        );
+        frame.render_widget(
+            Paragraph::new(docs)
+                .style(Style::default().fg(theme.muted))
+                .wrap(Wrap { trim: false }),
+            pad_rect(rows[8]),
+        );
+
+        frame.render_widget(
+            Paragraph::new("─".repeat(inner.width as usize))
+                .style(Style::default().fg(theme.focus_border)),
+            rows[9],
+        );
+        const HINTS: [keymap_hint::KeymapHint; 3] = [
+            keymap_hint::KeymapHint::new("Tab/↑↓", "navigate"),
+            keymap_hint::KeymapHint::new("⏎", "insert"),
+            keymap_hint::KeymapHint::new("Esc", "cancel"),
+        ];
+        keymap_hint::render(frame, rows[10], &HINTS, theme, "");
+    }
 }
 
 #[cfg(test)]

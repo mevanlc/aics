@@ -6,8 +6,10 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,7 +19,7 @@ use log::{debug, warn};
 
 use crate::summary::sidecar::{sidecar_path, SummarySidecar};
 use crate::summary::staleness::fingerprint;
-use crate::summary::template::expand;
+use crate::summary::template::{expand, expand_shell};
 use crate::summary::SummarizeBackend;
 
 /// A request to summarize a specific session file.
@@ -30,10 +32,14 @@ pub struct SummaryCommand {
     pub command_template: String,
     /// Prompt template. Can reference `{{jsonl_path}}`.
     pub prompt_template: String,
-    /// Value to substitute for `{{claude_command}}`.
+    /// Value to substitute for `{{claude_command}}` (program name only).
     pub claude_command: String,
-    /// Value to substitute for `{{codex_command}}`.
+    /// Value to substitute for `{{claude_args}}` (raw, unescaped).
+    pub claude_args: String,
+    /// Value to substitute for `{{codex_command}}` (program name only).
     pub codex_command: String,
+    /// Value to substitute for `{{codex_args}}` (raw, unescaped).
+    pub codex_args: String,
 }
 
 /// Lifecycle events emitted by the worker.
@@ -145,15 +151,21 @@ fn run_one(command: &SummaryCommand) -> Result<PathBuf> {
     fs::write(&prompt_file, &prompt_text)
         .with_context(|| format!("failed to write prompt to {}", prompt_file.display()))?;
 
-    // Expand the shell command template.
-    let mut cmd_vars: HashMap<&str, &str> = HashMap::new();
-    cmd_vars.insert("jsonl_path", &jsonl_path_str);
-    cmd_vars.insert("jsonl_dir", &jsonl_dir_str);
-    cmd_vars.insert("prompt_file", &prompt_file_str);
-    cmd_vars.insert("output_file", &output_file_str);
-    cmd_vars.insert("claude_command", &command.claude_command);
-    cmd_vars.insert("codex_command", &command.codex_command);
-    let expanded_cmd = expand(&command.command_template, &cmd_vars)
+    // Expand the shell command template. Path-like vars get sq-escaped so
+    // they're safe to paste inside `'…'` in the template; the `_args` vars
+    // are inserted verbatim because they may contain shell-meaningful
+    // whitespace (users often configure commands as "claude --flag …").
+    let mut escape_vars: HashMap<&str, &str> = HashMap::new();
+    escape_vars.insert("jsonl_path", &jsonl_path_str);
+    escape_vars.insert("jsonl_dir", &jsonl_dir_str);
+    escape_vars.insert("prompt_file", &prompt_file_str);
+    escape_vars.insert("output_file", &output_file_str);
+    escape_vars.insert("claude_command", &command.claude_command);
+    escape_vars.insert("codex_command", &command.codex_command);
+    let mut raw_vars: HashMap<&str, &str> = HashMap::new();
+    raw_vars.insert("claude_args", &command.claude_args);
+    raw_vars.insert("codex_args", &command.codex_args);
+    let expanded_cmd = expand_shell(&command.command_template, &escape_vars, &raw_vars)
         .context("failed to expand summary command template")?;
     debug!("summary exec: {expanded_cmd}");
 
@@ -188,12 +200,14 @@ fn run_one(command: &SummaryCommand) -> Result<PathBuf> {
 }
 
 fn create_work_dir() -> Result<PathBuf> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let pid = std::process::id();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("aics-summary-{pid}-{nanos}"));
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("aics-summary-{pid}-{nanos}-{seq}"));
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create work dir {}", dir.display()))?;
     Ok(dir)
@@ -201,17 +215,17 @@ fn create_work_dir() -> Result<PathBuf> {
 
 #[cfg(unix)]
 fn shell_exec(cmd: &str) -> Result<std::process::Output> {
-    Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .output()
-        .context("failed to spawn shell for summarizer command")
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+    run_piped(&shell, &["-s"], cmd)
+        .with_context(|| format!("failed to run summarizer via shell {shell}"))
 }
 
 #[cfg(not(unix))]
 fn shell_exec(cmd: &str) -> Result<std::process::Output> {
-    // Windows: try `sh` (git-bash) first, fall back to cmd.
-    match Command::new("sh").arg("-c").arg(cmd).output() {
+    // Windows: try git-bash `sh -s` first, fall back to `cmd /C` with the
+    // script passed as an argument (cmd.exe doesn't accept piped scripts the
+    // same way).
+    match run_piped("sh", &["-s"], cmd) {
         Ok(out) => Ok(out),
         Err(_) => Command::new("cmd")
             .arg("/C")
@@ -219,6 +233,31 @@ fn shell_exec(cmd: &str) -> Result<std::process::Output> {
             .output()
             .context("failed to spawn shell for summarizer command"),
     }
+}
+
+fn run_piped(program: &str, args: &[&str], script: &str) -> Result<std::process::Output> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to spawn {program}"))?;
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("failed to capture stdin for {program}"))?;
+        stdin
+            .write_all(script.as_bytes())
+            .context("failed to write script to shell stdin")?;
+        if !script.ends_with('\n') {
+            stdin.write_all(b"\n").ok();
+        }
+    }
+    child
+        .wait_with_output()
+        .context("failed to wait for shell process")
 }
 
 #[cfg(test)]
@@ -249,7 +288,9 @@ mod tests {
                 command_template: template.to_owned(),
                 prompt_template: prompt.to_owned(),
                 claude_command: "claude".to_owned(),
+                claude_args: String::new(),
                 codex_command: "codex".to_owned(),
+                codex_args: String::new(),
             })
             .unwrap();
 
@@ -297,7 +338,9 @@ mod tests {
                 command_template: template.to_owned(),
                 prompt_template: prompt.to_owned(),
                 claude_command: "claude".to_owned(),
+                claude_args: String::new(),
                 codex_command: "codex".to_owned(),
+                codex_args: String::new(),
             })
             .unwrap();
 

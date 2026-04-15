@@ -125,7 +125,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 19] = [
     ),
 ];
 
-const VIEWER_ITEMS: [HelpItem; 13] = [
+const VIEWER_ITEMS: [HelpItem; 15] = [
     HelpItem::new(
         "?",
         "open this help",
@@ -165,6 +165,16 @@ const VIEWER_ITEMS: [HelpItem; 13] = [
         "Shift ↓",
         "jump to next message/event",
         "Jump to the next message or event boundary in the viewer, with wraparound at the ends.",
+    ),
+    HelpItem::new(
+        "^Shift ↑",
+        "jump to previous user message",
+        "Jump backward to the previous user-authored message, skipping assistant messages, tool calls, and tool results.",
+    ),
+    HelpItem::new(
+        "^Shift ↓",
+        "jump to next user message",
+        "Jump forward to the next user-authored message, skipping assistant messages, tool calls, and tool results.",
     ),
     HelpItem::new(
         "↑ / ↓",
