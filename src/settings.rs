@@ -65,11 +65,11 @@ pub struct Settings {
 }
 
 fn default_claude_command() -> String {
-    "claude".to_owned()
+    "claude --dangerously-skip-permissions".to_owned()
 }
 
 fn default_codex_command() -> String {
-    "codex".to_owned()
+    "codex --yolo".to_owned()
 }
 
 fn default_show_preview() -> bool {
@@ -188,8 +188,8 @@ mod tests {
         let json = serde_json::to_string(&settings).unwrap();
         let parsed: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.theme, ThemeName::Lazygit);
-        assert_eq!(parsed.claude_command, "claude");
-        assert_eq!(parsed.codex_command, "codex");
+        assert_eq!(parsed.claude_command, "claude --dangerously-skip-permissions");
+        assert_eq!(parsed.codex_command, "codex --yolo");
         assert!(parsed.show_preview);
         assert_eq!(parsed.preview_width_pct, 40);
     }
@@ -200,9 +200,9 @@ mod tests {
         assert_eq!(prog, "claude");
         assert_eq!(args, vec!["--profile", "work"]);
 
-        let (prog, args) = Settings::parse_command("codex");
+        let (prog, args) = Settings::parse_command("codex --yolo");
         assert_eq!(prog, "codex");
-        assert!(args.is_empty());
+        assert_eq!(args, vec!["--yolo"]);
 
         let (prog, args) = Settings::parse_command("");
         assert!(prog.is_empty());

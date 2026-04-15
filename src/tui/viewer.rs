@@ -68,10 +68,17 @@ pub(crate) enum MessageDirection {
     Previous,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MessageJumpScope {
+    Any,
+    UserOnly,
+}
+
 impl ViewerState {
-    const HINTS: [KeymapHint; 5] = [
+    const HINTS: [KeymapHint; 6] = [
         KeymapHint::new("↑↓/PgUp/PgDn/Home/End", "scroll"),
         KeymapHint::new("^Up/^Dn", "message"),
+        KeymapHint::new("^⇧Up/^⇧Dn", "user"),
         KeymapHint::new("^N/^P", "matches"),
         KeymapHint::new("^U/^E", "edit"),
         KeymapHint::new("Esc", "close"),
@@ -105,11 +112,37 @@ impl ViewerState {
     ) -> ViewerOutcome {
         match key.code {
             KeyCode::Esc => ViewerOutcome::Close,
+            KeyCode::Up if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
+                self.jump_to_message(
+                    MessageDirection::Previous,
+                    MessageJumpScope::UserOnly,
+                    area,
+                    session,
+                    summary,
+                    theme,
+                    theme_name,
+                );
+                ViewerOutcome::Stay
+            }
+            KeyCode::Down if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
+                self.jump_to_message(
+                    MessageDirection::Next,
+                    MessageJumpScope::UserOnly,
+                    area,
+                    session,
+                    summary,
+                    theme,
+                    theme_name,
+                );
+                ViewerOutcome::Stay
+            }
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.jump_to_match(MatchDirection::Next, area, session, summary, theme, theme_name);
                 ViewerOutcome::Stay
             }
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('p')
+                if key.modifiers == KeyModifiers::CONTROL =>
+            {
                 self.jump_to_match(
                     MatchDirection::Previous,
                     area,
@@ -120,9 +153,10 @@ impl ViewerState {
                 );
                 ViewerOutcome::Stay
             }
-            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
                 self.jump_to_message(
                     MessageDirection::Previous,
+                    MessageJumpScope::Any,
                     area,
                     session,
                     summary,
@@ -131,9 +165,10 @@ impl ViewerState {
                 );
                 ViewerOutcome::Stay
             }
-            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Down if key.modifiers == KeyModifiers::SHIFT => {
                 self.jump_to_message(
                     MessageDirection::Next,
+                    MessageJumpScope::Any,
                     area,
                     session,
                     summary,
@@ -305,6 +340,7 @@ impl ViewerState {
     fn jump_to_message(
         &mut self,
         direction: MessageDirection,
+        scope: MessageJumpScope,
         area: Rect,
         session: Option<&Session>,
         summary: Option<&SummarySidecar>,
@@ -317,7 +353,7 @@ impl ViewerState {
 
         let body_area = Self::body_area(area);
         let viewport_width = body_area.width.saturating_sub(2);
-        let rows = collect_message_rows(session, summary, theme, viewport_width);
+        let rows = collect_message_rows(session, summary, theme, viewport_width, scope);
         let Some(target_row) = message_row_for_scroll(&rows, self.scroll, direction) else {
             return;
         };
@@ -569,6 +605,7 @@ pub(crate) fn collect_message_rows(
     summary: Option<&SummarySidecar>,
     theme: &Theme,
     width: u16,
+    scope: MessageJumpScope,
 ) -> Vec<usize> {
     if width == 0 {
         return Vec::new();
@@ -581,7 +618,11 @@ pub(crate) fn collect_message_rows(
         .unwrap_or(0);
 
     for message in &session.messages {
-        rows.push(row_offset);
+        if matches!(scope, MessageJumpScope::Any)
+            || matches!(scope, MessageJumpScope::UserOnly) && message.role == crate::parse::MessageRole::User
+        {
+            rows.push(row_offset);
+        }
         row_offset += wrapped_line_height(&message_header_text(message), width);
 
         let rendered = render_message_body(
@@ -650,21 +691,11 @@ fn collect_line_match_rows(line: &str, width: usize, terms: &[String]) -> Vec<us
 }
 
 fn wrapped_line_height(line: &str, width: usize) -> usize {
-    let display_width = UnicodeWidthStr::width(line);
-    if display_width == 0 {
-        1
-    } else {
-        ((display_width - 1) / width) + 1
-    }
+    wrapped_text_height(&Text::from(Line::from(line.to_owned())), width as u16)
 }
 
 fn wrapped_rendered_line_height(line: &Line<'_>, width: usize) -> usize {
-    let content = line
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>();
-    wrapped_line_height(&content, width)
+    wrapped_text_height(&Text::from(line.clone()), width as u16)
 }
 
 fn next_match_index(matches: &[usize], active_match: Option<usize>, scroll: usize) -> usize {
@@ -713,17 +744,21 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Alignment;
     use ratatui::layout::Rect;
+    use ratatui::text::{Line, Text};
     use tui_input::Input;
 
     use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionMessage};
     use crate::settings::ThemeName;
     use crate::summary::{Fingerprint, SummarizeBackend, SummarySidecar};
+    use crate::tui::preview::render_message_body;
+    use crate::tui::util::wrapped_text_height;
     use crate::tui::theme::Theme;
 
     use super::{
-        collect_match_rows, collect_message_rows, match_scrolloff, message_row_for_scroll,
-        next_match_index, previous_match_index, scroll_for_match, scroll_progress_percent,
-        search_focus_title, viewer_title, MessageDirection, ViewerOutcome, ViewerState,
+        collect_match_rows, collect_message_rows, match_scrolloff, message_header_text,
+        message_row_for_scroll, next_match_index, previous_match_index, scroll_for_match,
+        scroll_progress_percent, search_focus_title, viewer_title, MessageDirection,
+        MessageJumpScope, ViewerOutcome, ViewerState,
     };
 
     #[test]
@@ -745,9 +780,49 @@ mod tests {
     #[test]
     fn collect_message_rows_tracks_header_boundaries() {
         let session = sample_session();
-        let rows = collect_message_rows(&session, None, &Theme::default(), 12);
+        let rows =
+            collect_message_rows(&session, None, &Theme::default(), 12, MessageJumpScope::Any);
 
-        assert_eq!(rows, vec![0, 6]);
+        assert_eq!(rows, vec![0, 7]);
+    }
+
+    #[test]
+    fn collect_message_rows_can_limit_to_user_messages() {
+        let session = multi_turn_session();
+        let rows = collect_message_rows(
+            &session,
+            None,
+            &Theme::default(),
+            80,
+            MessageJumpScope::UserOnly,
+        );
+
+        assert_eq!(rows, vec![0, 12]);
+    }
+
+    #[test]
+    fn collect_message_rows_matches_wrapped_render_height_at_narrow_width() {
+        let session = wrapped_navigation_session();
+        let theme = Theme::default();
+        let width = 9;
+        let rows = collect_message_rows(&session, None, &theme, width, MessageJumpScope::Any);
+
+        let first = &session.messages[0];
+        let expected_second_start = wrapped_text_height(
+            &Text::from(Line::from(message_header_text(first))),
+            width,
+        ) + wrapped_text_height(
+            &render_message_body(
+                session.agent,
+                first.role,
+                first.content.as_str(),
+                &theme,
+                None,
+            ),
+            width,
+        ) + 1;
+
+        assert_eq!(rows, vec![0, expected_second_start]);
     }
 
     #[test]
@@ -873,7 +948,13 @@ mod tests {
         let summary = sample_summary("alpha summary");
 
         let match_rows = collect_match_rows(&session, Some(&summary), &Theme::default(), "alpha", 80);
-        let message_rows = collect_message_rows(&session, Some(&summary), &Theme::default(), 80);
+        let message_rows = collect_message_rows(
+            &session,
+            Some(&summary),
+            &Theme::default(),
+            80,
+            MessageJumpScope::Any,
+        );
 
         assert_eq!(match_rows, vec![2, 6, 9]);
         assert_eq!(message_rows, vec![5, 8]);
@@ -989,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn control_up_and_down_jump_between_message_boundaries() {
+    fn shift_up_and_down_jump_between_message_boundaries() {
         let session = sample_session();
         let area = Rect::new(0, 0, 14, 10);
         let mut state = ViewerState::new();
@@ -1002,10 +1083,40 @@ mod tests {
             &Theme::default(),
             ThemeName::Lazygit,
         );
-        assert_eq!(state.scroll, 6);
+        assert_eq!(state.scroll, 7);
 
         state.handle_key(
             KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
+            area,
+            Some(&session),
+            None,
+            &Theme::default(),
+            ThemeName::Lazygit,
+        );
+        assert_eq!(state.scroll, 0);
+    }
+
+    #[test]
+    fn control_shift_up_and_down_jump_between_user_messages() {
+        let session = multi_turn_session();
+        let area = Rect::new(0, 0, 80, 10);
+        let mut state = ViewerState::new();
+
+        state.handle_key(
+            KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            area,
+            Some(&session),
+            None,
+            &Theme::default(),
+            ThemeName::Lazygit,
+        );
+        assert_eq!(state.scroll, 12);
+
+        state.handle_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
             area,
             Some(&session),
             None,
@@ -1093,5 +1204,106 @@ mod tests {
             SummarizeBackend::Codex,
             body.to_owned(),
         )
+    }
+
+    fn multi_turn_session() -> Session {
+        Session {
+            session_id: "session-2".to_owned(),
+            agent: Agent::Claude,
+            project: "/tmp/demo".to_owned(),
+            branch: Some("main".to_owned()),
+            cwd: Some("/tmp/demo".to_owned()),
+            created: Some(Utc::now()),
+            modified: Some(Utc::now()),
+            modified_ts: 0,
+            lines: 12,
+            file_path: PathBuf::from("/tmp/demo/session-2.jsonl"),
+            first_msg_role: Some(MessageRole::User),
+            first_msg_content: "first user".to_owned(),
+            last_msg_role: Some(MessageRole::Assistant),
+            last_msg_content: "second assistant".to_owned(),
+            first_user_msg_content: "first user".to_owned(),
+            derivation_type: DerivationType::Original,
+            is_sidechain: false,
+            custom_title: Some("demo multi turn".to_owned()),
+            messages: vec![
+                SessionMessage {
+                    role: MessageRole::User,
+                    content: "first user".to_owned(),
+                    timestamp: Some(Utc::now()),
+                    tool_name: None,
+                },
+                SessionMessage {
+                    role: MessageRole::Assistant,
+                    content: "first assistant".to_owned(),
+                    timestamp: Some(Utc::now()),
+                    tool_name: None,
+                },
+                SessionMessage {
+                    role: MessageRole::ToolCall,
+                    content: "run tool".to_owned(),
+                    timestamp: Some(Utc::now()),
+                    tool_name: Some("Read".to_owned()),
+                },
+                SessionMessage {
+                    role: MessageRole::ToolResult,
+                    content: "tool output".to_owned(),
+                    timestamp: Some(Utc::now()),
+                    tool_name: Some("Read".to_owned()),
+                },
+                SessionMessage {
+                    role: MessageRole::User,
+                    content: "second user".to_owned(),
+                    timestamp: Some(Utc::now()),
+                    tool_name: None,
+                },
+                SessionMessage {
+                    role: MessageRole::Assistant,
+                    content: "second assistant".to_owned(),
+                    timestamp: Some(Utc::now()),
+                    tool_name: None,
+                },
+            ],
+            content: "first user\nfirst assistant\nrun tool\ntool output\nsecond user\nsecond assistant"
+                .to_owned(),
+        }
+    }
+
+    fn wrapped_navigation_session() -> Session {
+        Session {
+            session_id: "session-wrap".to_owned(),
+            agent: Agent::Claude,
+            project: "/tmp/demo".to_owned(),
+            branch: Some("main".to_owned()),
+            cwd: Some("/tmp/demo".to_owned()),
+            created: Some(Utc::now()),
+            modified: Some(Utc::now()),
+            modified_ts: 0,
+            lines: 4,
+            file_path: PathBuf::from("/tmp/demo/session-wrap.jsonl"),
+            first_msg_role: Some(MessageRole::User),
+            first_msg_content: "This line wraps hard in the preview and viewer.".to_owned(),
+            last_msg_role: Some(MessageRole::Assistant),
+            last_msg_content: "Short reply".to_owned(),
+            first_user_msg_content: "This line wraps hard in the preview and viewer.".to_owned(),
+            derivation_type: DerivationType::Original,
+            is_sidechain: false,
+            custom_title: Some("wrapped navigation".to_owned()),
+            messages: vec![
+                SessionMessage {
+                    role: MessageRole::User,
+                    content: "This line wraps hard in the preview and viewer.".to_owned(),
+                    timestamp: Some(Utc::now()),
+                    tool_name: None,
+                },
+                SessionMessage {
+                    role: MessageRole::Assistant,
+                    content: "Short reply".to_owned(),
+                    timestamp: Some(Utc::now()),
+                    tool_name: None,
+                },
+            ],
+            content: "This line wraps hard in the preview and viewer.\nShort reply".to_owned(),
+        }
     }
 }

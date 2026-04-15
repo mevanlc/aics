@@ -59,7 +59,8 @@ use crate::tui::util::{
     wrapped_text_height,
 };
 use crate::tui::viewer::{
-    collect_message_rows, message_row_for_scroll, MessageDirection, ViewerOutcome, ViewerState,
+    collect_message_rows, message_row_for_scroll, MessageDirection, MessageJumpScope,
+    ViewerOutcome, ViewerState,
 };
 use crate::tui::{keymap_hint, layout, list, preview, search};
 
@@ -734,6 +735,19 @@ impl App {
                     self.clear_query();
                 }
             }
+            KeyCode::Down if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
+                if self.preview_available() {
+                    self.jump_preview_message(MessageDirection::Next, MessageJumpScope::UserOnly);
+                }
+            }
+            KeyCode::Up if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
+                if self.preview_available() {
+                    self.jump_preview_message(
+                        MessageDirection::Previous,
+                        MessageJumpScope::UserOnly,
+                    );
+                }
+            }
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_settings()
             }
@@ -743,14 +757,14 @@ impl App {
             KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.toggle_scope()?
             }
-            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Down if key.modifiers == KeyModifiers::SHIFT => {
                 if self.preview_available() {
-                    self.jump_preview_message(MessageDirection::Next);
+                    self.jump_preview_message(MessageDirection::Next, MessageJumpScope::Any);
                 }
             }
-            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
                 if self.preview_available() {
-                    self.jump_preview_message(MessageDirection::Previous);
+                    self.jump_preview_message(MessageDirection::Previous, MessageJumpScope::Any);
                 }
             }
             KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1282,7 +1296,7 @@ impl App {
         self.last_layout.map_or(false, |l| l.preview.is_some())
     }
 
-    fn jump_preview_message(&mut self, direction: MessageDirection) {
+    fn jump_preview_message(&mut self, direction: MessageDirection, scope: MessageJumpScope) {
         let Some(layout) = self.last_layout else {
             return;
         };
@@ -1316,7 +1330,7 @@ impl App {
                     }
                 })
                 .unwrap_or(0);
-            collect_message_rows(&session, None, &theme, width)
+            collect_message_rows(&session, None, &theme, width, scope)
                 .into_iter()
                 .map(|row| row + summary_offset)
                 .collect::<Vec<_>>()
@@ -1368,7 +1382,11 @@ impl App {
         Theme::from_name(self.current_frame_theme_name())
     }
 
-    fn apply_settings(&mut self, new_settings: Settings) -> Result<()> {
+    fn apply_settings(&mut self, mut new_settings: Settings) -> Result<()> {
+        // Layout prefs are controlled directly from the main screen, not the
+        // settings modal, so preserve the live values here.
+        new_settings.show_preview = self.preview_visible;
+        new_settings.preview_width_pct = self.preview_width_pct;
         self.theme = Theme::from_name(new_settings.theme);
         self.preview_render_cache = None;
         self.settings = new_settings;
@@ -2247,7 +2265,7 @@ mod tests {
     use crate::index::writer::StoredSession;
     use crate::index::SearchHit;
     use crate::index::{IndexManager, IndexPaths, Scope, SearchFilters, SearchRequest, SortMode};
-    use crate::parse::{Agent, DerivationType};
+    use crate::parse::{Agent, DerivationType, MessageRole};
     use crate::settings::{Settings, ThemeName};
     use crate::tui::help::HelpTab;
     use crate::tui::layout;
@@ -2270,7 +2288,14 @@ mod tests {
         let homes = sample_homes();
         let claude = build_resume_command(&sample_hit(Agent::Claude), &settings, &homes).unwrap();
         assert_eq!(claude.program, "claude");
-        assert_eq!(claude.args, vec!["--resume", "session-123"]);
+        assert_eq!(
+            claude.args,
+            vec![
+                "--dangerously-skip-permissions",
+                "--resume",
+                "session-123",
+            ]
+        );
         assert_eq!(
             claude.env,
             vec![(
@@ -2281,7 +2306,7 @@ mod tests {
 
         let codex = build_resume_command(&sample_hit(Agent::Codex), &settings, &homes).unwrap();
         assert_eq!(codex.program, "codex");
-        assert_eq!(codex.args, vec!["resume", "session-123"]);
+        assert_eq!(codex.args, vec!["--yolo", "resume", "session-123"]);
         assert_eq!(
             codex.env,
             vec![("CODEX_HOME".to_owned(), "/tmp/codex-home".to_owned())]
@@ -2295,11 +2320,16 @@ mod tests {
         let claude = build_fork_command(&sample_hit(Agent::Claude), &settings, &homes).unwrap();
         assert_eq!(
             claude.args,
-            vec!["--resume", "session-123", "--fork-session"]
+            vec![
+                "--dangerously-skip-permissions",
+                "--resume",
+                "session-123",
+                "--fork-session",
+            ]
         );
 
         let codex = build_fork_command(&sample_hit(Agent::Codex), &settings, &homes).unwrap();
-        assert_eq!(codex.args, vec!["fork", "session-123"]);
+        assert_eq!(codex.args, vec!["--yolo", "fork", "session-123"]);
     }
 
     #[test]
@@ -2497,6 +2527,27 @@ mod tests {
     }
 
     #[test]
+    fn applying_settings_preserves_live_preview_preference() {
+        let mut app = test_app();
+        app.preview_visible = true;
+        app.preview_width_pct = 55;
+        app.settings.show_preview = false;
+        app.settings.preview_width_pct = 40;
+
+        app.apply_settings(Settings {
+            theme: ThemeName::Sunset,
+            show_preview: false,
+            preview_width_pct: 40,
+            ..Settings::default()
+        })
+        .unwrap();
+
+        assert!(app.settings.show_preview);
+        assert_eq!(app.settings.preview_width_pct, 55);
+        assert_eq!(app.current_frame_theme_name(), ThemeName::Sunset);
+    }
+
+    #[test]
     fn ctrl_g_toggles_scope_between_global_and_local() {
         let mut app = test_app();
         app.scope = Scope::Global;
@@ -2630,6 +2681,29 @@ mod tests {
 
         assert_eq!(app.selected, 0);
         assert_eq!(app.preview_scroll, PAGE_STEP);
+    }
+
+    #[test]
+    fn ctrl_shift_down_jumps_preview_between_user_messages() {
+        let mut app = test_app();
+        let path = PathBuf::from("/tmp/demo/session-users.jsonl");
+        app.results = vec![sample_hit_with_path(Agent::Claude, path.clone())];
+        app.selected = 0;
+        app.last_layout = Some(layout::AppLayout {
+            search: Rect::new(0, 0, 120, 3),
+            list: Rect::new(0, 3, 60, 20),
+            preview: Some(Rect::new(60, 3, 60, 20)),
+            status: Rect::new(0, 23, 120, 2),
+        });
+        app.preview_cache.insert(path, Some(sample_preview_session()));
+
+        app.handle_search_key(crossterm_key_mods(
+            KeyCode::Down,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ))
+        .unwrap();
+
+        assert_eq!(app.preview_scroll, 12);
     }
 
     #[test]
@@ -3215,6 +3289,69 @@ mod tests {
             custom_title: Some(stem.to_owned()),
             messages: Vec::new(),
             content: String::new(),
+        }
+    }
+
+    fn sample_preview_session() -> crate::parse::Session {
+        crate::parse::Session {
+            session_id: "session-users".to_owned(),
+            agent: Agent::Claude,
+            project: "/tmp/demo".to_owned(),
+            branch: Some("main".to_owned()),
+            cwd: Some("/tmp/demo".to_owned()),
+            created: None,
+            modified: None,
+            modified_ts: 0,
+            lines: 6,
+            file_path: PathBuf::from("/tmp/demo/session-users.jsonl"),
+            first_msg_role: Some(MessageRole::User),
+            first_msg_content: "first user".to_owned(),
+            last_msg_role: Some(MessageRole::Assistant),
+            last_msg_content: "second assistant".to_owned(),
+            first_user_msg_content: "first user".to_owned(),
+            derivation_type: DerivationType::Original,
+            is_sidechain: false,
+            custom_title: Some("preview users".to_owned()),
+            messages: vec![
+                crate::parse::SessionMessage {
+                    role: MessageRole::User,
+                    content: "first user".to_owned(),
+                    timestamp: None,
+                    tool_name: None,
+                },
+                crate::parse::SessionMessage {
+                    role: MessageRole::Assistant,
+                    content: "first assistant".to_owned(),
+                    timestamp: None,
+                    tool_name: None,
+                },
+                crate::parse::SessionMessage {
+                    role: MessageRole::ToolCall,
+                    content: "run tool".to_owned(),
+                    timestamp: None,
+                    tool_name: Some("Read".to_owned()),
+                },
+                crate::parse::SessionMessage {
+                    role: MessageRole::ToolResult,
+                    content: "tool output".to_owned(),
+                    timestamp: None,
+                    tool_name: Some("Read".to_owned()),
+                },
+                crate::parse::SessionMessage {
+                    role: MessageRole::User,
+                    content: "second user".to_owned(),
+                    timestamp: None,
+                    tool_name: None,
+                },
+                crate::parse::SessionMessage {
+                    role: MessageRole::Assistant,
+                    content: "second assistant".to_owned(),
+                    timestamp: None,
+                    tool_name: None,
+                },
+            ],
+            content: "first user\nfirst assistant\nrun tool\ntool output\nsecond user\nsecond assistant"
+                .to_owned(),
         }
     }
 
