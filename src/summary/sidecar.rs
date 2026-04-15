@@ -60,8 +60,7 @@ impl SummarySidecar {
 
     /// True when the stored fingerprint still matches `current`.
     pub fn is_fresh(&self, current: &Fingerprint) -> bool {
-        self.line_count == current.line_count
-            && self.last_line_sha256 == current.last_line_sha256
+        self.line_count == current.line_count && self.last_line_sha256 == current.last_line_sha256
     }
 
     pub fn serialize(&self) -> String {
@@ -165,19 +164,16 @@ impl SummarySidecar {
             .parent()
             .ok_or_else(|| anyhow!("sidecar path has no parent: {}", path.display()))?;
         if !parent.exists() {
-            bail!("sidecar parent directory does not exist: {}", parent.display());
+            bail!(
+                "sidecar parent directory does not exist: {}",
+                parent.display()
+            );
         }
         let contents = self.serialize();
         let tmp = tmp_path(path);
-        fs::write(&tmp, &contents)
-            .with_context(|| format!("failed to write {}", tmp.display()))?;
-        fs::rename(&tmp, path).with_context(|| {
-            format!(
-                "failed to rename {} to {}",
-                tmp.display(),
-                path.display()
-            )
-        })?;
+        fs::write(&tmp, &contents).with_context(|| format!("failed to write {}", tmp.display()))?;
+        fs::rename(&tmp, path)
+            .with_context(|| format!("failed to rename {} to {}", tmp.display(), path.display()))?;
         Ok(())
     }
 }

@@ -68,8 +68,10 @@ By default, searches are scoped to the current working directory. Use `-g` / `--
 | `⏎` | Open actions menu for selected session |
 | `^F` | Filters modal |
 | `^S` | Settings modal |
-| `^T` | Toggle preview panel |
+| `^P` | Toggle preview panel |
+| `^Y` | Toggle session/summary preview mode |
 | `^H` / `^L` | Resize list/preview split |
+| `^X` + action letter | Run a session action directly |
 | `Shift+↑` / `Shift+↓` | Jump between messages in the viewer |
 | `?` | Help |
 | `Esc` | Cancel / close modal |

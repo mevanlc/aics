@@ -139,21 +139,22 @@ pub fn render_summary_text(
         };
         (
             label,
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         )
     };
 
     let header = Line::from(vec![
         Span::styled(
             sidecar.backend.as_str().to_owned(),
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" · ", Style::default().fg(theme.muted)),
         Span::styled(
-            sidecar
-                .generated_at
-                .format("%Y-%m-%d %H:%M")
-                .to_string(),
+            sidecar.generated_at.format("%Y-%m-%d %H:%M").to_string(),
             Style::default().fg(theme.muted),
         ),
         Span::styled(" · ", Style::default().fg(theme.muted)),

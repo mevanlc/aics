@@ -4,9 +4,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
+use ratatui_textarea::TextArea;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
-use ratatui_textarea::TextArea;
 use unicode_width::UnicodeWidthStr;
 
 use crate::ring_cursor::RingCursor;
@@ -203,7 +203,13 @@ impl SettingsModalState {
 
         // Claude Code Command
         let claude_focused = self.field == SettingsField::ClaudeCommand;
-        render_field_label(frame, rows[11], theme, "Claude Code Command", claude_focused);
+        render_field_label(
+            frame,
+            rows[11],
+            theme,
+            "Claude Code Command",
+            claude_focused,
+        );
         self.render_text_input(frame, rows[12], theme, &self.claude_input, claude_focused);
 
         // Codex Command
@@ -213,8 +219,7 @@ impl SettingsModalState {
 
         // Session summarizer backend (inline label + radio)
         let backend_focused = self.field == SettingsField::SummarizeBackend;
-        let backend_line =
-            self.render_inline_backend_row(rows[17].width, theme, backend_focused);
+        let backend_line = self.render_inline_backend_row(rows[17].width, theme, backend_focused);
         frame.render_widget(Paragraph::new(backend_line), rows[17]);
 
         // Custom command textarea
@@ -263,12 +268,7 @@ impl SettingsModalState {
         )
     }
 
-    fn render_inline_backend_row(
-        &self,
-        width: u16,
-        theme: &Theme,
-        focused: bool,
-    ) -> Line<'static> {
+    fn render_inline_backend_row(&self, width: u16, theme: &Theme, focused: bool) -> Line<'static> {
         let labels: Vec<String> = BACKEND_ORDER
             .iter()
             .map(|b| backend_label(*b).to_owned())
@@ -502,13 +502,7 @@ fn pad_rect(area: Rect) -> Rect {
     }
 }
 
-fn render_field_label(
-    frame: &mut Frame,
-    area: Rect,
-    theme: &Theme,
-    text: &str,
-    focused: bool,
-) {
+fn render_field_label(frame: &mut Frame, area: Rect, theme: &Theme, text: &str, focused: bool) {
     let style = if focused {
         Style::default()
             .fg(theme.accent)
@@ -632,7 +626,11 @@ fn radio_spans(
     let mut spans: Vec<Span<'static>> = Vec::new();
     spans.push(Span::styled(
         arrow_left,
-        if start > 0 { active_arrow } else { inactive_arrow },
+        if start > 0 {
+            active_arrow
+        } else {
+            inactive_arrow
+        },
     ));
 
     for i in start..end {

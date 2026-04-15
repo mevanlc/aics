@@ -622,10 +622,7 @@ pub(crate) fn message_row_for_scroll(
             .copied()
             .find(|row| *row > scroll)
             .or_else(|| rows.first().copied()),
-        MessageDirection::Previous => rows
-            .iter()
-            .copied()
-            .rfind(|row| *row < scroll),
+        MessageDirection::Previous => rows.iter().copied().rfind(|row| *row < scroll),
     }
 }
 

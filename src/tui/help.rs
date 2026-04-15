@@ -27,7 +27,7 @@ const RIGHT_PANEL_MIN_CONTENT_WIDTH: u16 = 12;
 const RIGHT_PANEL_HORIZONTAL_CHROME: u16 = 3;
 const RIGHT_PANEL_MIN_WIDTH: u16 = RIGHT_PANEL_MIN_CONTENT_WIDTH + RIGHT_PANEL_HORIZONTAL_CHROME;
 
-const SESSION_LIST_ITEMS: [HelpItem; 13] = [
+const SESSION_LIST_ITEMS: [HelpItem; 19] = [
     HelpItem::new(
         "Type",
         "filter sessions",
@@ -47,6 +47,11 @@ const SESSION_LIST_ITEMS: [HelpItem; 13] = [
         "↑↓",
         "select session",
         "Move the highlighted session up or down in the result list without opening the actions menu.",
+    ),
+    HelpItem::new(
+        "^X",
+        "session action mode",
+        "Arm the session action hotkeys for the current selection. While ^X mode is active, the hint line switches to the available action letters until you run one or cancel.",
     ),
     HelpItem::new(
         "PgUp / PgDn",
@@ -69,14 +74,24 @@ const SESSION_LIST_ITEMS: [HelpItem; 13] = [
         "Open the filter modal to change scope, agent, branch, date range, derivation toggles, live-only mode, and sort order.",
     ),
     HelpItem::new(
+        "^G",
+        "toggle scope",
+        "Toggle the Scope Filter between Global and Local/cwd, then rerun the current search with the new scope immediately.",
+    ),
+    HelpItem::new(
         "^S",
         "settings",
         "Open settings to change theme, CLI handoff commands, session separators, and snippet line count.",
     ),
     HelpItem::new(
-        "^T",
+        "^P",
         "toggle preview",
         "Show or hide the preview pane. This preference is saved so the next launch uses the same preview visibility.",
+    ),
+    HelpItem::new(
+        "^Y",
+        "toggle summary",
+        "Switch the preview pane between the session transcript and the summary sidecar view for the selected session.",
     ),
     HelpItem::new(
         "^H / ^L",
@@ -89,9 +104,24 @@ const SESSION_LIST_ITEMS: [HelpItem; 13] = [
         "Exit the TUI without changing the current query or selection state first.",
     ),
     HelpItem::new(
-        "Mouse",
-        "click and scroll",
-        "Click a session to select it. Scroll over the list to move the selection, or over the preview pane to scroll the preview content.",
+        "Double click",
+        "view session",
+        "Double-click a session card in the result list to open the full-session viewer directly.",
+    ),
+    HelpItem::new(
+        "Mouse scroll",
+        "scroll sessions",
+        "Scroll over the session list to move the selection up or down without opening the actions menu.",
+    ),
+    HelpItem::new(
+        "Mouse scroll",
+        "scroll preview",
+        "Scroll over the preview pane to move through the preview content while leaving the selected session unchanged.",
+    ),
+    HelpItem::new(
+        "^X + letter",
+        "run menu action",
+        "Press Ctrl+X followed by a main-menu letter such as v, d, e, r, or f to run that action immediately for the selected session.",
     ),
 ];
 

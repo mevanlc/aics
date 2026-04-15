@@ -23,6 +23,17 @@ const ACTIONS: [ActionItem; 9] = [
     ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
 ];
 
+pub fn action_for_key(ch: char) -> Option<SessionAction> {
+    ACTIONS
+        .iter()
+        .find(|item| item.key == ch)
+        .map(|item| item.action)
+}
+
+pub fn action_at(index: usize) -> Option<SessionAction> {
+    ACTIONS.get(index).map(|item| item.action)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionAction {
     View,
@@ -67,17 +78,15 @@ impl ActionMenuState {
                 self.selected.move_next();
                 ActionOutcome::Stay
             }
-            KeyCode::Char(ch) => ACTIONS
-                .iter()
-                .find(|item| item.key == ch)
-                .map(|item| ActionOutcome::Run(item.action))
+            KeyCode::Char(ch) => action_for_key(ch)
+                .map(ActionOutcome::Run)
                 .unwrap_or(ActionOutcome::Stay),
             _ => ActionOutcome::Stay,
         }
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let popup = layout::centered_rect_fixed_width(area, 66, 50);
+        let popup = popup_area(area);
         frame.render_widget(Clear, popup);
 
         // Outer block provides the border; list is rendered inside separately.
@@ -114,14 +123,12 @@ impl ActionMenuState {
             })
             .collect::<Vec<_>>();
 
-        let list = List::new(items)
-            .highlight_symbol("› ")
-            .highlight_style(
-                Style::default()
-                    .fg(theme.text)
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD),
-            );
+        let list = List::new(items).highlight_symbol("› ").highlight_style(
+            Style::default()
+                .fg(theme.text)
+                .bg(theme.selection)
+                .add_modifier(Modifier::BOLD),
+        );
 
         let mut state = ListState::default();
         state.select(Some(self.selected.index()));
@@ -151,6 +158,12 @@ impl ActionMenuState {
             chunks[3],
         );
     }
+
+    pub fn select_index(&mut self, index: usize) {
+        if let Some(action) = action_at(index) {
+            self.selected.set(&action);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -164,6 +177,32 @@ impl ActionItem {
     const fn new(action: SessionAction, key: char, label: &'static str) -> Self {
         Self { action, key, label }
     }
+}
+
+pub fn popup_area(area: Rect) -> Rect {
+    layout::centered_rect_fixed_width(area, 66, 50)
+}
+
+pub fn list_area(area: Rect) -> Rect {
+    let popup = popup_area(area);
+    let inner = Block::default().borders(Borders::ALL).inner(popup);
+    let chunks = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    chunks[0]
+}
+
+pub fn index_at_row(area: Rect, row: u16) -> Option<usize> {
+    let list = list_area(area);
+    if row < list.y || row >= list.bottom() {
+        return None;
+    }
+    let index = (row - list.y) as usize;
+    (index < ACTIONS.len()).then_some(index)
 }
 
 #[cfg(test)]

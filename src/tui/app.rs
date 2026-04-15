@@ -42,10 +42,8 @@ use crate::scan::AgentHomes;
 use crate::settings::{Settings, ThemeName};
 use crate::summary::sidecar::sidecar_path;
 use crate::summary::staleness::fingerprint as compute_fingerprint;
-use crate::summary::{
-    Fingerprint, SummaryCommand, SummaryEvent, SummarySidecar, SummaryWorker,
-};
-use crate::tui::actions::{ActionMenuState, ActionOutcome, SessionAction};
+use crate::summary::{Fingerprint, SummaryCommand, SummaryEvent, SummarySidecar, SummaryWorker};
+use crate::tui::actions::{self, ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::filter::{FilterModalState, FilterOutcome};
 use crate::tui::help::{HelpModalState, HelpOutcome, HelpTab};
 use crate::tui::preview::PreviewMode;
@@ -66,6 +64,13 @@ const LIST_MOUSE_SCROLL_STEP: isize = 1;
 const PANEL_MOUSE_SCROLL_STEP: usize = 3;
 const PREVIEW_WIDTH_MIN: u16 = 25;
 const PREVIEW_WIDTH_MAX: u16 = 75;
+const LIST_DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
+
+#[derive(Debug, Clone, Copy)]
+struct PendingListClick {
+    index: usize,
+    at: Instant,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -216,21 +221,36 @@ pub struct App {
     settings: Settings,
     theme: Theme,
     homes: AgentHomes,
+    pending_main_menu_action: bool,
+    pending_list_click: Option<PendingListClick>,
+    pending_action_menu_click: Option<PendingListClick>,
 }
 
 impl App {
-    const MAIN_HINTS: [keymap_hint::KeymapHint; 11] = [
+    const MAIN_HINTS: [keymap_hint::KeymapHint; 10] = [
         keymap_hint::KeymapHint::new("?", "help"),
         keymap_hint::KeymapHint::new("↑↓", "select"),
         keymap_hint::KeymapHint::new("⏎", "actions"),
         keymap_hint::KeymapHint::new("^F", "filters"),
         keymap_hint::KeymapHint::new("^S", "settings"),
-        keymap_hint::KeymapHint::new("^T", "toggle"),
-        keymap_hint::KeymapHint::new("^Y", "summary"),
-        keymap_hint::KeymapHint::new("^H/^L", "resize"),
+        keymap_hint::KeymapHint::new("^Y", "toggle summary"),
+        keymap_hint::KeymapHint::new("^P", "toggle preview"),
+        keymap_hint::KeymapHint::new("Esc", "clear/cancel"),
         keymap_hint::KeymapHint::new("^C", "quit"),
-        keymap_hint::KeymapHint::new("Esc", "Cancel"),
         keymap_hint::KeymapHint::new("PgUp/PgDn", "scroll"),
+    ];
+    const MAIN_MENU_HINTS: [keymap_hint::KeymapHint; 11] = [
+        keymap_hint::KeymapHint::new("Esc", "cancel ^x"),
+        keymap_hint::KeymapHint::new("v", "view"),
+        keymap_hint::KeymapHint::new("s", "summarize"),
+        keymap_hint::KeymapHint::new("e", "export"),
+        keymap_hint::KeymapHint::new("i", "copy id"),
+        keymap_hint::KeymapHint::new("p", "copy path"),
+        keymap_hint::KeymapHint::new("o", "copy dir"),
+        keymap_hint::KeymapHint::new("d", "delete session"),
+        keymap_hint::KeymapHint::new("r", "resume"),
+        keymap_hint::KeymapHint::new("f", "fork"),
+        keymap_hint::KeymapHint::new("?", "help"),
     ];
 
     fn new(
@@ -291,6 +311,9 @@ impl App {
             theme: Theme::from_name(settings.theme),
             settings,
             homes,
+            pending_main_menu_action: false,
+            pending_list_click: None,
+            pending_action_menu_click: None,
         }
     }
 
@@ -353,7 +376,7 @@ impl App {
 
     pub fn scope_label(&self) -> String {
         match &self.scope {
-            Scope::Global => "All Projects".to_owned(),
+            Scope::Global => "Global".to_owned(),
             Scope::CurrentDir(path, _) => path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -532,7 +555,12 @@ impl App {
             preview::render(frame, self, preview_area, &theme);
         }
 
-        keymap_hint::render(frame, areas.status, &Self::MAIN_HINTS, &theme, "");
+        let hints = if self.pending_main_menu_action {
+            &Self::MAIN_MENU_HINTS[..]
+        } else {
+            &Self::MAIN_HINTS[..]
+        };
+        keymap_hint::render(frame, areas.status, hints, &theme, "");
 
         let local_scope_label = self.local_scope_label();
         let viewer_theme_name = self.current_frame_theme_name();
@@ -577,8 +605,17 @@ impl App {
             return self.handle_overlay_key(key);
         }
 
+        if self.handle_pending_main_menu_key(key)? {
+            return Ok(());
+        }
+
         if is_help_key(key) {
             self.open_help(HelpTab::SessionList);
+            return Ok(());
+        }
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('x') {
+            self.pending_main_menu_action = self.selected_index().is_some();
             return Ok(());
         }
 
@@ -604,6 +641,9 @@ impl App {
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_filters()
             }
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_scope()?
+            }
             KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 if self.preview_available() {
                     self.jump_preview_message(MessageDirection::Next);
@@ -613,6 +653,12 @@ impl App {
                 if self.preview_available() {
                     self.jump_preview_message(MessageDirection::Previous);
                 }
+            }
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_selection(1)
+            }
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_selection(-1)
             }
             KeyCode::Down => self.move_selection(1),
             KeyCode::Up => self.move_selection(-1),
@@ -649,7 +695,7 @@ impl App {
                     self.overlay = Overlay::Actions(ActionMenuState::new());
                 }
             }
-            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.toggle_preview()
             }
             KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -710,12 +756,15 @@ impl App {
             },
             Overlay::Actions(state) => match state.handle_key(key) {
                 ActionOutcome::Stay => {}
-                ActionOutcome::Close => self.overlay = Overlay::None,
+                ActionOutcome::Close => {
+                    self.pending_action_menu_click = None;
+                    self.overlay = Overlay::None;
+                }
                 ActionOutcome::Run(action) => {
+                    self.pending_action_menu_click = None;
                     self.overlay = Overlay::None;
                     if let Err(error) = self.run_session_action(action) {
-                        self.statusline =
-                            Some(statusline::Entry::failed(format!("{error:#}")));
+                        self.statusline = Some(statusline::Entry::failed(format!("{error:#}")));
                     }
                 }
             },
@@ -744,8 +793,7 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Enter => {
                     self.overlay = Overlay::None;
                     if let Err(error) = self.delete_selected_session() {
-                        self.statusline =
-                            Some(statusline::Entry::failed(format!("{error:#}")));
+                        self.statusline = Some(statusline::Entry::failed(format!("{error:#}")));
                     }
                 }
                 _ => {}
@@ -789,10 +837,25 @@ impl App {
                 if contains(areas.list, mouse.column, mouse.row) {
                     if let Some(index) = self.list_index_at(areas.list, mouse.row) {
                         self.select_absolute(index);
+                        let now = Instant::now();
+                        let double_click = self.pending_list_click.is_some_and(|click| {
+                            click.index == index
+                                && now.duration_since(click.at) <= LIST_DOUBLE_CLICK_THRESHOLD
+                        });
+                        if double_click {
+                            self.pending_list_click = None;
+                            self.open_viewer();
+                        } else {
+                            self.pending_list_click = Some(PendingListClick { index, at: now });
+                        }
                     }
+                } else {
+                    self.pending_list_click = None;
                 }
             }
+            MouseEventKind::Up(MouseButton::Left) => {}
             MouseEventKind::ScrollDown => {
+                self.pending_list_click = None;
                 if contains(areas.list, mouse.column, mouse.row) {
                     self.move_selection(LIST_MOUSE_SCROLL_STEP);
                 } else if areas
@@ -804,6 +867,7 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp => {
+                self.pending_list_click = None;
                 if contains(areas.list, mouse.column, mouse.row) {
                     self.move_selection(-LIST_MOUSE_SCROLL_STEP);
                 } else if areas
@@ -814,25 +878,66 @@ impl App {
                         self.preview_scroll.saturating_sub(PANEL_MOUSE_SCROLL_STEP);
                 }
             }
-            _ => {}
+            _ => {
+                self.pending_list_click = None;
+            }
         }
         Ok(())
     }
 
     fn handle_overlay_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
-        if let Overlay::Viewer(state) = &mut self.overlay {
-            let body = ViewerState::body_area(self.last_frame_area);
-            if contains(body, mouse.column, mouse.row) {
-                match mouse.kind {
-                    MouseEventKind::ScrollDown => {
-                        state.scroll = state.scroll.saturating_add(PANEL_MOUSE_SCROLL_STEP);
+        match &mut self.overlay {
+            Overlay::Viewer(state) => {
+                let body = ViewerState::body_area(self.last_frame_area);
+                if contains(body, mouse.column, mouse.row) {
+                    match mouse.kind {
+                        MouseEventKind::ScrollDown => {
+                            state.scroll = state.scroll.saturating_add(PANEL_MOUSE_SCROLL_STEP);
+                        }
+                        MouseEventKind::ScrollUp => {
+                            state.scroll = state.scroll.saturating_sub(PANEL_MOUSE_SCROLL_STEP);
+                        }
+                        _ => {}
                     }
-                    MouseEventKind::ScrollUp => {
-                        state.scroll = state.scroll.saturating_sub(PANEL_MOUSE_SCROLL_STEP);
-                    }
-                    _ => {}
                 }
             }
+            Overlay::Actions(state) => match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let mut action_to_run = None;
+                    let mut close_overlay = false;
+                    if let Some(index) = actions::index_at_row(self.last_frame_area, mouse.row) {
+                        state.select_index(index);
+                        let now = Instant::now();
+                        let double_click = self.pending_action_menu_click.is_some_and(|click| {
+                            click.index == index
+                                && now.duration_since(click.at) <= LIST_DOUBLE_CLICK_THRESHOLD
+                        });
+                        if double_click {
+                            self.pending_action_menu_click = None;
+                            close_overlay = true;
+                            action_to_run = actions::action_at(index);
+                        } else {
+                            self.pending_action_menu_click =
+                                Some(PendingListClick { index, at: now });
+                        }
+                    } else {
+                        self.pending_action_menu_click = None;
+                    }
+                    if close_overlay {
+                        self.overlay = Overlay::None;
+                    }
+                    if let Some(action) = action_to_run {
+                        if let Err(error) = self.run_session_action(action) {
+                            self.statusline = Some(statusline::Entry::failed(format!("{error:#}")));
+                        }
+                    }
+                }
+                MouseEventKind::Up(MouseButton::Left) => {}
+                _ => {
+                    self.pending_action_menu_click = None;
+                }
+            },
+            _ => {}
         }
         Ok(())
     }
@@ -898,8 +1003,7 @@ impl App {
                     if Some(response.request_id) != self.latest_search_id {
                         debug!(
                             "ignoring stale search response id={} latest_search_id={:?}",
-                            response.request_id,
-                            self.latest_search_id
+                            response.request_id, self.latest_search_id
                         );
                         continue;
                     }
@@ -927,8 +1031,7 @@ impl App {
                                     .contains(&result.session.file_path)
                                 {
                                     dropped_hidden += 1;
-                                    hidden_still_present
-                                        .insert(result.session.file_path.clone());
+                                    hidden_still_present.insert(result.session.file_path.clone());
                                     trace!(
                                         "dropping hidden-deleted hit id={} path={}",
                                         response.request_id,
@@ -1155,10 +1258,52 @@ impl App {
             Overlay::Filters(FilterModalState::new(&self.scope, &self.filters, self.sort));
     }
 
+    fn toggle_scope(&mut self) -> Result<()> {
+        self.scope = match &self.scope {
+            Scope::Global => self.local_scope.clone(),
+            Scope::CurrentDir(..) => Scope::Global,
+        };
+        self.trigger_search_now()
+    }
+
     fn open_viewer(&mut self) {
         if self.selected_index().is_some() {
             let _ = self.selected_preview();
+            self.pending_main_menu_action = false;
+            self.pending_list_click = None;
+            self.pending_action_menu_click = None;
             self.overlay = Overlay::Viewer(ViewerState::with_search(&self.committed_query));
+        }
+    }
+
+    fn handle_pending_main_menu_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if !self.pending_main_menu_action {
+            return Ok(false);
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.pending_main_menu_action = false;
+                Ok(true)
+            }
+            KeyCode::Char('?') if key.modifiers.is_empty() => {
+                self.pending_main_menu_action = false;
+                self.open_help(HelpTab::SessionList);
+                Ok(true)
+            }
+            KeyCode::Char(ch) if key.modifiers.is_empty() => {
+                if let Some(action) = actions::action_for_key(ch) {
+                    self.pending_main_menu_action = false;
+                    self.run_session_action(action)?;
+                    return Ok(true);
+                }
+                self.pending_main_menu_action = false;
+                Ok(false)
+            }
+            _ => {
+                self.pending_main_menu_action = false;
+                Ok(false)
+            }
         }
     }
 
@@ -1204,11 +1349,9 @@ impl App {
     fn build_summary_preview_text(&mut self, path: &Path, theme: &Theme) -> Text<'static> {
         self.ensure_summary_cache(path);
         match self.summary_cache.get(path).and_then(|opt| opt.as_ref()) {
-            Some(entry) => preview::render_summary_text(
-                &entry.sidecar,
-                Some(&entry.fingerprint),
-                theme,
-            ),
+            Some(entry) => {
+                preview::render_summary_text(&entry.sidecar, Some(&entry.fingerprint), theme)
+            }
             None => {
                 let msg = if self.summary_inflight.contains(path) {
                     "Summary is being generated…"
@@ -1355,7 +1498,7 @@ impl App {
 
     fn local_scope_label(&self) -> String {
         match &self.local_scope {
-            Scope::Global => "All Projects".to_owned(),
+            Scope::Global => "Global".to_owned(),
             Scope::CurrentDir(path, _) => path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -1477,7 +1620,10 @@ impl App {
                     hit.session.file_path.display()
                 );
                 self.statusline = Some(statusline::Entry::completed(if file_already_missing {
-                    format!("removed missing session {}", file_label(&hit.session.file_path))
+                    format!(
+                        "removed missing session {}",
+                        file_label(&hit.session.file_path)
+                    )
                 } else {
                     format!("deleted {}", file_label(&hit.session.file_path))
                 }));
@@ -1602,7 +1748,6 @@ impl App {
         );
         frame.render_widget(paragraph, popup);
     }
-
 }
 
 fn search_worker_loop(
@@ -1619,8 +1764,7 @@ fn search_worker_loop(
         for newer in request_rx.try_iter() {
             debug!(
                 "search_worker_loop superseding request id={} with newer id={}",
-                command.request_id,
-                newer.request_id
+                command.request_id, newer.request_id
             );
             command = newer;
         }
@@ -1946,7 +2090,7 @@ mod tests {
     use std::sync::mpsc;
 
     use anyhow::anyhow;
-    use ratatui::crossterm::event::KeyCode;
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
     use tempfile::TempDir;
     use tui_input::Input;
@@ -1962,7 +2106,8 @@ mod tests {
 
     use super::{
         build_fork_command, build_resume_command, export_stem_for_session, finalize_run_result,
-        write_session_export, App, AppExit, SearchResponse, SearchWorker, PAGE_STEP,
+        write_session_export, ActionMenuState, App, AppExit, SearchResponse, SearchWorker,
+        PAGE_STEP,
     };
     use crate::scan::AgentHomes;
     use crate::summary::SummaryWorker;
@@ -2075,6 +2220,136 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_j_moves_selection_on_main_screen() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude), sample_hit(Agent::Codex)];
+        app.selected = 0;
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn ctrl_k_moves_selection_on_main_screen() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude), sample_hit(Agent::Codex)];
+        app.selected = 1;
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn ctrl_x_then_v_opens_viewer() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        app.handle_key(crossterm_key(KeyCode::Char('v'))).unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+    }
+
+    #[test]
+    fn ctrl_x_then_d_opens_delete_confirmation() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        app.handle_key(crossterm_key(KeyCode::Char('d'))).unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::ConfirmDelete));
+    }
+
+    #[test]
+    fn ctrl_x_then_ctrl_f_cancels_prefix_and_opens_filters() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+
+        assert!(!app.pending_main_menu_action);
+        assert!(matches!(app.overlay, super::Overlay::Filters(_)));
+    }
+
+    #[test]
+    fn ctrl_p_toggles_preview_visibility() {
+        let mut app = test_app();
+        let visible_before = app.preview_visible;
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+
+        assert_eq!(app.preview_visible, !visible_before);
+    }
+
+    #[test]
+    fn ctrl_g_toggles_scope_between_global_and_local() {
+        let mut app = test_app();
+        app.scope = Scope::Global;
+        app.pending_search = false;
+        app.last_edit_at = Some(std::time::Instant::now());
+        let (expected_local_path, expected_local_canonical) = match &app.local_scope {
+            Scope::CurrentDir(path, canonical) => (path.clone(), canonical.clone()),
+            Scope::Global => panic!("test app should have a local cwd scope"),
+        };
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+
+        match &app.scope {
+            Scope::CurrentDir(path, canonical) => {
+                assert_eq!(path, &expected_local_path);
+                assert_eq!(canonical, &expected_local_canonical);
+            }
+            Scope::Global => panic!("scope should switch to local"),
+        }
+        assert!(!app.pending_search);
+        assert!(app.last_edit_at.is_none());
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+
+        assert!(matches!(app.scope, Scope::Global));
+    }
+
+    #[test]
     fn question_mark_opens_help_from_main_screen() {
         let mut app = test_app();
 
@@ -2172,6 +2447,95 @@ mod tests {
 
         assert_eq!(app.selected, 0);
         assert_eq!(app.preview_scroll, PAGE_STEP);
+    }
+
+    #[test]
+    fn double_clicking_selected_list_item_opens_viewer() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude), sample_hit(Agent::Codex)];
+        app.last_layout = Some(layout::AppLayout {
+            search: Rect::new(0, 0, 120, 3),
+            list: Rect::new(0, 3, 60, 20),
+            preview: Some(Rect::new(60, 3, 60, 20)),
+            status: Rect::new(0, 23, 120, 2),
+        });
+
+        let row = app.last_layout.as_ref().unwrap().list.y + 2;
+        app.handle_mouse(crossterm_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            5,
+            row,
+        ))
+        .unwrap();
+        app.handle_mouse(crossterm_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            5,
+            row,
+        ))
+        .unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+    }
+
+    #[test]
+    fn double_click_survives_intermediate_mouse_up() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude), sample_hit(Agent::Codex)];
+        app.last_layout = Some(layout::AppLayout {
+            search: Rect::new(0, 0, 120, 3),
+            list: Rect::new(0, 3, 60, 20),
+            preview: Some(Rect::new(60, 3, 60, 20)),
+            status: Rect::new(0, 23, 120, 2),
+        });
+
+        let row = app.last_layout.as_ref().unwrap().list.y + 2;
+        app.handle_mouse(crossterm_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            5,
+            row,
+        ))
+        .unwrap();
+        app.handle_mouse(crossterm_mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            5,
+            row,
+        ))
+        .unwrap();
+        app.handle_mouse(crossterm_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            5,
+            row,
+        ))
+        .unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+    }
+
+    #[test]
+    fn double_clicking_action_menu_item_runs_it() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.overlay = super::Overlay::Actions(ActionMenuState::new());
+
+        let list = crate::tui::actions::list_area(Rect::new(0, 0, 120, 30));
+        let row = list.y;
+        let column = list.x;
+        app.last_frame_area = Rect::new(0, 0, 120, 30);
+
+        app.handle_overlay_mouse(crossterm_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+        ))
+        .unwrap();
+        app.handle_overlay_mouse(crossterm_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+        ))
+        .unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
     }
 
     #[test]
@@ -2282,7 +2646,10 @@ mod tests {
         response_tx
             .send(SearchResponse {
                 request_id: 7,
-                result: Ok(vec![sample_hit_with_path(Agent::Claude, deleted_path.clone())]),
+                result: Ok(vec![sample_hit_with_path(
+                    Agent::Claude,
+                    deleted_path.clone(),
+                )]),
             })
             .unwrap();
 
@@ -2406,8 +2773,7 @@ mod tests {
             response_rx,
         };
 
-        let summary_worker =
-            SummaryWorker::spawn().expect("spawn summary worker in test harness");
+        let summary_worker = SummaryWorker::spawn().expect("spawn summary worker in test harness");
         (
             App::new(
                 manager,
@@ -2435,10 +2801,27 @@ mod tests {
     }
 
     fn crossterm_key(code: KeyCode) -> ratatui::crossterm::event::KeyEvent {
-        ratatui::crossterm::event::KeyEvent::new(
-            code,
-            ratatui::crossterm::event::KeyModifiers::NONE,
-        )
+        crossterm_key_mods(code, ratatui::crossterm::event::KeyModifiers::NONE)
+    }
+
+    fn crossterm_key_mods(
+        code: KeyCode,
+        modifiers: ratatui::crossterm::event::KeyModifiers,
+    ) -> ratatui::crossterm::event::KeyEvent {
+        ratatui::crossterm::event::KeyEvent::new(code, modifiers)
+    }
+
+    fn crossterm_mouse(
+        kind: MouseEventKind,
+        column: u16,
+        row: u16,
+    ) -> ratatui::crossterm::event::MouseEvent {
+        ratatui::crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        }
     }
 
     fn sample_hit(agent: Agent) -> SearchHit {

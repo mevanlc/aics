@@ -143,17 +143,13 @@ fn long_lived_search_engine_drops_deleted_sessions_after_sync() -> Result<()> {
     manager.sync_with_roots(&roots, true)?;
     let engine = manager.open_search_engine()?;
     let before = engine.search(&request)?;
-    assert!(before
-        .iter()
-        .any(|hit| hit.session.file_path == deleted));
+    assert!(before.iter().any(|hit| hit.session.file_path == deleted));
 
     fs::remove_file(&deleted)?;
     manager.sync_with_roots(&roots, false)?;
 
     let after = engine.search(&request)?;
-    assert!(!after
-        .iter()
-        .any(|hit| hit.session.file_path == deleted));
+    assert!(!after.iter().any(|hit| hit.session.file_path == deleted));
     Ok(())
 }
 

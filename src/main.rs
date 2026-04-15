@@ -386,7 +386,11 @@ fn render_palettes() -> String {
         .into_iter()
         .map(|(label, theme)| render_palette_column(label, theme, &shared_pairs))
         .collect();
-    let body_rows = columns.iter().map(|column| column.lines.len()).max().unwrap_or(0);
+    let body_rows = columns
+        .iter()
+        .map(|column| column.lines.len())
+        .max()
+        .unwrap_or(0);
 
     let mut out = String::new();
     out.push_str(&join_row(
@@ -465,7 +469,11 @@ fn render_palette_column(
         ));
     }
 
-    PaletteColumn { label, width, lines }
+    PaletteColumn {
+        label,
+        width,
+        lines,
+    }
 }
 
 fn find_palette_entry(entries: &[PaletteEntry], name: &str) -> PaletteEntry {
@@ -535,7 +543,11 @@ fn contrast_score(left: Color, right: Color) -> f32 {
     (brightness(left) - brightness(right)).abs()
 }
 
-fn average_contrast(theme_entries: &[Vec<PaletteEntry>], background_name: &str, foreground_name: &str) -> f32 {
+fn average_contrast(
+    theme_entries: &[Vec<PaletteEntry>],
+    background_name: &str,
+    foreground_name: &str,
+) -> f32 {
     let total: f32 = theme_entries
         .iter()
         .map(|entries| {
@@ -728,8 +740,14 @@ mod tests {
         let fg_names: Vec<_> = pairs.iter().map(|(_, fg)| *fg).collect();
 
         assert_eq!(pairs.len(), entries.len());
-        assert_eq!(bg_names.iter().copied().collect::<HashSet<_>>().len(), entries.len());
-        assert_eq!(fg_names.iter().copied().collect::<HashSet<_>>().len(), entries.len());
+        assert_eq!(
+            bg_names.iter().copied().collect::<HashSet<_>>().len(),
+            entries.len()
+        );
+        assert_eq!(
+            fg_names.iter().copied().collect::<HashSet<_>>().len(),
+            entries.len()
+        );
         assert!(pairs.iter().all(|(bg, fg)| bg != fg));
     }
 
