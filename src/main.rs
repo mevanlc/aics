@@ -16,7 +16,7 @@ use aics::index::{
 use aics::live::LiveSessionTracker;
 use aics::parse::Agent;
 use aics::scan::ResolvedPaths;
-use aics::settings::Settings;
+use aics::settings::{config_dir, Settings};
 use aics::tui::run_app;
 use aics::tui::theme::{PaletteEntry, Theme};
 
@@ -157,9 +157,31 @@ impl From<CliSort> for SortMode {
     }
 }
 
+/// When running in TUI mode redirect log output to a file so it doesn't bleed
+/// through onto the terminal. In `--json` / non-TUI mode keep writing to stderr.
+fn init_logging(cli: &Cli) {
+    let mut builder = env_logger::Builder::from_env(Env::default().default_filter_or("warn"));
+    if !cli.json {
+        // Try to open the log file; fall back silently to stderr if we can't.
+        if let Ok(dir) = config_dir() {
+            if std::fs::create_dir_all(&dir).is_ok() {
+                let log_path = dir.join("aics.log");
+                if let Ok(file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                {
+                    builder.target(env_logger::Target::Pipe(Box::new(file)));
+                }
+            }
+        }
+    }
+    builder.init();
+}
+
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(Env::default().default_filter_or("warn")).init();
     let cli = Cli::parse();
+    init_logging(&cli);
     if cli.print_palettes {
         print!("{}", render_palettes());
         return Ok(());

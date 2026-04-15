@@ -7,6 +7,12 @@
 
 use std::time::{Duration, Instant};
 
+/// Replace newlines/carriage-returns with spaces so the label never breaks
+/// the single-line titlebar rendering.
+fn sanitize(s: String) -> String {
+    s.replace(['\n', '\r'], " ")
+}
+
 pub const AUTO_HIDE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
@@ -26,7 +32,7 @@ impl Entry {
     pub fn completed(label: impl Into<String>) -> Self {
         Self {
             kind: EntryKind::Completed,
-            label: label.into(),
+            label: sanitize(label.into()),
             at: Instant::now(),
         }
     }
@@ -34,7 +40,7 @@ impl Entry {
     pub fn failed(label: impl Into<String>) -> Self {
         Self {
             kind: EntryKind::Failed,
-            label: label.into(),
+            label: sanitize(label.into()),
             at: Instant::now(),
         }
     }

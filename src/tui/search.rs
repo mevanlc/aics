@@ -9,6 +9,31 @@ use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
+    let scope_label = app.scope_label();
+    let status_text = app.title_status_text();
+
+    // ─Search · {scope} · {status}
+    // The top border is area.width chars wide; corners take 1 char each, so
+    // the title content must fit within area.width - 2.  The "─" prepended by
+    // block_title counts as 1 char.
+    let fixed_width = 1  // "─" from block_title
+        + "Search".chars().count()
+        + " · ".chars().count()
+        + scope_label.chars().count()
+        + " · ".chars().count();
+    let status_budget = (area.width as usize)
+        .saturating_sub(2 + fixed_width); // 2 for the two border corners
+    let status_text: std::borrow::Cow<str> = if status_text.chars().count() <= status_budget {
+        status_text.into()
+    } else {
+        // Truncate, leaving room for the ellipsis character.
+        let truncated: String = status_text
+            .chars()
+            .take(status_budget.saturating_sub(1))
+            .collect();
+        format!("{truncated}…").into()
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -16,12 +41,12 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         .title(block_title(Line::from(vec![
             Span::styled("Search", Style::default().fg(theme.accent)),
             Span::styled(
-                format!(" · {}", app.scope_label()),
+                format!(" · {scope_label}"),
                 Style::default().fg(theme.muted),
             ),
             Span::styled(" · ", Style::default().fg(theme.muted)),
             Span::styled(
-                app.title_status_text(),
+                status_text,
                 Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
             ),
         ])));

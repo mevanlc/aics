@@ -12,11 +12,12 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use log::{debug, warn};
 
+use crate::settings::config_dir;
 use crate::summary::sidecar::{sidecar_path, SummarySidecar};
 use crate::summary::staleness::fingerprint;
 use crate::summary::template::{expand, expand_shell};
@@ -107,9 +108,11 @@ fn worker_loop(rx: Receiver<SummaryCommand>, tx: Sender<SummaryEvent>) {
             },
             Err(error) => {
                 warn!("summary job failed for {}: {error:#}", path.display());
+                let msg = format!("{error:#}");
+                append_error_log(&path, &msg);
                 SummaryEvent::Failed {
                     path: path.clone(),
-                    error: format!("{error:#}"),
+                    error: msg,
                 }
             }
         };
@@ -197,6 +200,40 @@ fn run_one(command: &SummaryCommand) -> Result<PathBuf> {
 
     let _ = fs::remove_dir_all(&work_dir);
     Ok(target)
+}
+
+/// Appends a timestamped error entry to `summarizer_errors.log` in the
+/// config directory (the same directory that holds `settings.json`).
+/// Failures here are non-fatal — we just warn and move on.
+fn append_error_log(jsonl_path: &std::path::Path, error: &str) {
+    let dir = match config_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("could not locate config dir to write error log: {e}");
+            return;
+        }
+    };
+    if let Err(e) = fs::create_dir_all(&dir) {
+        warn!("could not create config dir {}: {e}", dir.display());
+        return;
+    }
+    let log_path = dir.join("summarizer_errors.log");
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+    let entry = format!(
+        "[{secs}] session: {}\nerror: {error}\n\n",
+        jsonl_path.display()
+    );
+    if let Err(e) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .and_then(|mut f| f.write_all(entry.as_bytes()))
+    {
+        warn!("failed to write summarizer error log {}: {e}", log_path.display());
+    }
 }
 
 fn create_work_dir() -> Result<PathBuf> {

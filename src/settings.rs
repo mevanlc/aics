@@ -173,12 +173,17 @@ impl Settings {
 
 
 fn settings_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("settings.json"))
+}
+
+/// Returns the directory that contains `settings.json`.
+pub fn config_dir() -> Result<PathBuf> {
     if let Ok(val) = std::env::var("AICS_CONFIG_ROOT") {
-        return Ok(PathBuf::from(val).join("settings.json"));
+        return Ok(PathBuf::from(val));
     }
     let project_dirs =
         ProjectDirs::from("", "", "aics").context("failed to locate config directory")?;
-    Ok(project_dirs.config_dir().join("settings.json"))
+    Ok(project_dirs.config_dir().to_owned())
 }
 
 #[cfg(test)]
