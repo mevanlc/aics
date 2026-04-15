@@ -37,12 +37,13 @@ use crate::index::{
     IndexManager, Scope, SearchEngine, SearchFilters, SearchHit, SearchRequest, SortMode,
     SyncOutcome,
 };
-use crate::parse::{parse_session_file, MessageRole, Session};
+use crate::parse::claude::read_claude_autosummary;
+use crate::parse::{parse_session_file, Agent, MessageRole, Session};
 use crate::scan::AgentHomes;
 use crate::settings::{Settings, ThemeName};
 use crate::summary::sidecar::sidecar_path;
 use crate::summary::staleness::fingerprint as compute_fingerprint;
-use crate::summary::{Fingerprint, SummaryCommand, SummaryEvent, SummarySidecar, SummaryWorker};
+use crate::summary::{SummaryCommand, SummaryEvent, SummaryPreview, SummaryWorker};
 use crate::tui::actions::{self, ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::filter::{FilterModalState, FilterOutcome};
 use crate::tui::help::{HelpModalState, HelpOutcome, HelpTab};
@@ -106,12 +107,6 @@ struct PreviewRenderCache {
     mode: PreviewMode,
     wrapped_height: Option<usize>,
     text: Text<'static>,
-}
-
-#[derive(Debug, Clone)]
-struct SummaryCacheEntry {
-    sidecar: SummarySidecar,
-    fingerprint: Fingerprint,
 }
 
 pub struct PreviewRenderState<'a> {
@@ -190,7 +185,7 @@ pub struct App {
     manager: IndexManager,
     worker: SearchWorker,
     summary_worker: SummaryWorker,
-    summary_cache: HashMap<PathBuf, Option<SummaryCacheEntry>>,
+    summary_cache: HashMap<PathBuf, Option<SummaryPreview>>,
     summary_inflight: HashSet<PathBuf>,
     preview_mode: PreviewMode,
     statusline: Option<statusline::Entry>,
@@ -452,6 +447,7 @@ impl App {
         theme: &Theme,
     ) -> Option<PreviewRenderState<'a>> {
         let hit = self.results.get(self.selected)?;
+        let agent = hit.session.agent;
         let path = hit.session.file_path.clone();
         let query = self.committed_query.clone();
         let width = area.width.saturating_sub(2);
@@ -473,7 +469,7 @@ impl App {
                     let session = self.selected_preview()?;
                     preview::render_session_text(session, theme, highlight_query)
                 }
-                PreviewMode::Summary => self.build_summary_preview_text(&path, theme),
+                PreviewMode::Summary => self.build_summary_preview_text(agent, &path, theme),
             };
             self.preview_render_cache = Some(PreviewRenderCache {
                 path: path.clone(),
@@ -1346,28 +1342,31 @@ impl App {
         self.preview_scroll = 0;
     }
 
-    fn build_summary_preview_text(&mut self, path: &Path, theme: &Theme) -> Text<'static> {
-        self.ensure_summary_cache(path);
+    fn build_summary_preview_text(
+        &mut self,
+        agent: Agent,
+        path: &Path,
+        theme: &Theme,
+    ) -> Text<'static> {
+        self.ensure_summary_cache(agent, path);
         match self.summary_cache.get(path).and_then(|opt| opt.as_ref()) {
-            Some(entry) => {
-                preview::render_summary_text(&entry.sidecar, Some(&entry.fingerprint), theme)
-            }
+            Some(entry) => preview::render_summary_text(entry, theme),
             None => {
                 let msg = if self.summary_inflight.contains(path) {
                     "Summary is being generated…"
                 } else {
-                    "No summary for this session."
+                    "No summary is available for this session."
                 };
-                preview::render_summary_missing(theme, msg)
+                preview::render_summary_missing(theme, msg, !self.summary_inflight.contains(path))
             }
         }
     }
 
-    fn ensure_summary_cache(&mut self, path: &Path) {
+    fn ensure_summary_cache(&mut self, agent: Agent, path: &Path) {
         if self.summary_cache.contains_key(path) {
             return;
         }
-        let entry = load_summary_cache_entry(path);
+        let entry = load_summary_preview(agent, path);
         self.summary_cache.insert(path.to_path_buf(), entry);
     }
 
@@ -1863,32 +1862,48 @@ fn file_label(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn load_summary_cache_entry(path: &Path) -> Option<SummaryCacheEntry> {
+fn load_summary_preview(agent: Agent, path: &Path) -> Option<SummaryPreview> {
     let sidecar_target = sidecar_path(path);
-    if !sidecar_target.exists() {
+    if sidecar_target.exists() {
+        match crate::summary::SummarySidecar::read(&sidecar_target) {
+            Ok(sidecar) => match compute_fingerprint(path) {
+                Ok(fingerprint) => {
+                    return Some(SummaryPreview::AicsSidecar {
+                        sidecar,
+                        fingerprint,
+                    });
+                }
+                Err(err) => {
+                    warn!("failed to fingerprint {}: {err:#}", path.display());
+                }
+            },
+            Err(err) => {
+                warn!(
+                    "failed to read sidecar {}: {err:#}",
+                    sidecar_target.display()
+                );
+            }
+        }
+    }
+
+    if agent != Agent::Claude {
         return None;
     }
-    let sidecar = match SummarySidecar::read(&sidecar_target) {
-        Ok(s) => s,
+
+    match read_claude_autosummary(path) {
+        Ok(Some(summary)) => Some(SummaryPreview::ClaudeAutosummary {
+            body: summary.body,
+            generated_at: summary.timestamp,
+        }),
+        Ok(None) => None,
         Err(err) => {
             warn!(
-                "failed to read sidecar {}: {err:#}",
-                sidecar_target.display()
+                "failed to read Claude autosummary from {}: {err:#}",
+                path.display()
             );
-            return None;
+            None
         }
-    };
-    let fingerprint = match compute_fingerprint(path) {
-        Ok(fp) => fp,
-        Err(err) => {
-            warn!("failed to fingerprint {}: {err:#}", path.display());
-            return None;
-        }
-    };
-    Some(SummaryCacheEntry {
-        sidecar,
-        fingerprint,
-    })
+    }
 }
 
 fn is_help_key(key: KeyEvent) -> bool {
@@ -2110,7 +2125,7 @@ mod tests {
         PAGE_STEP,
     };
     use crate::scan::AgentHomes;
-    use crate::summary::SummaryWorker;
+    use crate::summary::{SummarizeBackend, SummaryPreview, SummarySidecar, SummaryWorker};
 
     #[test]
     fn builds_resume_commands_for_both_agents() {
@@ -2578,6 +2593,56 @@ mod tests {
 
         app.handle_search_key(crossterm_key(KeyCode::Home)).unwrap();
         assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn summary_loader_prefers_aics_sidecar_over_claude_autosummary() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("session.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"Claude autosummary\",\"timestamp\":\"2026-04-15T13:25:59.006Z\",\"sessionId\":\"summary-test\"}\n",
+        )
+        .unwrap();
+        let fingerprint = super::compute_fingerprint(&path).unwrap();
+        let sidecar = SummarySidecar::new(
+            &path,
+            &fingerprint,
+            SummarizeBackend::Claude,
+            "AICS sidecar".to_owned(),
+        );
+        sidecar.write_atomic(&super::sidecar_path(&path)).unwrap();
+
+        let summary = super::load_summary_preview(Agent::Claude, &path).expect("summary source");
+        match summary {
+            SummaryPreview::AicsSidecar { sidecar, .. } => {
+                assert_eq!(sidecar.body.trim(), "AICS sidecar");
+            }
+            other => panic!("expected sidecar summary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn summary_loader_falls_back_to_claude_autosummary_when_sidecar_is_invalid() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("session.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"Earlier summary\",\"timestamp\":\"2026-04-15T13:20:00.000Z\",\"sessionId\":\"summary-test\"}\n",
+                "{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"Latest summary\",\"timestamp\":\"2026-04-15T13:25:59.006Z\",\"sessionId\":\"summary-test\"}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(super::sidecar_path(&path), "not frontmatter").unwrap();
+
+        let summary = super::load_summary_preview(Agent::Claude, &path).expect("summary source");
+        match summary {
+            SummaryPreview::ClaudeAutosummary { body, .. } => {
+                assert_eq!(body, "Latest summary");
+            }
+            other => panic!("expected Claude autosummary, got {other:?}"),
+        }
     }
 
     #[test]

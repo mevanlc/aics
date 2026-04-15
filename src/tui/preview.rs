@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::parse::{Agent, MessageRole, Session};
-use crate::summary::{Fingerprint, SummarySidecar};
+use crate::summary::SummaryPreview;
 use crate::tui::app::App;
 use crate::tui::markdown::render_markdown_message;
 use crate::tui::profile;
@@ -109,60 +109,94 @@ pub fn render_session_text(
     Text::from(lines)
 }
 
-/// Render a summary sidecar into a `Text` suitable for the preview pane.
-/// Prepends a single metadata line (backend · generated · FRESH/STALE) then
-/// the markdown body.
-pub fn render_summary_text(
-    sidecar: &SummarySidecar,
-    current_fingerprint: Option<&Fingerprint>,
-    theme: &Theme,
-) -> Text<'static> {
+/// Render a summary source into a `Text` suitable for the preview pane.
+/// Prepends a single metadata line then the markdown body.
+pub fn render_summary_text(summary: &SummaryPreview, theme: &Theme) -> Text<'static> {
     let _profile = profile::scope("preview.render_summary_text");
-    let fresh = current_fingerprint
-        .map(|fp| sidecar.is_fresh(fp))
-        .unwrap_or(true);
-    let (badge, badge_style) = if fresh {
-        (
-            "FRESH".to_owned(),
-            Style::default()
-                .fg(theme.highlight)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        let added = current_fingerprint
-            .map(|fp| fp.line_count.saturating_sub(sidecar.line_count))
-            .unwrap_or(0);
-        let label = if added > 0 {
-            format!("STALE · +{added} lines")
-        } else {
-            "STALE".to_owned()
-        };
-        (
-            label,
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-    };
-
-    let header = Line::from(vec![
-        Span::styled(
-            sidecar.backend.as_str().to_owned(),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" · ", Style::default().fg(theme.muted)),
-        Span::styled(
-            sidecar.generated_at.format("%Y-%m-%d %H:%M").to_string(),
-            Style::default().fg(theme.muted),
-        ),
-        Span::styled(" · ", Style::default().fg(theme.muted)),
-        Span::styled(badge, badge_style),
-    ]);
-
     let base = Style::default().fg(theme.text);
-    let body = render_markdown_message(&sidecar.body, theme, base, None);
+    let (header, body) = match summary {
+        SummaryPreview::AicsSidecar {
+            sidecar,
+            fingerprint,
+        } => {
+            let fresh = sidecar.is_fresh(fingerprint);
+            let (badge, badge_style) = if fresh {
+                (
+                    "FRESH".to_owned(),
+                    Style::default()
+                        .fg(theme.highlight)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                let added = fingerprint.line_count.saturating_sub(sidecar.line_count);
+                let label = if added > 0 {
+                    format!("STALE · +{added} lines")
+                } else {
+                    "STALE".to_owned()
+                };
+                (
+                    label,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )
+            };
+
+            (
+                Line::from(vec![
+                    Span::styled(
+                        "aics",
+                        Style::default()
+                            .fg(theme.highlight)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" · ", Style::default().fg(theme.muted)),
+                    Span::styled(
+                        sidecar.backend.as_str().to_owned(),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" · ", Style::default().fg(theme.muted)),
+                    Span::styled(
+                        sidecar.generated_at.format("%Y-%m-%d %H:%M").to_string(),
+                        Style::default().fg(theme.muted),
+                    ),
+                    Span::styled(" · ", Style::default().fg(theme.muted)),
+                    Span::styled(badge, badge_style),
+                ]),
+                render_markdown_message(&sidecar.body, theme, base, None),
+            )
+        }
+        SummaryPreview::ClaudeAutosummary { body, generated_at } => {
+            let mut spans = vec![
+                Span::styled(
+                    "built-in",
+                    Style::default()
+                        .fg(theme.highlight)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" · ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    "claude autosummary",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            if let Some(generated_at) = generated_at {
+                spans.push(Span::styled(" · ", Style::default().fg(theme.muted)));
+                spans.push(Span::styled(
+                    generated_at.format("%Y-%m-%d %H:%M").to_string(),
+                    Style::default().fg(theme.muted),
+                ));
+            }
+            (
+                Line::from(spans),
+                render_markdown_message(body, theme, base, None),
+            )
+        }
+    };
 
     let mut lines = Vec::with_capacity(body.lines.len() + 2);
     lines.push(header);
@@ -171,23 +205,30 @@ pub fn render_summary_text(
     Text::from(lines)
 }
 
-/// Rendered when `PreviewMode::Summary` is active but no sidecar is present
-/// (or it could not be read).
-pub fn render_summary_missing(theme: &Theme, message: &str) -> Text<'static> {
-    Text::from(vec![
+/// Rendered when `PreviewMode::Summary` is active but no summary source is
+/// available yet.
+pub fn render_summary_missing(
+    theme: &Theme,
+    message: &str,
+    show_generate_hint: bool,
+) -> Text<'static> {
+    let mut lines = vec![
         Line::default(),
         Line::from(Span::styled(
             message.to_owned(),
             Style::default().fg(theme.muted),
         )),
         Line::default(),
-        Line::from(Span::styled(
-            "Press Enter → s to generate one.",
+    ];
+    if show_generate_hint {
+        lines.push(Line::from(Span::styled(
+            "Press Enter → s to generate an AICS summary.",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
-        )),
-    ])
+        )));
+    }
+    Text::from(lines)
 }
 
 pub(crate) fn render_message_body(
@@ -233,11 +274,14 @@ fn scroll_limit_for_text(text: &Text<'_>, area: Rect) -> usize {
 mod tests {
     use std::path::PathBuf;
 
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
 
     use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionMessage};
+    use crate::summary::{Fingerprint, SummarizeBackend, SummaryPreview, SummarySidecar};
 
-    use super::{normalize_highlight_query, render_session_text};
+    use super::{
+        normalize_highlight_query, render_session_text, render_summary_missing, render_summary_text,
+    };
     use crate::tui::theme::Theme;
 
     #[test]
@@ -304,5 +348,91 @@ mod tests {
     fn normalize_highlight_query_uses_non_empty_search_text() {
         assert_eq!(normalize_highlight_query("alpha"), Some("alpha"));
         assert_eq!(normalize_highlight_query(""), None);
+    }
+
+    #[test]
+    fn render_summary_text_labels_aics_sidecar_source() {
+        let theme = Theme::default();
+        let summary = SummaryPreview::AicsSidecar {
+            sidecar: SummarySidecar {
+                schema: 1,
+                source_file: "session.jsonl".to_owned(),
+                line_count: 2,
+                last_line_sha256: "abc".repeat(21) + "a",
+                generated_at: Utc.with_ymd_and_hms(2026, 4, 15, 13, 25, 0).unwrap(),
+                backend: SummarizeBackend::Claude,
+                body: "Sidecar body".to_owned(),
+            },
+            fingerprint: Fingerprint {
+                line_count: 2,
+                last_line_sha256: "abc".repeat(21) + "a",
+            },
+        };
+
+        let text = render_summary_text(&summary, &theme);
+        let header = text.lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(header.contains("aics"));
+        assert!(header.contains("claude"));
+        assert!(header.contains("FRESH"));
+    }
+
+    #[test]
+    fn render_summary_text_labels_claude_autosummary_source() {
+        let theme = Theme::default();
+        let summary = SummaryPreview::ClaudeAutosummary {
+            body: "Autosummary body".to_owned(),
+            generated_at: Some(Utc.with_ymd_and_hms(2026, 4, 15, 13, 25, 59).unwrap()),
+        };
+
+        let text = render_summary_text(&summary, &theme);
+        let header = text.lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(header.contains("built-in"));
+        assert!(header.contains("claude autosummary"));
+        assert!(!header.contains("aics summary"));
+    }
+
+    #[test]
+    fn render_summary_missing_only_shows_generate_hint_when_requested() {
+        let theme = Theme::default();
+        let hidden = render_summary_missing(&theme, "missing", false);
+        let shown = render_summary_missing(&theme, "missing", true);
+
+        let hidden_lines = hidden
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let shown_lines = shown
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(hidden_lines
+            .iter()
+            .all(|line| !line.contains("generate an AICS summary")));
+        assert!(shown_lines
+            .iter()
+            .any(|line| line.contains("generate an AICS summary")));
     }
 }

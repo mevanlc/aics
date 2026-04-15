@@ -72,6 +72,57 @@ fn parses_claude_summary_session_without_crashing() -> Result<()> {
 }
 
 #[test]
+fn claude_away_summary_contributes_content_without_transcript_message() -> Result<()> {
+    let temp = TempDir::new()?;
+    let path = temp
+        .path()
+        .join(".claude/projects/-Users-testuser-projects-myapp/away-summary.jsonl");
+    write_text_file(
+        &path,
+        concat!(
+            "{\"parentUuid\":null,\"isSidechain\":false,\"userType\":\"external\",\"cwd\":\"/Users/testuser/projects/myapp\",\"sessionId\":\"away-summary-session\",\"version\":\"2.1.109\",\"gitBranch\":\"main\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"show git status\"},\"uuid\":\"uuid-1\",\"timestamp\":\"2026-04-15T13:20:00.000Z\"}\n",
+            "{\"parentUuid\":\"uuid-1\",\"isSidechain\":false,\"userType\":\"external\",\"cwd\":\"/Users/testuser/projects/myapp\",\"sessionId\":\"away-summary-session\",\"version\":\"2.1.109\",\"gitBranch\":\"main\",\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"working on it\"},\"uuid\":\"uuid-2\",\"timestamp\":\"2026-04-15T13:20:01.000Z\"}\n",
+            "{\"parentUuid\":\"uuid-2\",\"isSidechain\":false,\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"We implemented responsive cell variant-ladder truncation.\",\"timestamp\":\"2026-04-15T13:25:59.006Z\",\"uuid\":\"uuid-3\",\"isMeta\":false,\"userType\":\"external\",\"entrypoint\":\"cli\",\"cwd\":\"/Users/testuser/projects/myapp\",\"sessionId\":\"away-summary-session\",\"version\":\"2.1.109\",\"gitBranch\":\"main\",\"slug\":\"cryptic-popping-pie\"}\n"
+        ),
+    )?;
+
+    let session = parse_claude_session_file(&path)?.expect("expected Claude session");
+    assert_eq!(session.first_msg_role, Some(MessageRole::User));
+    assert_eq!(session.custom_title.as_deref(), Some("cryptic-popping-pie"));
+    assert!(session
+        .content
+        .contains("responsive cell variant-ladder truncation"));
+    assert!(session
+        .messages
+        .iter()
+        .all(|message| message.role != MessageRole::Summary));
+    assert_eq!(session.last_msg_content, "working on it");
+    Ok(())
+}
+
+#[test]
+fn claude_away_summary_only_file_becomes_summary_session() -> Result<()> {
+    let temp = TempDir::new()?;
+    let path = temp
+        .path()
+        .join(".claude/projects/-Users-testuser-projects-myapp/away-summary-only.jsonl");
+    write_text_file(
+        &path,
+        concat!(
+            "{\"parentUuid\":null,\"isSidechain\":false,\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"All 60 tests pass. Next: review the rendering.\",\"timestamp\":\"2026-04-15T13:25:59.006Z\",\"uuid\":\"uuid-1\",\"isMeta\":false,\"userType\":\"external\",\"entrypoint\":\"cli\",\"cwd\":\"/Users/testuser/projects/myapp\",\"sessionId\":\"away-summary-only\",\"version\":\"2.1.109\",\"gitBranch\":\"main\",\"slug\":\"away-only\"}\n"
+        ),
+    )?;
+
+    let session = parse_claude_session_file(&path)?.expect("expected summary-only session");
+    assert_eq!(session.first_msg_role, Some(MessageRole::Summary));
+    assert!(session
+        .first_msg_content
+        .contains("All 60 tests pass. Next: review the rendering."));
+    assert_eq!(session.custom_title.as_deref(), Some("away-only"));
+    Ok(())
+}
+
+#[test]
 fn parses_claude_rich_content_blocks() -> Result<()> {
     let temp = TempDir::new()?;
     let path = copy_fixture(

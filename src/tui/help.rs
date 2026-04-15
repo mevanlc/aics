@@ -91,7 +91,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 19] = [
     HelpItem::new(
         "^Y",
         "toggle summary",
-        "Switch the preview pane between the session transcript and the summary sidecar view for the selected session.",
+        "Switch the preview pane between the session transcript and the available summary view for the selected session.",
     ),
     HelpItem::new(
         "^H / ^L",

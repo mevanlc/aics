@@ -10,10 +10,16 @@ use serde_json::Value;
 use super::session::{
     earliest_timestamp, fallback_session_id, first_message_fields, first_user_message,
     infer_derivation_type, last_message_fields, latest_timestamp, metadata_created,
-    metadata_modified, modified_ts, push_tool_message, push_unique_chunk, push_unique_message,
-    Agent, MessageRole, Session,
+    metadata_modified, modified_ts, nonempty_trimmed, push_tool_message, push_unique_chunk,
+    push_unique_message, Agent, MessageRole, Session,
 };
 use super::tool_format;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeAutosummary {
+    pub body: String,
+    pub timestamp: Option<DateTime<Utc>>,
+}
 
 pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Session>> {
     let path = path.as_ref();
@@ -71,6 +77,10 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             custom_title = Some(title.to_owned());
         }
 
+        session_id = session_id.or_else(|| string_field(&value, "sessionId"));
+        cwd = cwd.or_else(|| string_field(&value, "cwd"));
+        branch = branch.or_else(|| string_field(&value, "gitBranch"));
+
         if value
             .get("isSidechain")
             .and_then(Value::as_bool)
@@ -87,11 +97,13 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
         );
 
         match entry_type {
+            "system" if is_away_summary(&value) => {
+                if let Some(summary) = extract_claude_summary_text(&value) {
+                    push_unique_chunk(&mut summary_chunks, summary.clone());
+                    push_unique_chunk(&mut content_chunks, summary);
+                }
+            }
             "user" | "assistant" | "system" => {
-                session_id = session_id.or_else(|| string_field(&value, "sessionId"));
-                cwd = cwd.or_else(|| string_field(&value, "cwd"));
-                branch = branch.or_else(|| string_field(&value, "gitBranch"));
-
                 let Some(role) = extract_message_role(&value) else {
                     continue;
                 };
@@ -140,8 +152,8 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
                 }
             }
             "summary" => {
-                if let Some(summary) = value.get("summary").and_then(Value::as_str) {
-                    push_unique_chunk(&mut summary_chunks, summary);
+                if let Some(summary) = extract_claude_summary_text(&value) {
+                    push_unique_chunk(&mut summary_chunks, summary.clone());
                     push_unique_chunk(&mut content_chunks, summary);
                 }
 
@@ -200,6 +212,50 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
     }))
 }
 
+pub fn read_claude_autosummary(path: impl AsRef<Path>) -> Result<Option<ClaudeAutosummary>> {
+    let path = path.as_ref();
+    let file = File::open(path)
+        .with_context(|| format!("failed to open Claude session {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut latest = None;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                warn!(
+                    "skipping unreadable Claude line in {} while reading autosummary: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let value: Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(
+                    "skipping malformed Claude JSON in {} while reading autosummary: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+
+        if let Some(body) = extract_claude_summary_text(&value) {
+            latest = Some(ClaudeAutosummary {
+                body,
+                timestamp: extract_timestamp(&value),
+            });
+        }
+    }
+
+    Ok(latest)
+}
+
 fn extract_message_role(value: &Value) -> Option<MessageRole> {
     match value
         .get("message")
@@ -212,6 +268,20 @@ fn extract_message_role(value: &Value) -> Option<MessageRole> {
         Some("system") => Some(MessageRole::System),
         _ => None,
     }
+}
+
+fn is_away_summary(value: &Value) -> bool {
+    value.get("subtype").and_then(Value::as_str) == Some("away_summary")
+}
+
+fn extract_claude_summary_text(value: &Value) -> Option<String> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("summary") => value.get("summary").and_then(Value::as_str),
+        Some("system") if is_away_summary(value) => value.get("content").and_then(Value::as_str),
+        _ => None,
+    }
+    .map(normalize_claude_text)
+    .and_then(nonempty_trimmed)
 }
 
 enum MessageBlock {

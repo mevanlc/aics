@@ -4,6 +4,7 @@
 //! [`SummaryWorker`] once and send [`SummaryCommand`]s; completed or failed
 //! jobs arrive as [`SummaryEvent`]s.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub mod prompt;
@@ -16,6 +17,18 @@ pub use sidecar::{sidecar_path, SummarySidecar};
 pub use staleness::{fingerprint, Fingerprint};
 pub use template::{expand, TemplateError};
 pub use worker::{SummaryCommand, SummaryEvent, SummaryStatus, SummaryWorker};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SummaryPreview {
+    AicsSidecar {
+        sidecar: SummarySidecar,
+        fingerprint: Fingerprint,
+    },
+    ClaudeAutosummary {
+        body: String,
+        generated_at: Option<DateTime<Utc>>,
+    },
+}
 
 /// Which CLI the summarizer should invoke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
