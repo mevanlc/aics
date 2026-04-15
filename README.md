@@ -27,6 +27,17 @@ From source:
 cargo install --path .
 ```
 
+## Screenshots
+
+<img src="https://i.imgur.com/AnwmZGF.png">
+
+<img src="https://i.imgur.com/p6LscZu.png">
+
+<img src="https://i.imgur.com/ZgzA25c.png">
+
+<img src="https://i.imgur.com/ePGG5sp.png">
+
+
 ## Usage
 
 ```bash
