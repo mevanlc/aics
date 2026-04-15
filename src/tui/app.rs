@@ -43,7 +43,7 @@ use crate::scan::AgentHomes;
 use crate::settings::{Settings, ThemeName};
 use crate::summary::sidecar::sidecar_path;
 use crate::summary::staleness::fingerprint as compute_fingerprint;
-use crate::summary::{SummaryCommand, SummaryEvent, SummaryPreview, SummaryWorker};
+use crate::summary::{SummaryCommand, SummaryEvent, SummaryPreview, SummarySidecar, SummaryWorker};
 use crate::tui::actions::{self, ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::filter::{FilterModalState, FilterOutcome};
 use crate::tui::help::{HelpModalState, HelpOutcome, HelpTab};
@@ -561,11 +561,12 @@ impl App {
         let local_scope_label = self.local_scope_label();
         let viewer_theme_name = self.current_frame_theme_name();
         let selected = self.selected;
-        let viewer_summary = self
+        let viewer_summary_target = self
             .results
             .get(selected)
-            .map(|hit| hit.session.file_path.clone())
-            .and_then(|path| self.summary_sidecar_for_path(&path));
+            .map(|hit| (hit.session.agent, hit.session.file_path.clone()));
+        let viewer_summary = viewer_summary_target
+            .and_then(|(agent, path)| self.summary_sidecar_for_path(agent, &path));
         let results = &self.results;
         let preview_cache = &self.preview_cache;
         match &mut self.overlay {
@@ -750,7 +751,7 @@ impl App {
             None
         };
         let viewer_summary = if let Some(session) = viewer_session.as_ref() {
-            self.summary_sidecar_for_path(&session.file_path)
+            self.summary_sidecar_for_path(session.agent, &session.file_path)
         } else {
             None
         };
@@ -1392,12 +1393,15 @@ impl App {
         self.summary_cache.insert(path.to_path_buf(), entry);
     }
 
-    fn summary_sidecar_for_path(&mut self, path: &Path) -> Option<SummarySidecar> {
-        self.ensure_summary_cache(path);
+    fn summary_sidecar_for_path(&mut self, agent: Agent, path: &Path) -> Option<SummarySidecar> {
+        self.ensure_summary_cache(agent, path);
         self.summary_cache
             .get(path)
             .and_then(|opt| opt.as_ref())
-            .map(|entry| entry.sidecar.clone())
+            .and_then(|entry| match entry {
+                SummaryPreview::AicsSidecar { sidecar, .. } => Some(sidecar.clone()),
+                SummaryPreview::ClaudeAutosummary { .. } => None,
+            })
     }
 
     fn invalidate_summary_cache(&mut self, path: &Path) {
@@ -1510,11 +1514,12 @@ impl App {
         let frame_area = self.last_frame_area;
         let theme_name = self.current_frame_theme_name();
         let selected = self.selected;
-        let viewer_summary = self
+        let viewer_summary_target = self
             .results
             .get(selected)
-            .map(|hit| hit.session.file_path.clone())
-            .and_then(|path| self.summary_sidecar_for_path(&path));
+            .map(|hit| (hit.session.agent, hit.session.file_path.clone()));
+        let viewer_summary = viewer_summary_target
+            .and_then(|(agent, path)| self.summary_sidecar_for_path(agent, &path));
         let viewer_session = self
             .results
             .get(selected)
