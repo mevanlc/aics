@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
@@ -14,11 +14,16 @@ use unicode_width::UnicodeWidthStr;
 use crate::parse::Session;
 use crate::search_query::extract_highlight_terms;
 use crate::settings::ThemeName;
+use crate::summary::SummarySidecar;
 use crate::tui::keymap_hint::{self, KeymapHint};
+use crate::tui::markdown::render_markdown_message;
 use crate::tui::preview::{render_message_body, render_session_text};
 use crate::tui::profile;
 use crate::tui::theme::Theme;
-use crate::tui::util::{block_title, session_message_label, wrapped_text_height};
+use crate::tui::util::{
+    abbreviate_home_path, agent_badge, block_title, format_line_count, relative_time,
+    session_display_title, session_message_label, wrapped_text_height,
+};
 
 const VIEWER_PAGE_STEP: usize = 12;
 const VIEWER_SEARCH_HEIGHT: u16 = 3; // bordered search input
@@ -30,7 +35,6 @@ const VIEWER_MATCH_SCROLLOFF: usize = 3;
 pub struct ViewerState {
     pub scroll: usize,
     search: Input,
-    editing_search: bool,
     active_match: Option<usize>,
     render_cache: Option<ViewerRenderCache>,
 }
@@ -41,6 +45,7 @@ struct ViewerRenderCache {
     query: String,
     width: u16,
     theme_name: ThemeName,
+    summary_stamp: Option<(i64, usize, usize)>,
     total_rows: usize,
     text: Text<'static>,
 }
@@ -64,12 +69,11 @@ pub(crate) enum MessageDirection {
 }
 
 impl ViewerState {
-    const HINTS: [KeymapHint; 6] = [
+    const HINTS: [KeymapHint; 5] = [
         KeymapHint::new("↑↓/PgUp/PgDn/Home/End", "scroll"),
         KeymapHint::new("^Up/^Dn", "message"),
-        KeymapHint::new("n/p", "matches"),
-        KeymapHint::new("Enter", "done"),
-        KeymapHint::new("?", "help"),
+        KeymapHint::new("^N/^P", "matches"),
+        KeymapHint::new("^U/^E", "edit"),
         KeymapHint::new("Esc", "close"),
     ];
 
@@ -81,7 +85,6 @@ impl ViewerState {
         Self {
             scroll: 0,
             search: Input::default().with_value(query.to_owned()),
-            editing_search: false,
             active_match: None,
             render_cache: None,
         }
@@ -91,95 +94,86 @@ impl ViewerState {
         self.search.value()
     }
 
-    pub fn is_editing_search(&self) -> bool {
-        self.editing_search
-    }
-
     pub fn handle_key(
         &mut self,
         key: KeyEvent,
         area: Rect,
         session: Option<&Session>,
+        summary: Option<&SummarySidecar>,
         theme: &Theme,
         theme_name: ThemeName,
     ) -> ViewerOutcome {
-        if self.editing_search {
-            match key.code {
-                KeyCode::Esc => {
-                    self.editing_search = false;
-                    ViewerOutcome::Stay
-                }
-                KeyCode::Enter => {
-                    self.editing_search = false;
-                    ViewerOutcome::Stay
-                }
-                _ => {
-                    let before = self.search.value().to_owned();
-                    self.search.handle_event(&Event::Key(key));
-                    if self.search.value() != before {
-                        self.active_match = None;
-                        self.render_cache = None;
-                    }
-                    ViewerOutcome::Stay
-                }
+        match key.code {
+            KeyCode::Esc => ViewerOutcome::Close,
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.jump_to_match(MatchDirection::Next, area, session, summary, theme, theme_name);
+                ViewerOutcome::Stay
             }
-        } else {
-            match key.code {
-                KeyCode::Char('q') if key.modifiers.is_empty() => ViewerOutcome::Close,
-                KeyCode::Esc => self.handle_escape(),
-                KeyCode::Char('/') if key.modifiers.is_empty() => {
-                    self.editing_search = true;
-                    ViewerOutcome::Stay
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.jump_to_match(
+                    MatchDirection::Previous,
+                    area,
+                    session,
+                    summary,
+                    theme,
+                    theme_name,
+                );
+                ViewerOutcome::Stay
+            }
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.jump_to_message(
+                    MessageDirection::Previous,
+                    area,
+                    session,
+                    summary,
+                    theme,
+                    theme_name,
+                );
+                ViewerOutcome::Stay
+            }
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.jump_to_message(
+                    MessageDirection::Next,
+                    area,
+                    session,
+                    summary,
+                    theme,
+                    theme_name,
+                );
+                ViewerOutcome::Stay
+            }
+            KeyCode::Up => {
+                self.scroll = self.scroll.saturating_sub(1);
+                ViewerOutcome::Stay
+            }
+            KeyCode::Down => {
+                self.scroll = self.scroll.saturating_add(1);
+                ViewerOutcome::Stay
+            }
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_sub(VIEWER_PAGE_STEP);
+                ViewerOutcome::Stay
+            }
+            KeyCode::PageDown => {
+                self.scroll = self.scroll.saturating_add(VIEWER_PAGE_STEP);
+                ViewerOutcome::Stay
+            }
+            KeyCode::Home => {
+                self.scroll = 0;
+                ViewerOutcome::Stay
+            }
+            KeyCode::End => {
+                self.scroll = usize::MAX / 4;
+                ViewerOutcome::Stay
+            }
+            _ => {
+                let before = self.search.value().to_owned();
+                self.search.handle_event(&Event::Key(key));
+                if self.search.value() != before {
+                    self.active_match = None;
+                    self.render_cache = None;
                 }
-                KeyCode::Char('n') => {
-                    self.jump_to_match(MatchDirection::Next, area, session, theme, theme_name);
-                    ViewerOutcome::Stay
-                }
-                KeyCode::Char('p') => {
-                    self.jump_to_match(MatchDirection::Previous, area, session, theme, theme_name);
-                    ViewerOutcome::Stay
-                }
-                KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                    self.jump_to_message(
-                        MessageDirection::Previous,
-                        area,
-                        session,
-                        theme,
-                        theme_name,
-                    );
-                    ViewerOutcome::Stay
-                }
-                KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                    self.jump_to_message(MessageDirection::Next, area, session, theme, theme_name);
-                    ViewerOutcome::Stay
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.scroll = self.scroll.saturating_sub(1);
-                    ViewerOutcome::Stay
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.scroll = self.scroll.saturating_add(1);
-                    ViewerOutcome::Stay
-                }
-                KeyCode::PageUp => {
-                    self.scroll = self.scroll.saturating_sub(VIEWER_PAGE_STEP);
-                    ViewerOutcome::Stay
-                }
-                KeyCode::PageDown => {
-                    self.scroll = self.scroll.saturating_add(VIEWER_PAGE_STEP);
-                    ViewerOutcome::Stay
-                }
-                KeyCode::Home | KeyCode::Char('g') if key.modifiers.is_empty() => {
-                    self.scroll = 0;
-                    ViewerOutcome::Stay
-                }
-                KeyCode::End | KeyCode::Char('G')
-                    if key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::End =>
-                {
-                    self.scroll = usize::MAX / 4;
-                    ViewerOutcome::Stay
-                }
-                _ => ViewerOutcome::Stay,
+                ViewerOutcome::Stay
             }
         }
     }
@@ -189,6 +183,7 @@ impl ViewerState {
         frame: &mut Frame,
         area: Rect,
         session: &Session,
+        summary: Option<&SummarySidecar>,
         theme: &Theme,
         theme_name: ThemeName,
     ) {
@@ -198,7 +193,7 @@ impl ViewerState {
         let body_area = chunks[0];
 
         let (total_rows, mut text) = {
-            let cache = self.render_cache(area, session, theme, theme_name);
+            let cache = self.render_cache(area, session, summary, theme, theme_name);
             (cache.total_rows, cache.text.clone())
         };
         if self.active_match.is_some() {
@@ -213,8 +208,8 @@ impl ViewerState {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(theme.border_style(true))
-                    .title(block_title(format!("Viewer · {scroll_percent}%"))),
+                    .border_style(theme.border_style(false))
+                    .title(block_title(viewer_title(session, theme, scroll_percent))),
             )
             .wrap(Wrap { trim: false })
             .scroll((scroll.min(u16::MAX as usize) as u16, 0));
@@ -235,35 +230,34 @@ impl ViewerState {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(theme.border_style(self.editing_search))
+                .border_style(theme.border_style(false))
                 .title(block_title(Span::styled(
                     "Search",
                     Style::default().fg(theme.accent),
                 )))
-                .title(search_focus_title(self.editing_search, theme)),
+                .title(search_focus_title(theme)),
         );
         frame.render_widget(search_bar, footer_chunks[0]);
 
         keymap_hint::render(frame, footer_chunks[1], &Self::HINTS, theme, "");
 
-        if self.editing_search {
-            let cursor_x = footer_chunks[0]
-                .x
-                .saturating_add(1 + self.search.visual_cursor() as u16)
-                .min(footer_chunks[0].right().saturating_sub(1));
-            frame.set_cursor_position((cursor_x, footer_chunks[0].y.saturating_add(1)));
-        }
+        let cursor_x = footer_chunks[0]
+            .x
+            .saturating_add(1 + self.search.visual_cursor() as u16)
+            .min(footer_chunks[0].right().saturating_sub(1));
+        frame.set_cursor_position((cursor_x, footer_chunks[0].y.saturating_add(1)));
     }
 
     pub fn max_scroll(
         &mut self,
         area: Rect,
         session: &Session,
+        summary: Option<&SummarySidecar>,
         theme: &Theme,
         theme_name: ThemeName,
     ) -> usize {
         let body_area = split_viewer(area)[0];
-        let cache = self.render_cache(area, session, theme, theme_name);
+        let cache = self.render_cache(area, session, summary, theme, theme_name);
         let viewport_height = body_area.height.saturating_sub(2) as usize;
         cache.total_rows.saturating_sub(viewport_height)
     }
@@ -272,23 +266,12 @@ impl ViewerState {
         split_viewer(area)[0]
     }
 
-    fn handle_escape(&mut self) -> ViewerOutcome {
-        if self.search.value().is_empty() {
-            return ViewerOutcome::Close;
-        }
-
-        self.search = Input::default();
-        self.editing_search = false;
-        self.active_match = None;
-        self.render_cache = None;
-        ViewerOutcome::Stay
-    }
-
     fn jump_to_match(
         &mut self,
         direction: MatchDirection,
         area: Rect,
         session: Option<&Session>,
+        summary: Option<&SummarySidecar>,
         theme: &Theme,
         theme_name: ThemeName,
     ) {
@@ -300,7 +283,7 @@ impl ViewerState {
         let query = self.search.value();
         let body_area = Self::body_area(area);
         let viewport_width = body_area.width.saturating_sub(2);
-        let matches = collect_match_rows(session, theme, query, viewport_width);
+        let matches = collect_match_rows(session, summary, theme, query, viewport_width);
         if matches.is_empty() {
             self.active_match = None;
             return;
@@ -314,7 +297,7 @@ impl ViewerState {
         };
 
         self.active_match = Some(next_index);
-        let max_scroll = self.max_scroll(area, session, theme, theme_name);
+        let max_scroll = self.max_scroll(area, session, summary, theme, theme_name);
         let viewport_height = body_area.height.saturating_sub(2) as usize;
         self.scroll = scroll_for_match(matches[next_index], viewport_height, max_scroll);
     }
@@ -324,6 +307,7 @@ impl ViewerState {
         direction: MessageDirection,
         area: Rect,
         session: Option<&Session>,
+        summary: Option<&SummarySidecar>,
         theme: &Theme,
         theme_name: ThemeName,
     ) {
@@ -333,12 +317,12 @@ impl ViewerState {
 
         let body_area = Self::body_area(area);
         let viewport_width = body_area.width.saturating_sub(2);
-        let rows = collect_message_rows(session, theme, viewport_width);
+        let rows = collect_message_rows(session, summary, theme, viewport_width);
         let Some(target_row) = message_row_for_scroll(&rows, self.scroll, direction) else {
             return;
         };
 
-        let max_scroll = self.max_scroll(area, session, theme, theme_name);
+        let max_scroll = self.max_scroll(area, session, summary, theme, theme_name);
         self.scroll = target_row.min(max_scroll);
     }
 
@@ -346,6 +330,7 @@ impl ViewerState {
         &mut self,
         area: Rect,
         session: &Session,
+        summary: Option<&SummarySidecar>,
         theme: &Theme,
         theme_name: ThemeName,
     ) -> &ViewerRenderCache {
@@ -353,23 +338,26 @@ impl ViewerState {
         let width = body_area.width.saturating_sub(2);
         let path = session.file_path.clone();
         let query = self.search.value().to_owned();
+        let summary_stamp = summary.map(summary_stamp);
 
         let cache_miss = self.render_cache.as_ref().is_none_or(|cache| {
             cache.path != path
                 || cache.query != query
                 || cache.width != width
                 || cache.theme_name != theme_name
+                || cache.summary_stamp != summary_stamp
         });
         if cache_miss {
             profile::event("viewer.cache.miss");
             let highlight_query = (!query.is_empty()).then_some(query.as_str());
-            let text = render_session_text(session, theme, highlight_query);
+            let text = render_viewer_text(session, summary, theme, highlight_query);
             let total_rows = wrapped_text_height(&text, width).max(1);
             self.render_cache = Some(ViewerRenderCache {
                 path,
                 query,
                 width,
                 theme_name,
+                summary_stamp,
                 total_rows,
                 text,
             });
@@ -389,23 +377,82 @@ fn split_viewer(area: Rect) -> [Rect; 2] {
     [chunks[0], chunks[1]]
 }
 
-fn search_focus_title(editing_search: bool, theme: &Theme) -> Line<'static> {
-    if editing_search {
-        return Line::from(vec![
-            Span::styled(
-                "Focused",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(ratatui::style::Modifier::BOLD),
-            ),
-            Span::styled("─", Style::default().fg(theme.border)),
-        ])
-        .right_aligned();
+fn render_viewer_text(
+    session: &Session,
+    summary: Option<&SummarySidecar>,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) -> Text<'static> {
+    let mut lines = Vec::new();
+    if let Some(summary) = summary {
+        lines.extend(render_summary_leadin(summary, theme, highlight_query).lines);
+        lines.push(Line::default());
+        lines.push(Line::default());
     }
+    lines.extend(render_session_text(session, theme, highlight_query).lines);
+    Text::from(lines)
+}
+
+fn render_summary_leadin(
+    summary: &SummarySidecar,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) -> Text<'static> {
+    render_markdown_message(
+        &format!("# Summary\n\n{}", summary.body),
+        theme,
+        Style::default().fg(theme.text),
+        highlight_query,
+    )
+}
+
+fn summary_stamp(summary: &SummarySidecar) -> (i64, usize, usize) {
+    (
+        summary.generated_at.timestamp(),
+        summary.line_count,
+        summary.body.len(),
+    )
+}
+
+fn viewer_title(session: &Session, theme: &Theme, scroll_percent: usize) -> Line<'static> {
+    let (badge, badge_color) = agent_badge(session.agent, theme);
+    let title = abbreviate_home_path(&session_display_title(
+        session.agent,
+        &session.project,
+        session.custom_title.as_deref(),
+    ));
+    let time = relative_time(session.modified_ts);
+    let line_count = format_line_count(session.lines);
 
     Line::from(vec![
-        Span::styled("/", Style::default().fg(theme.accent)),
-        Span::styled(" Focus", Style::default().fg(theme.muted)),
+        Span::styled(
+            format!("{{{badge}}}"),
+            Style::default()
+                .fg(badge_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" · ", Style::default().fg(theme.muted)),
+        Span::styled(title, Style::default().fg(theme.text)),
+        Span::styled(" · ", Style::default().fg(theme.muted)),
+        Span::styled(time, Style::default().fg(theme.muted)),
+        Span::styled(" · ", Style::default().fg(theme.muted)),
+        Span::styled(line_count, Style::default().fg(theme.muted)),
+        Span::styled(" · ", Style::default().fg(theme.muted)),
+        Span::styled(
+            format!("{scroll_percent}% scrolled"),
+            Style::default().fg(theme.accent),
+        ),
+    ])
+}
+
+fn search_focus_title(theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            "Focused",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        ),
         Span::styled("─", Style::default().fg(theme.border)),
     ])
     .right_aligned()
@@ -453,7 +500,13 @@ fn highlight_active_match(text: &mut Text<'_>, active_row: usize, width: u16, th
     }
 }
 
-fn collect_match_rows(session: &Session, theme: &Theme, query: &str, width: u16) -> Vec<usize> {
+fn collect_match_rows(
+    session: &Session,
+    summary: Option<&SummarySidecar>,
+    theme: &Theme,
+    query: &str,
+    width: u16,
+) -> Vec<usize> {
     let terms = extract_highlight_terms(query);
     if terms.is_empty() || width == 0 {
         return Vec::new();
@@ -462,6 +515,25 @@ fn collect_match_rows(session: &Session, theme: &Theme, query: &str, width: u16)
     let width = width as usize;
     let mut rows = Vec::new();
     let mut row_offset = 0usize;
+
+    if let Some(summary) = summary {
+        let rendered = render_summary_leadin(summary, theme, Some(query));
+        for line in &rendered.lines {
+            let content_line = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            for relative_row in collect_line_match_rows(&content_line, width, &terms) {
+                let absolute_row = row_offset + relative_row;
+                if rows.last().copied() != Some(absolute_row) {
+                    rows.push(absolute_row);
+                }
+            }
+            row_offset += wrapped_rendered_line_height(line, width);
+        }
+        row_offset += 2;
+    }
 
     for message in &session.messages {
         row_offset += 1;
@@ -492,14 +564,21 @@ fn collect_match_rows(session: &Session, theme: &Theme, query: &str, width: u16)
     rows
 }
 
-pub(crate) fn collect_message_rows(session: &Session, theme: &Theme, width: u16) -> Vec<usize> {
+pub(crate) fn collect_message_rows(
+    session: &Session,
+    summary: Option<&SummarySidecar>,
+    theme: &Theme,
+    width: u16,
+) -> Vec<usize> {
     if width == 0 {
         return Vec::new();
     }
 
     let width = width as usize;
     let mut rows = Vec::with_capacity(session.messages.len());
-    let mut row_offset = 0usize;
+    let mut row_offset = summary
+        .map(|summary| wrapped_text_height(&render_summary_leadin(summary, theme, None), width as u16) + 2)
+        .unwrap_or(0);
 
     for message in &session.messages {
         rows.push(row_offset);
@@ -638,18 +717,19 @@ mod tests {
 
     use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionMessage};
     use crate::settings::ThemeName;
+    use crate::summary::{Fingerprint, SummarizeBackend, SummarySidecar};
     use crate::tui::theme::Theme;
 
     use super::{
         collect_match_rows, collect_message_rows, match_scrolloff, message_row_for_scroll,
         next_match_index, previous_match_index, scroll_for_match, scroll_progress_percent,
-        search_focus_title, MessageDirection, ViewerOutcome, ViewerState,
+        search_focus_title, viewer_title, MessageDirection, ViewerOutcome, ViewerState,
     };
 
     #[test]
     fn collect_match_rows_tracks_wrapped_content_lines() {
         let session = sample_session();
-        let rows = collect_match_rows(&session, &Theme::default(), "alpha", 12);
+        let rows = collect_match_rows(&session, None, &Theme::default(), "alpha", 12);
 
         assert_eq!(rows, vec![1, 2, 6]);
     }
@@ -657,7 +737,7 @@ mod tests {
     #[test]
     fn collect_match_rows_follow_rendered_markdown_instead_of_raw_source() {
         let session = markdown_code_session();
-        let rows = collect_match_rows(&session, &Theme::default(), "alpha", 80);
+        let rows = collect_match_rows(&session, None, &Theme::default(), "alpha", 80);
 
         assert_eq!(rows, vec![1]);
     }
@@ -665,7 +745,7 @@ mod tests {
     #[test]
     fn collect_message_rows_tracks_header_boundaries() {
         let session = sample_session();
-        let rows = collect_message_rows(&session, &Theme::default(), 12);
+        let rows = collect_message_rows(&session, None, &Theme::default(), 12);
 
         assert_eq!(rows, vec![0, 6]);
     }
@@ -745,18 +825,9 @@ mod tests {
 
     #[test]
     fn search_focus_title_is_right_aligned() {
-        let idle = search_focus_title(false, &Theme::default());
-        let focused = search_focus_title(true, &Theme::default());
+        let focused = search_focus_title(&Theme::default());
 
-        assert_eq!(idle.alignment, Some(Alignment::Right));
         assert_eq!(focused.alignment, Some(Alignment::Right));
-        assert_eq!(
-            idle.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>(),
-            "/ Focus─"
-        );
         assert_eq!(
             focused
                 .spans
@@ -768,12 +839,48 @@ mod tests {
     }
 
     #[test]
-    fn viewer_hints_no_longer_include_search_hint() {
-        assert!(ViewerState::HINTS.iter().all(|hint| hint.key != "/"));
+    fn viewer_title_matches_card_style_with_scroll_suffix() {
+        let session = sample_session();
+        let title = viewer_title(&session, &Theme::default(), 9);
+        let rendered = title
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(
+            rendered,
+            "{C} · /tmp/demo · 1969-12-31 · 6 lines · 9% scrolled"
+        );
     }
 
     #[test]
-    fn escape_clears_search_before_closing_viewer() {
+    fn viewer_hints_match_always_focused_search() {
+        let keys = ViewerState::HINTS
+            .iter()
+            .map(|hint| hint.key)
+            .collect::<Vec<_>>();
+
+        assert!(!keys.contains(&"/"));
+        assert!(!keys.contains(&"n/p"));
+        assert!(keys.contains(&"^N/^P"));
+        assert!(keys.contains(&"^U/^E"));
+    }
+
+    #[test]
+    fn summary_leadin_offsets_message_boundaries_and_match_rows() {
+        let session = sample_session();
+        let summary = sample_summary("alpha summary");
+
+        let match_rows = collect_match_rows(&session, Some(&summary), &Theme::default(), "alpha", 80);
+        let message_rows = collect_message_rows(&session, Some(&summary), &Theme::default(), 80);
+
+        assert_eq!(match_rows, vec![2, 6, 9]);
+        assert_eq!(message_rows, vec![5, 8]);
+    }
+
+    #[test]
+    fn escape_closes_viewer_even_with_search_text() {
         let area = Rect::new(0, 0, 80, 20);
         let session = sample_session();
         let mut state = ViewerState::new();
@@ -783,17 +890,7 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             area,
             Some(&session),
-            &Theme::default(),
-            ThemeName::Lazygit,
-        );
-        assert_eq!(outcome, ViewerOutcome::Stay);
-        assert!(state.search_query().is_empty());
-        assert!(!state.is_editing_search());
-
-        let outcome = state.handle_key(
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-            area,
-            Some(&session),
+            None,
             &Theme::default(),
             ThemeName::Lazygit,
         );
@@ -801,27 +898,35 @@ mod tests {
     }
 
     #[test]
-    fn escape_while_editing_clears_search_and_stops_editing() {
+    fn plain_n_and_p_edit_search_instead_of_navigating_matches() {
         let area = Rect::new(0, 0, 80, 20);
         let session = sample_session();
         let mut state = ViewerState::new();
-        state.search = Input::default().with_value("alpha".to_owned());
-        state.editing_search = true;
 
-        let outcome = state.handle_key(
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        state.handle_key(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
             area,
             Some(&session),
+            None,
             &Theme::default(),
             ThemeName::Lazygit,
         );
-        assert_eq!(outcome, ViewerOutcome::Stay);
-        assert_eq!(state.search_query(), "alpha");
-        assert!(!state.is_editing_search());
+
+        state.handle_key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+            area,
+            Some(&session),
+            None,
+            &Theme::default(),
+            ThemeName::Lazygit,
+        );
+
+        assert_eq!(state.search_query(), "np");
+        assert!(state.active_match.is_none());
     }
 
     #[test]
-    fn q_closes_viewer_when_search_is_unfocused() {
+    fn plain_q_edits_search_instead_of_closing_viewer() {
         let area = Rect::new(0, 0, 80, 20);
         let session = sample_session();
         let mut state = ViewerState::new();
@@ -830,11 +935,13 @@ mod tests {
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
             area,
             Some(&session),
+            None,
             &Theme::default(),
             ThemeName::Lazygit,
         );
 
-        assert_eq!(outcome, ViewerOutcome::Close);
+        assert_eq!(outcome, ViewerOutcome::Stay);
+        assert_eq!(state.search_query(), "q");
     }
 
     #[test]
@@ -851,6 +958,7 @@ mod tests {
             next,
             area,
             Some(&session),
+            None,
             &Theme::default(),
             ThemeName::Lazygit,
         );
@@ -861,6 +969,7 @@ mod tests {
             next,
             area,
             Some(&session),
+            None,
             &Theme::default(),
             ThemeName::Lazygit,
         );
@@ -871,6 +980,7 @@ mod tests {
             previous,
             area,
             Some(&session),
+            None,
             &Theme::default(),
             ThemeName::Lazygit,
         );
@@ -888,6 +998,7 @@ mod tests {
             KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
             area,
             Some(&session),
+            None,
             &Theme::default(),
             ThemeName::Lazygit,
         );
@@ -897,6 +1008,7 @@ mod tests {
             KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
             area,
             Some(&session),
+            None,
             &Theme::default(),
             ThemeName::Lazygit,
         );
@@ -969,5 +1081,17 @@ mod tests {
             }],
             content: "```rust\nfn alpha() {}\n```".to_owned(),
         }
+    }
+
+    fn sample_summary(body: &str) -> SummarySidecar {
+        SummarySidecar::new(
+            &PathBuf::from("/tmp/demo/session.jsonl"),
+            &Fingerprint {
+                line_count: 6,
+                last_line_sha256: "a".repeat(64),
+            },
+            SummarizeBackend::Codex,
+            body.to_owned(),
+        )
     }
 }
