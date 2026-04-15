@@ -9,7 +9,8 @@ use crate::index::SearchHit;
 use crate::tui::app::App;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
-    agent_badge, block_title, list_title, parse_highlighted_html, relative_time, truncate_plain,
+    agent_badge, block_title, format_line_count, list_title, parse_highlighted_html,
+    relative_time, truncate_plain,
 };
 
 fn card_height(snippet_line_count: usize, separator: &str) -> usize {
@@ -301,25 +302,6 @@ fn render_item_compact(
             theme.list_header_bg
         })),
     )
-}
-
-fn format_line_count(lines: usize) -> String {
-    let digits = lines.to_string();
-    let grouped = digits
-        .chars()
-        .rev()
-        .enumerate()
-        .flat_map(|(index, ch)| {
-            let mut chunk = Vec::new();
-            if index > 0 && index % 3 == 0 {
-                chunk.push(',');
-            }
-            chunk.push(ch);
-            chunk
-        })
-        .collect::<Vec<_>>();
-    let grouped = grouped.into_iter().rev().collect::<String>();
-    format!("{grouped} lines")
 }
 
 fn truncate_with_ellipsis(value: &str, width: usize) -> String {

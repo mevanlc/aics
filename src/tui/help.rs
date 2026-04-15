@@ -121,7 +121,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 19] = [
     HelpItem::new(
         "^X + letter",
         "run menu action",
-        "Press Ctrl+X followed by a main-menu letter such as v, d, e, r, or f to run that action immediately for the selected session.",
+        "Press Ctrl+X followed by a main-menu letter such as v, d, e, r, or f to run that action immediately for the selected session. Once ^X mode is armed, matching action letters take priority even if Ctrl is still held.",
     ),
 ];
 
@@ -133,28 +133,28 @@ const VIEWER_ITEMS: [HelpItem; 13] = [
     ),
     HelpItem::new(
         "Esc",
-        "clear search / close",
-        "If the viewer search box has text, Esc clears it first. If the viewer search is already empty, Esc closes the dedicated viewer and returns to the session list.",
+        "close viewer",
+        "Close the dedicated viewer and return to the session list. Esc no longer clears the viewer search field first.",
     ),
     HelpItem::new(
-        "/",
+        "Type",
         "edit viewer search",
-        "Start editing the dedicated viewer search field. Viewer search highlights matching text inside the full conversation and drives match navigation.",
+        "The viewer search field is always focused. Typing updates the inline search immediately and highlights matching text inside the full conversation.",
     ),
     HelpItem::new(
-        "Enter",
-        "finish editing search",
-        "When the viewer search field is active, Enter stops editing and leaves the current search text in place.",
-    ),
-    HelpItem::new(
-        "n / ^N",
+        "^N",
         "next match",
         "Jump to the next highlighted match in the viewer. Navigation wraps when you reach the last match.",
     ),
     HelpItem::new(
-        "p / ^P",
+        "^P",
         "previous match",
         "Jump to the previous highlighted match in the viewer. Navigation wraps when you move backward from the first match.",
+    ),
+    HelpItem::new(
+        "^U / ^E",
+        "edit line",
+        "Use readline-style editing in the always-focused search box, such as Ctrl+U to clear backward and Ctrl+E to move to the end.",
     ),
     HelpItem::new(
         "Shift ↑",
@@ -167,9 +167,9 @@ const VIEWER_ITEMS: [HelpItem; 13] = [
         "Jump to the next message or event boundary in the viewer, with wraparound at the ends.",
     ),
     HelpItem::new(
-        "↑↓ / j/k",
+        "↑ / ↓",
         "scroll line",
-        "Scroll the viewer one line at a time. Vim-style j and k are supported in addition to the arrow keys.",
+        "Scroll the viewer one line at a time.",
     ),
     HelpItem::new(
         "PgUp / PgDn",
@@ -177,14 +177,14 @@ const VIEWER_ITEMS: [HelpItem; 13] = [
         "Scroll the full conversation by a page at a time.",
     ),
     HelpItem::new(
-        "Home / g",
+        "Home",
         "jump to top",
-        "Jump to the top of the viewer. Plain g works as a shortcut in addition to Home.",
+        "Jump to the top of the viewer.",
     ),
     HelpItem::new(
-        "End / G",
+        "End",
         "jump to bottom",
-        "Jump to the bottom of the viewer. Shift+G also works as a shortcut in addition to End.",
+        "Jump to the bottom of the viewer.",
     ),
     HelpItem::new(
         "Mouse",

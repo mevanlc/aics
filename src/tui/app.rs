@@ -561,6 +561,11 @@ impl App {
         let local_scope_label = self.local_scope_label();
         let viewer_theme_name = self.current_frame_theme_name();
         let selected = self.selected;
+        let viewer_summary = self
+            .results
+            .get(selected)
+            .map(|hit| hit.session.file_path.clone())
+            .and_then(|path| self.summary_sidecar_for_path(&path));
         let results = &self.results;
         let preview_cache = &self.preview_cache;
         match &mut self.overlay {
@@ -575,7 +580,14 @@ impl App {
                     .and_then(|hit| preview_cache.get(&hit.session.file_path))
                     .and_then(|session| session.as_ref());
                 if let Some(session) = session {
-                    viewer_state.render(frame, frame.area(), session, &theme, viewer_theme_name);
+                    viewer_state.render(
+                        frame,
+                        frame.area(),
+                        session,
+                        viewer_summary.as_ref(),
+                        &theme,
+                        viewer_theme_name,
+                    );
                 }
             }
             Overlay::Settings(settings_state) => settings_state.render(frame, frame.area(), &theme),
@@ -737,6 +749,11 @@ impl App {
         } else {
             None
         };
+        let viewer_summary = if let Some(session) = viewer_session.as_ref() {
+            self.summary_sidecar_for_path(&session.file_path)
+        } else {
+            None
+        };
 
         match &mut self.overlay {
             Overlay::Filters(state) => match state.handle_key(key, &self.local_scope)? {
@@ -769,6 +786,7 @@ impl App {
                     key,
                     viewer_area,
                     viewer_session.as_ref(),
+                    viewer_summary.as_ref(),
                     &self.theme,
                     viewer_theme_name,
                 ) {
@@ -1186,7 +1204,7 @@ impl App {
             let Some(session) = self.selected_preview() else {
                 return;
             };
-            collect_message_rows(session, &theme, width)
+            collect_message_rows(session, None, &theme, width)
         };
         if let Some(target) = message_row_for_scroll(&rows, self.preview_scroll, direction) {
             let moved = match direction {
@@ -1287,7 +1305,11 @@ impl App {
                 self.open_help(HelpTab::SessionList);
                 Ok(true)
             }
-            KeyCode::Char(ch) if key.modifiers.is_empty() => {
+            KeyCode::Char(ch)
+                if key.modifiers.is_empty()
+                    || (key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.modifiers.difference(KeyModifiers::CONTROL).is_empty()) =>
+            {
                 if let Some(action) = actions::action_for_key(ch) {
                     self.pending_main_menu_action = false;
                     self.run_session_action(action)?;
@@ -1368,6 +1390,14 @@ impl App {
         }
         let entry = load_summary_preview(agent, path);
         self.summary_cache.insert(path.to_path_buf(), entry);
+    }
+
+    fn summary_sidecar_for_path(&mut self, path: &Path) -> Option<SummarySidecar> {
+        self.ensure_summary_cache(path);
+        self.summary_cache
+            .get(path)
+            .and_then(|opt| opt.as_ref())
+            .map(|entry| entry.sidecar.clone())
     }
 
     fn invalidate_summary_cache(&mut self, path: &Path) {
@@ -1480,13 +1510,19 @@ impl App {
         let frame_area = self.last_frame_area;
         let theme_name = self.current_frame_theme_name();
         let selected = self.selected;
+        let viewer_summary = self
+            .results
+            .get(selected)
+            .map(|hit| hit.session.file_path.clone())
+            .and_then(|path| self.summary_sidecar_for_path(&path));
         let viewer_session = self
             .results
             .get(selected)
             .and_then(|hit| self.preview_cache.get(&hit.session.file_path))
             .and_then(|session| session.as_ref());
         if let (Overlay::Viewer(state), Some(session)) = (&mut self.overlay, viewer_session) {
-            let max_scroll = state.max_scroll(frame_area, session, &theme, theme_name);
+            let max_scroll =
+                state.max_scroll(frame_area, session, viewer_summary.as_ref(), &theme, theme_name);
             state.scroll = state.scroll.min(max_scroll);
         }
     }
@@ -2295,7 +2331,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_x_then_ctrl_f_cancels_prefix_and_opens_filters() {
+    fn ctrl_x_then_ctrl_d_opens_delete_confirmation() {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude)];
 
@@ -2305,13 +2341,44 @@ mod tests {
         ))
         .unwrap();
         app.handle_key(crossterm_key_mods(
-            KeyCode::Char('f'),
+            KeyCode::Char('d'),
             KeyModifiers::CONTROL,
         ))
         .unwrap();
 
         assert!(!app.pending_main_menu_action);
-        assert!(matches!(app.overlay, super::Overlay::Filters(_)));
+        assert!(matches!(app.overlay, super::Overlay::ConfirmDelete));
+    }
+
+    #[test]
+    fn ctrl_x_then_ctrl_g_cancels_prefix_and_toggles_scope() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.scope = Scope::Global;
+        let (expected_local_path, expected_local_canonical) = match &app.local_scope {
+            Scope::CurrentDir(path, canonical) => (path.clone(), canonical.clone()),
+            Scope::Global => panic!("test app should have a local cwd scope"),
+        };
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+
+        assert!(!app.pending_main_menu_action);
+        match &app.scope {
+            Scope::CurrentDir(path, canonical) => {
+                assert_eq!(path, &expected_local_path);
+                assert_eq!(canonical, &expected_local_canonical);
+            }
+            Scope::Global => panic!("scope should switch to local"),
+        }
     }
 
     #[test]

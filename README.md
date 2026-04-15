@@ -71,7 +71,7 @@ By default, searches are scoped to the current working directory. Use `-g` / `--
 | `^P` | Toggle preview panel |
 | `^Y` | Toggle session/summary preview mode |
 | `^H` / `^L` | Resize list/preview split |
-| `^X` + action letter | Run a session action directly |
+| `^X` + action letter | Run a session action directly; in `^X` mode the action letter wins even if `Ctrl` is still held |
 | `Shift+↑` / `Shift+↓` | Jump between messages in the viewer |
 | `?` | Help |
 | `Esc` | Cancel / close modal |

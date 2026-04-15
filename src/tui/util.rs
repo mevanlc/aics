@@ -80,13 +80,32 @@ pub fn block_title<'a>(title: impl Into<Line<'a>>) -> Line<'a> {
 pub fn list_meta(hit: &SearchHit) -> String {
     let mut meta = format!(
         "{} lines · {}",
-        hit.session.lines,
+        format_line_count(hit.session.lines),
         relative_time(hit.session.modified_ts)
     );
     if hit.is_live {
         meta.push_str(" · live");
     }
     meta
+}
+
+pub fn format_line_count(lines: usize) -> String {
+    let digits = lines.to_string();
+    let grouped = digits
+        .chars()
+        .rev()
+        .enumerate()
+        .flat_map(|(index, ch)| {
+            let mut chunk = Vec::new();
+            if index > 0 && index % 3 == 0 {
+                chunk.push(',');
+            }
+            chunk.push(ch);
+            chunk
+        })
+        .collect::<Vec<_>>();
+    let grouped = grouped.into_iter().rev().collect::<String>();
+    format!("{grouped} lines")
 }
 
 pub fn relative_time(modified_ts: u64) -> String {
@@ -226,7 +245,7 @@ fn unescape_html(value: &str) -> String {
         .replace("&#39;", "'")
 }
 
-fn abbreviate_home_path(value: &str) -> String {
+pub fn abbreviate_home_path(value: &str) -> String {
     static HOME_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     abbreviate_home_path_with(value, HOME_DIR.get_or_init(discover_home_dir).as_deref())
 }
