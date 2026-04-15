@@ -88,14 +88,50 @@ By default, searches are scoped to the current working directory. Use `-g` / `--
 | `Esc` | Cancel / close modal |
 | `^C` | Quit |
 
-## Data sources
+## Indexing
 
-Session data is read from:
+Session data is indexed from:
 
 - `~/.claude/projects/` (Claude Code)
 - `~/.codex/sessions/` (Codex CLI)
 
-The local index and settings live under the platform config dir (e.g. `~/.config/aics/` on Linux, `~/Library/Application Support/aics/` on macOS). Override with `AICS_CONFIG_ROOT`.
+By default, index data is stored under the platform cache dir, with one profile per discovered session-root set:
+
+- Linux: `~/.cache/aics/profiles/<profile-id>/`
+- macOS: `~/Library/Caches/aics/profiles/<profile-id>/`
+- Windows: `%LOCALAPPDATA%\aics\cache\profiles\<profile-id>\`
+
+Each profile stores:
+
+- `index/` (Tantivy index files)
+- `index_state.json`
+- `profile.json`
+- `hashed-input.txt`
+
+Override the index/cache root with `AICS_CACHE_ROOT`.
+
+## Configuration file
+
+Settings are stored in `settings.json` under the platform config dir:
+
+- Linux: `~/.config/aics/settings.json`
+- macOS: `~/Library/Application Support/aics/settings.json`
+- Windows: `%APPDATA%\aics\config\settings.json`
+
+Override the config root with `AICS_CONFIG_ROOT`.
+
+Available options:
+
+- `theme` (`lazygit`, `aics`, `sunset`, `late.sh`)
+- `claude_command` default: `claude --dangerously-skip-permissions`
+- `codex_command` default: `codex --yolo`
+- `show_preview`
+- `preview_width_pct`
+- `session_separator`
+- `snippet_line_count`
+- `summarize_backend` (`claude`, `codex`, `custom`)
+- `summarize_command_custom`
+- `summarize_prompt`
 
 ## License
 

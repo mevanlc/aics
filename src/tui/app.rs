@@ -1382,7 +1382,11 @@ impl App {
         Theme::from_name(self.current_frame_theme_name())
     }
 
-    fn apply_settings(&mut self, new_settings: Settings) -> Result<()> {
+    fn apply_settings(&mut self, mut new_settings: Settings) -> Result<()> {
+        // Layout prefs are controlled directly from the main screen, not the
+        // settings modal, so preserve the live values here.
+        new_settings.show_preview = self.preview_visible;
+        new_settings.preview_width_pct = self.preview_width_pct;
         self.theme = Theme::from_name(new_settings.theme);
         self.preview_render_cache = None;
         self.settings = new_settings;
@@ -2524,6 +2528,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(app.preview_visible, !visible_before);
+    }
+
+    #[test]
+    fn applying_settings_preserves_live_preview_preference() {
+        let mut app = test_app();
+        app.preview_visible = true;
+        app.preview_width_pct = 55;
+        app.settings.show_preview = false;
+        app.settings.preview_width_pct = 40;
+
+        app.apply_settings(Settings {
+            theme: ThemeName::Sunset,
+            show_preview: false,
+            preview_width_pct: 40,
+            ..Settings::default()
+        })
+        .unwrap();
+
+        assert!(app.settings.show_preview);
+        assert_eq!(app.settings.preview_width_pct, 55);
+        assert_eq!(app.current_frame_theme_name(), ThemeName::Sunset);
     }
 
     #[test]
