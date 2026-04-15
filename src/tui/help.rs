@@ -90,8 +90,8 @@ const SESSION_LIST_ITEMS: [HelpItem; 19] = [
     ),
     HelpItem::new(
         "^Y",
-        "toggle summary",
-        "Switch the preview pane between the session transcript and the available summary view for the selected session.",
+        "cycle snippet",
+        "Cycle the selected session card snippet between session text and available summaries. The preview pane always shows all available summaries plus the session log.",
     ),
     HelpItem::new(
         "^H / ^L",

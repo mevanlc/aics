@@ -9,8 +9,7 @@ use crate::index::SearchHit;
 use crate::tui::app::App;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
-    agent_badge, block_title, format_line_count, list_title, parse_highlighted_html,
-    relative_time, truncate_plain,
+    agent_badge, block_title, format_line_count, list_title, relative_time, truncate_plain,
 };
 
 fn card_height(snippet_line_count: usize, separator: &str) -> usize {
@@ -36,7 +35,7 @@ fn effective_item_height(area: Rect, snippet_line_count: usize, separator: &str)
 
 pub fn render(
     frame: &mut Frame,
-    app: &App,
+    app: &mut App,
     area: Rect,
     theme: &Theme,
     separator: &str,
@@ -65,6 +64,7 @@ pub fn render(
     } else {
         let visible_slots = visible_slots(area, snippet_line_count, separator);
         let (visible_hits, selected_within) = app.list_window(visible_slots);
+        let visible_hits = visible_hits.to_vec();
         let content_width = area.width.saturating_sub(3) as usize;
         if compact {
             visible_hits
@@ -84,8 +84,10 @@ pub fn render(
                     } else {
                         separator
                     };
+                    let snippet = app.list_snippet_line(hit, theme);
                     render_item(
                         hit,
+                        snippet,
                         theme,
                         content_width,
                         selected_within == Some(i),
@@ -162,6 +164,7 @@ pub fn slot_at_row(
 
 fn render_item(
     hit: &SearchHit,
+    snippet: Line<'static>,
     theme: &Theme,
     width: usize,
     selected: bool,
@@ -214,11 +217,6 @@ fn render_item(
     ])
     .patch_style(Style::default().bg(header_bg));
 
-    let snippet = parse_highlighted_html(
-        &hit.snippet_html,
-        Style::default().fg(theme.text),
-        theme.search_match_style(),
-    );
     let mut snippet_rows = wrap_line(snippet, item_width, snippet_line_count);
 
     let body_style = Style::default().bg(if selected {
@@ -445,6 +443,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::style::{Color, Style};
+    use ratatui::text::Line;
     use ratatui::widgets::{List, ListState};
     use ratatui::Terminal;
 
@@ -455,6 +454,10 @@ mod tests {
     use crate::index::{SearchHit, StoredSession};
     use crate::parse::{Agent, DerivationType};
     use crate::tui::theme::Theme;
+
+    fn plain_snippet(text: &str) -> Line<'static> {
+        crate::tui::util::parse_highlighted_html(text, Style::default(), Style::default())
+    }
 
     #[test]
     fn formats_large_line_counts_with_grouping() {
@@ -606,7 +609,7 @@ mod tests {
             is_live: false,
         };
 
-        let item = render_item(&hit, &theme, 32, false, "·", 0);
+        let item = render_item(&hit, plain_snippet(""), &theme, 32, false, "·", 0);
         let backend = TestBackend::new(32, 2);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = ListState::default();
@@ -652,7 +655,7 @@ mod tests {
             is_live: false,
         };
 
-        let item = render_item(&hit, &theme, 32, true, "·", 0);
+        let item = render_item(&hit, plain_snippet(""), &theme, 32, true, "·", 0);
         let backend = TestBackend::new(32, 2);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = ListState::default();

@@ -37,22 +37,27 @@ use crate::index::{
     IndexManager, Scope, SearchEngine, SearchFilters, SearchHit, SearchRequest, SortMode,
     SyncOutcome,
 };
-use crate::parse::claude::read_claude_autosummary;
+use crate::parse::claude::read_claude_autosummaries;
 use crate::parse::{parse_session_file, Agent, MessageRole, Session};
 use crate::scan::AgentHomes;
 use crate::settings::{Settings, ThemeName};
 use crate::summary::sidecar::sidecar_path;
 use crate::summary::staleness::fingerprint as compute_fingerprint;
-use crate::summary::{SummaryCommand, SummaryEvent, SummaryPreview, SummarySidecar, SummaryWorker};
+use crate::summary::{
+    AicsSummaryPreview, ClaudeAutosummaryPreview, SummaryCommand, SummaryEvent, SummarySidecar,
+    SummarySources, SummaryWorker,
+};
 use crate::tui::actions::{self, ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::filter::{FilterModalState, FilterOutcome};
 use crate::tui::help::{HelpModalState, HelpOutcome, HelpTab};
-use crate::tui::preview::PreviewMode;
 use crate::tui::profile;
 use crate::tui::settings::{SettingsModalState, SettingsOutcome};
 use crate::tui::statusline;
 use crate::tui::theme::Theme;
-use crate::tui::util::{block_title, session_display_title, wrapped_text_height};
+use crate::tui::util::{
+    block_title, highlight_spans, parse_highlighted_html, session_display_title,
+    wrapped_text_height,
+};
 use crate::tui::viewer::{
     collect_message_rows, message_row_for_scroll, MessageDirection, ViewerOutcome, ViewerState,
 };
@@ -104,7 +109,6 @@ struct PreviewRenderCache {
     query: String,
     width: u16,
     theme_name: ThemeName,
-    mode: PreviewMode,
     wrapped_height: Option<usize>,
     text: Text<'static>,
 }
@@ -118,6 +122,37 @@ pub struct PreviewRenderState<'a> {
 enum AppExit {
     Normal,
     Handoff(ExternalCommand),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnippetMode {
+    ContentPreview,
+    AicsSummary,
+    BuiltinSummary,
+}
+
+impl Default for SnippetMode {
+    fn default() -> Self {
+        Self::ContentPreview
+    }
+}
+
+impl SnippetMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ContentPreview => "Content preview",
+            Self::AicsSummary => "AICS summary",
+            Self::BuiltinSummary => "Builtin summary",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::ContentPreview => Self::AicsSummary,
+            Self::AicsSummary => Self::BuiltinSummary,
+            Self::BuiltinSummary => Self::ContentPreview,
+        }
+    }
 }
 
 pub fn run_app(
@@ -185,9 +220,9 @@ pub struct App {
     manager: IndexManager,
     worker: SearchWorker,
     summary_worker: SummaryWorker,
-    summary_cache: HashMap<PathBuf, Option<SummaryPreview>>,
+    summary_cache: HashMap<PathBuf, SummarySources>,
     summary_inflight: HashSet<PathBuf>,
-    preview_mode: PreviewMode,
+    snippet_mode: SnippetMode,
     statusline: Option<statusline::Entry>,
     scope: Scope,
     local_scope: Scope,
@@ -228,7 +263,7 @@ impl App {
         keymap_hint::KeymapHint::new("⏎", "actions"),
         keymap_hint::KeymapHint::new("^F", "filters"),
         keymap_hint::KeymapHint::new("^S", "settings"),
-        keymap_hint::KeymapHint::new("^Y", "toggle summary"),
+        keymap_hint::KeymapHint::new("^Y", "cycle snippet"),
         keymap_hint::KeymapHint::new("^P", "toggle preview"),
         keymap_hint::KeymapHint::new("Esc", "clear/cancel"),
         keymap_hint::KeymapHint::new("^C", "quit"),
@@ -275,8 +310,8 @@ impl App {
             summary_worker,
             summary_cache: HashMap::new(),
             summary_inflight: HashSet::new(),
+            snippet_mode: SnippetMode::default(),
             statusline: None,
-            preview_mode: PreviewMode::default(),
             scope: initial_request.scope,
             local_scope,
             filters: initial_request.filters,
@@ -402,6 +437,10 @@ impl App {
         if matches!(self.sort, SortMode::Time) {
             text.push_str(" · time sort");
         }
+        if !matches!(self.snippet_mode, SnippetMode::ContentPreview) {
+            text.push_str(" · ");
+            text.push_str(self.snippet_mode.label());
+        }
         let inflight = self.summary_inflight.len();
         if inflight > 0 {
             text.push_str(&format!(" · summarizing {inflight}"));
@@ -423,8 +462,8 @@ impl App {
         matches!(self.overlay, Overlay::None)
     }
 
-    pub fn preview_mode(&self) -> PreviewMode {
-        self.preview_mode
+    pub fn preview_title(&self) -> &'static str {
+        "Preview"
     }
 
     pub fn selected_preview(&mut self) -> Option<&Session> {
@@ -452,31 +491,30 @@ impl App {
         let query = self.committed_query.clone();
         let width = area.width.saturating_sub(2);
         let theme_name = self.current_frame_theme_name();
-        let mode = self.preview_mode;
 
         let cache_miss = self.preview_render_cache.as_ref().is_none_or(|cache| {
             cache.path != path
                 || cache.query != query
                 || cache.width != width
                 || cache.theme_name != theme_name
-                || cache.mode != mode
         });
         if cache_miss {
             profile::event("preview.cache.miss");
             let highlight_query = (!query.is_empty()).then_some(query.as_str());
-            let text = match mode {
-                PreviewMode::Session => {
-                    let session = self.selected_preview()?;
-                    preview::render_session_text(session, theme, highlight_query)
-                }
-                PreviewMode::Summary => self.build_summary_preview_text(agent, &path, theme),
-            };
+            let session = self.selected_preview().cloned();
+            self.ensure_summary_cache(agent, &path);
+            let text = preview::render_composite_text(
+                session.as_ref(),
+                self.summary_cache.get(&path)?,
+                theme,
+                highlight_query,
+                self.summary_inflight.contains(&path),
+            );
             self.preview_render_cache = Some(PreviewRenderCache {
                 path: path.clone(),
                 query: query.clone(),
                 width,
                 theme_name,
-                mode,
                 wrapped_height: None,
                 text,
             });
@@ -523,6 +561,56 @@ impl App {
         (&self.results[offset..end], Some(self.selected - offset))
     }
 
+    pub fn list_snippet_line(
+        &mut self,
+        hit: &SearchHit,
+        theme: &Theme,
+    ) -> Line<'static> {
+        if let Some(snippet) = self.active_summary_snippet_text(hit) {
+            return Line::from(highlight_spans(
+                &snippet,
+                &self.committed_query,
+                Style::default().fg(theme.text),
+                theme.search_match_style(),
+            ));
+        }
+
+        parse_highlighted_html(
+            &hit.snippet_html,
+            Style::default().fg(theme.text),
+            theme.search_match_style(),
+        )
+    }
+
+    fn active_summary_snippet_text(&mut self, hit: &SearchHit) -> Option<String> {
+        let path = hit.session.file_path.clone();
+        self.ensure_summary_cache(hit.session.agent, &path);
+        let sources = self.summary_cache.get(&path)?;
+        let text = match self.snippet_mode {
+            SnippetMode::ContentPreview => return None,
+            SnippetMode::AicsSummary => sources
+                .aics_sidecar
+                .as_ref()
+                .map(|summary| summary.sidecar.body.trim().to_owned())
+                .or_else(|| {
+                    sources
+                        .latest_claude_autosummary()
+                        .map(|summary| summary.body.trim().to_owned())
+                }),
+            SnippetMode::BuiltinSummary => sources
+                .latest_claude_autosummary()
+                .map(|summary| summary.body.trim().to_owned())
+                .or_else(|| {
+                    sources
+                        .aics_sidecar
+                        .as_ref()
+                        .map(|summary| summary.sidecar.body.trim().to_owned())
+                }),
+        }?;
+
+        (!text.is_empty()).then_some(text)
+    }
+
     fn draw(&mut self, frame: &mut Frame) {
         let _draw_profile = profile::scope("app.draw");
         let theme = self.current_frame_theme();
@@ -538,13 +626,15 @@ impl App {
         self.last_layout = Some(areas);
         self.clamp_scroll_state(areas);
         search::render(frame, self, areas.search, &theme);
+        let session_separator = self.settings.session_separator.clone();
+        let snippet_line_count = self.settings.snippet_line_count;
         list::render(
             frame,
             self,
             areas.list,
             &theme,
-            &self.settings.session_separator,
-            self.settings.snippet_line_count,
+            &session_separator,
+            snippet_line_count,
         );
 
         if let Some(preview_area) = areas.preview {
@@ -708,7 +798,7 @@ impl App {
                 self.toggle_preview()
             }
             KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_preview_mode()
+                self.cycle_snippet_source()
             }
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.resize_preview(-5)
@@ -1202,10 +1292,34 @@ impl App {
         let width = preview_area.width.saturating_sub(2);
         let theme = self.current_frame_theme();
         let rows = {
-            let Some(session) = self.selected_preview() else {
+            let Some(hit) = self.selected_hit() else {
                 return;
             };
-            collect_message_rows(session, None, &theme, width)
+            let Some(session) = self.selected_preview().cloned() else {
+                return;
+            };
+            self.ensure_summary_cache(hit.session.agent, &hit.session.file_path);
+            let summary_offset = self
+                .summary_cache
+                .get(&hit.session.file_path)
+                .map(|sources| {
+                    let summary_text = preview::render_summary_sections(
+                        sources,
+                        &theme,
+                        None,
+                        self.summary_inflight.contains(&hit.session.file_path),
+                    );
+                    if summary_text.lines.is_empty() {
+                        0
+                    } else {
+                        wrapped_text_height(&summary_text, width)
+                    }
+                })
+                .unwrap_or(0);
+            collect_message_rows(&session, None, &theme, width)
+                .into_iter()
+                .map(|row| row + summary_offset)
+                .collect::<Vec<_>>()
         };
         if let Some(target) = message_row_for_scroll(&rows, self.preview_scroll, direction) {
             let moved = match direction {
@@ -1356,40 +1470,16 @@ impl App {
         self.save_layout_prefs();
     }
 
-    fn toggle_preview_mode(&mut self) {
-        self.preview_mode = match self.preview_mode {
-            PreviewMode::Session => PreviewMode::Summary,
-            PreviewMode::Summary => PreviewMode::Session,
-        };
-        self.preview_render_cache = None;
+    fn cycle_snippet_source(&mut self) {
+        self.snippet_mode = self.snippet_mode.next();
         self.preview_scroll = 0;
-    }
-
-    fn build_summary_preview_text(
-        &mut self,
-        agent: Agent,
-        path: &Path,
-        theme: &Theme,
-    ) -> Text<'static> {
-        self.ensure_summary_cache(agent, path);
-        match self.summary_cache.get(path).and_then(|opt| opt.as_ref()) {
-            Some(entry) => preview::render_summary_text(entry, theme),
-            None => {
-                let msg = if self.summary_inflight.contains(path) {
-                    "Summary is being generated…"
-                } else {
-                    "No summary is available for this session."
-                };
-                preview::render_summary_missing(theme, msg, !self.summary_inflight.contains(path))
-            }
-        }
     }
 
     fn ensure_summary_cache(&mut self, agent: Agent, path: &Path) {
         if self.summary_cache.contains_key(path) {
             return;
         }
-        let entry = load_summary_preview(agent, path);
+        let entry = load_summary_sources(agent, path);
         self.summary_cache.insert(path.to_path_buf(), entry);
     }
 
@@ -1397,11 +1487,8 @@ impl App {
         self.ensure_summary_cache(agent, path);
         self.summary_cache
             .get(path)
-            .and_then(|opt| opt.as_ref())
-            .and_then(|entry| match entry {
-                SummaryPreview::AicsSidecar { sidecar, .. } => Some(sidecar.clone()),
-                SummaryPreview::ClaudeAutosummary { .. } => None,
-            })
+            .and_then(|sources| sources.aics_sidecar.as_ref())
+            .map(|summary| summary.sidecar.clone())
     }
 
     fn invalidate_summary_cache(&mut self, path: &Path) {
@@ -1409,7 +1496,7 @@ impl App {
         if self
             .preview_render_cache
             .as_ref()
-            .is_some_and(|cache| cache.path == path && cache.mode == PreviewMode::Summary)
+            .is_some_and(|cache| cache.path == path)
         {
             self.preview_render_cache = None;
         }
@@ -1903,13 +1990,14 @@ fn file_label(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn load_summary_preview(agent: Agent, path: &Path) -> Option<SummaryPreview> {
+fn load_summary_sources(agent: Agent, path: &Path) -> SummarySources {
+    let mut sources = SummarySources::default();
     let sidecar_target = sidecar_path(path);
     if sidecar_target.exists() {
         match crate::summary::SummarySidecar::read(&sidecar_target) {
             Ok(sidecar) => match compute_fingerprint(path) {
                 Ok(fingerprint) => {
-                    return Some(SummaryPreview::AicsSidecar {
+                    sources.aics_sidecar = Some(AicsSummaryPreview {
                         sidecar,
                         fingerprint,
                     });
@@ -1928,21 +2016,26 @@ fn load_summary_preview(agent: Agent, path: &Path) -> Option<SummaryPreview> {
     }
 
     if agent != Agent::Claude {
-        return None;
+        return sources;
     }
 
-    match read_claude_autosummary(path) {
-        Ok(Some(summary)) => Some(SummaryPreview::ClaudeAutosummary {
-            body: summary.body,
-            generated_at: summary.timestamp,
-        }),
-        Ok(None) => None,
+    match read_claude_autosummaries(path) {
+        Ok(summaries) => {
+            sources.claude_autosummaries = summaries
+                .into_iter()
+                .map(|summary| ClaudeAutosummaryPreview {
+                    body: summary.body,
+                    generated_at: summary.timestamp,
+                })
+                .collect();
+            sources
+        }
         Err(err) => {
             warn!(
-                "failed to read Claude autosummary from {}: {err:#}",
+                "failed to read Claude autosummaries from {}: {err:#}",
                 path.display()
             );
-            None
+            sources
         }
     }
 }
@@ -2166,7 +2259,10 @@ mod tests {
         PAGE_STEP,
     };
     use crate::scan::AgentHomes;
-    use crate::summary::{SummarizeBackend, SummaryPreview, SummarySidecar, SummaryWorker};
+    use crate::summary::{
+        AicsSummaryPreview, ClaudeAutosummaryPreview, Fingerprint, SummarizeBackend,
+        SummarySidecar, SummarySources, SummaryWorker,
+    };
 
     #[test]
     fn builds_resume_commands_for_both_agents() {
@@ -2668,7 +2764,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_loader_prefers_aics_sidecar_over_claude_autosummary() {
+    fn summary_loader_keeps_aics_sidecar_and_claude_autosummaries() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("session.jsonl");
         fs::write(
@@ -2685,17 +2781,20 @@ mod tests {
         );
         sidecar.write_atomic(&super::sidecar_path(&path)).unwrap();
 
-        let summary = super::load_summary_preview(Agent::Claude, &path).expect("summary source");
-        match summary {
-            SummaryPreview::AicsSidecar { sidecar, .. } => {
-                assert_eq!(sidecar.body.trim(), "AICS sidecar");
-            }
-            other => panic!("expected sidecar summary, got {other:?}"),
-        }
+        let sources = super::load_summary_sources(Agent::Claude, &path);
+        assert_eq!(
+            sources
+                .aics_sidecar
+                .as_ref()
+                .map(|summary| summary.sidecar.body.trim()),
+            Some("AICS sidecar")
+        );
+        assert_eq!(sources.claude_autosummaries.len(), 1);
+        assert_eq!(sources.claude_autosummaries[0].body, "Claude autosummary");
     }
 
     #[test]
-    fn summary_loader_falls_back_to_claude_autosummary_when_sidecar_is_invalid() {
+    fn summary_loader_keeps_all_claude_autosummaries_when_sidecar_is_invalid() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("session.jsonl");
         fs::write(
@@ -2708,13 +2807,116 @@ mod tests {
         .unwrap();
         fs::write(super::sidecar_path(&path), "not frontmatter").unwrap();
 
-        let summary = super::load_summary_preview(Agent::Claude, &path).expect("summary source");
-        match summary {
-            SummaryPreview::ClaudeAutosummary { body, .. } => {
-                assert_eq!(body, "Latest summary");
-            }
-            other => panic!("expected Claude autosummary, got {other:?}"),
-        }
+        let sources = super::load_summary_sources(Agent::Claude, &path);
+        assert!(sources.aics_sidecar.is_none());
+        assert_eq!(sources.claude_autosummaries.len(), 2);
+        assert_eq!(sources.claude_autosummaries[0].body, "Earlier summary");
+        assert_eq!(sources.claude_autosummaries[1].body, "Latest summary");
+    }
+
+    #[test]
+    fn snippet_mode_cycles_through_fixed_sequence() {
+        let mut app = test_app();
+
+        assert_eq!(app.snippet_mode, super::SnippetMode::ContentPreview);
+        app.cycle_snippet_source();
+        assert_eq!(app.snippet_mode, super::SnippetMode::AicsSummary);
+        app.cycle_snippet_source();
+        assert_eq!(app.snippet_mode, super::SnippetMode::BuiltinSummary);
+        app.cycle_snippet_source();
+        assert_eq!(app.snippet_mode, super::SnippetMode::ContentPreview);
+    }
+
+    #[test]
+    fn snippet_modes_follow_summary_fallback_rules() {
+        let mut app = test_app();
+        let hit = sample_hit(Agent::Claude);
+        let path = hit.session.file_path.clone();
+        app.summary_cache.insert(
+            path.clone(),
+            SummarySources {
+                aics_sidecar: Some(AicsSummaryPreview {
+                    sidecar: SummarySidecar::new(
+                        &path,
+                        &Fingerprint {
+                            line_count: 1,
+                            last_line_sha256: "abc".repeat(21) + "a",
+                        },
+                        SummarizeBackend::Claude,
+                        "AICS body".to_owned(),
+                    ),
+                    fingerprint: Fingerprint {
+                        line_count: 1,
+                        last_line_sha256: "abc".repeat(21) + "a",
+                    },
+                }),
+                claude_autosummaries: vec![
+                    ClaudeAutosummaryPreview {
+                        body: "Older builtin body".to_owned(),
+                        generated_at: None,
+                    },
+                    ClaudeAutosummaryPreview {
+                        body: "Newest builtin body".to_owned(),
+                        generated_at: None,
+                    },
+                ],
+            },
+        );
+
+        app.snippet_mode = super::SnippetMode::ContentPreview;
+        assert_eq!(app.active_summary_snippet_text(&hit), None);
+
+        app.snippet_mode = super::SnippetMode::AicsSummary;
+        assert_eq!(app.active_summary_snippet_text(&hit).as_deref(), Some("AICS body"));
+
+        app.snippet_mode = super::SnippetMode::BuiltinSummary;
+        assert_eq!(
+            app.active_summary_snippet_text(&hit).as_deref(),
+            Some("Newest builtin body")
+        );
+
+        app.summary_cache.insert(
+            path.clone(),
+            SummarySources {
+                aics_sidecar: None,
+                claude_autosummaries: vec![ClaudeAutosummaryPreview {
+                    body: "Only builtin body".to_owned(),
+                    generated_at: None,
+                }],
+            },
+        );
+        app.snippet_mode = super::SnippetMode::AicsSummary;
+        assert_eq!(
+            app.active_summary_snippet_text(&hit).as_deref(),
+            Some("Only builtin body")
+        );
+
+        app.summary_cache.insert(
+            path,
+            SummarySources {
+                aics_sidecar: Some(AicsSummaryPreview {
+                    sidecar: SummarySidecar::new(
+                        &PathBuf::from("/tmp/demo/session.jsonl"),
+                        &Fingerprint {
+                            line_count: 1,
+                            last_line_sha256: "abc".repeat(21) + "a",
+                        },
+                        SummarizeBackend::Claude,
+                        "Only AICS body".to_owned(),
+                    ),
+                    fingerprint: Fingerprint {
+                        line_count: 1,
+                        last_line_sha256: "abc".repeat(21) + "a",
+                    },
+                }),
+                claude_autosummaries: Vec::new(),
+            },
+        );
+        app.snippet_mode = super::SnippetMode::BuiltinSummary;
+        assert_eq!(
+            app.active_summary_snippet_text(&hit).as_deref(),
+            Some("Only AICS body")
+        );
     }
 
     #[test]

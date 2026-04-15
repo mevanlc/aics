@@ -212,12 +212,12 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
     }))
 }
 
-pub fn read_claude_autosummary(path: impl AsRef<Path>) -> Result<Option<ClaudeAutosummary>> {
+pub fn read_claude_autosummaries(path: impl AsRef<Path>) -> Result<Vec<ClaudeAutosummary>> {
     let path = path.as_ref();
     let file = File::open(path)
         .with_context(|| format!("failed to open Claude session {}", path.display()))?;
     let reader = BufReader::new(file);
-    let mut latest = None;
+    let mut summaries = Vec::new();
 
     for line in reader.lines() {
         let line = match line {
@@ -246,14 +246,18 @@ pub fn read_claude_autosummary(path: impl AsRef<Path>) -> Result<Option<ClaudeAu
         };
 
         if let Some(body) = extract_claude_summary_text(&value) {
-            latest = Some(ClaudeAutosummary {
+            summaries.push(ClaudeAutosummary {
                 body,
                 timestamp: extract_timestamp(&value),
             });
         }
     }
 
-    Ok(latest)
+    Ok(summaries)
+}
+
+pub fn read_claude_autosummary(path: impl AsRef<Path>) -> Result<Option<ClaudeAutosummary>> {
+    Ok(read_claude_autosummaries(path)?.into_iter().last())
 }
 
 fn extract_message_role(value: &Value) -> Option<MessageRole> {

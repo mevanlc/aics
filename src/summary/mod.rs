@@ -19,15 +19,37 @@ pub use template::{expand, TemplateError};
 pub use worker::{SummaryCommand, SummaryEvent, SummaryStatus, SummaryWorker};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AicsSummaryPreview {
+    pub sidecar: SummarySidecar,
+    pub fingerprint: Fingerprint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeAutosummaryPreview {
+    pub body: String,
+    pub generated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SummarySources {
+    pub aics_sidecar: Option<AicsSummaryPreview>,
+    pub claude_autosummaries: Vec<ClaudeAutosummaryPreview>,
+}
+
+impl SummarySources {
+    pub fn is_empty(&self) -> bool {
+        self.aics_sidecar.is_none() && self.claude_autosummaries.is_empty()
+    }
+
+    pub fn latest_claude_autosummary(&self) -> Option<&ClaudeAutosummaryPreview> {
+        self.claude_autosummaries.last()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SummaryPreview {
-    AicsSidecar {
-        sidecar: SummarySidecar,
-        fingerprint: Fingerprint,
-    },
-    ClaudeAutosummary {
-        body: String,
-        generated_at: Option<DateTime<Utc>>,
-    },
+    AicsSidecar(AicsSummaryPreview),
+    ClaudeAutosummary(ClaudeAutosummaryPreview),
 }
 
 /// Which CLI the summarizer should invoke.
