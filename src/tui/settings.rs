@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -5,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
+use serde::Deserialize;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 use unicode_width::UnicodeWidthStr;
@@ -106,11 +109,11 @@ impl SettingsModalState {
                 self.picker = Some(TemplatePicker::new(detect_shell()));
                 return SettingsOutcome::Stay;
             }
-            KeyCode::Tab | KeyCode::Down => {
+            KeyCode::Tab => {
                 self.field.move_next();
                 return SettingsOutcome::Stay;
             }
-            KeyCode::BackTab | KeyCode::Up => {
+            KeyCode::BackTab => {
                 self.field.move_prev();
                 return SettingsOutcome::Stay;
             }
@@ -182,7 +185,7 @@ impl SettingsModalState {
             Constraint::Length(1), // 11 Codex CLI Args inline
             Constraint::Length(1), // 12 spacing
             Constraint::Length(1), // 13 Session summarizer command label
-            Constraint::Length(3), // 14 summarize command textarea
+            Constraint::Length(5), // 14 summarize command textarea
             Constraint::Length(1), // 15 spacing
             Constraint::Length(1), // 16 Session summarizer prompt label
             Constraint::Min(3),    // 17 prompt textarea (absorbs remaining)
@@ -198,7 +201,7 @@ impl SettingsModalState {
 
         // Session Separator (inline)
         let sep_focused = self.field == SettingsField::SessionSeparator;
-        self.render_inline_text_field(
+        render_inline_text_field(
             frame,
             rows[2],
             theme,
@@ -209,7 +212,7 @@ impl SettingsModalState {
 
         // Snippet Lines (inline)
         let snip_focused = self.field == SettingsField::SnippetLineCount;
-        self.render_inline_text_field(
+        render_inline_text_field(
             frame,
             rows[3],
             theme,
@@ -227,7 +230,7 @@ impl SettingsModalState {
 
         // Claude Code Command + Args
         let claude_cmd_focused = self.field == SettingsField::ClaudeCommand;
-        self.render_inline_text_field(
+        render_inline_text_field(
             frame,
             rows[7],
             theme,
@@ -236,7 +239,7 @@ impl SettingsModalState {
             claude_cmd_focused,
         );
         let claude_args_focused = self.field == SettingsField::ClaudeArgs;
-        self.render_inline_text_field(
+        render_inline_text_field(
             frame,
             rows[8],
             theme,
@@ -247,7 +250,7 @@ impl SettingsModalState {
 
         // Codex CLI Command + Args
         let codex_cmd_focused = self.field == SettingsField::CodexCommand;
-        self.render_inline_text_field(
+        render_inline_text_field(
             frame,
             rows[10],
             theme,
@@ -256,7 +259,7 @@ impl SettingsModalState {
             codex_cmd_focused,
         );
         let codex_args_focused = self.field == SettingsField::CodexArgs;
-        self.render_inline_text_field(
+        render_inline_text_field(
             frame,
             rows[11],
             theme,
@@ -298,7 +301,7 @@ impl SettingsModalState {
             rows[18],
         );
         const HINTS: [keymap_hint::KeymapHint; 4] = [
-            keymap_hint::KeymapHint::new("Tab/↑↓", "navigate"),
+            keymap_hint::KeymapHint::new("Tab/⇧Tab", "navigate"),
             keymap_hint::KeymapHint::new("←→", "change value"),
             keymap_hint::KeymapHint::new("⏎/^S", "save"),
             keymap_hint::KeymapHint::new("Esc", "cancel"),
@@ -427,76 +430,6 @@ impl SettingsModalState {
         Line::from(spans)
     }
 
-    /// Render a single row with a fixed-width label column on the left and
-    /// a text input filling the rest. Matches the mockup where the two
-    /// columns stay aligned across all single-line fields.
-    fn render_inline_text_field(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        theme: &Theme,
-        label: &str,
-        input: &Input,
-        focused: bool,
-    ) {
-        const LABEL_COL_WIDTH: u16 = 21; // accommodates "Claude Code Command" + trailing space
-        const LEFT_PAD: u16 = 2;
-        const RIGHT_PAD: u16 = 2;
-
-        let label_style = if focused {
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(theme.muted)
-                .add_modifier(Modifier::BOLD)
-        };
-
-        let label_area = Rect {
-            x: area.x + LEFT_PAD,
-            y: area.y,
-            width: LABEL_COL_WIDTH.min(area.width.saturating_sub(LEFT_PAD)),
-            height: 1,
-        };
-        frame.render_widget(
-            Paragraph::new(label.to_owned()).style(label_style),
-            label_area,
-        );
-
-        let input_x = area.x + LEFT_PAD + LABEL_COL_WIDTH;
-        let input_right_edge = area.x + area.width;
-        if input_x + RIGHT_PAD >= input_right_edge {
-            return;
-        }
-        let input_area = Rect {
-            x: input_x,
-            y: area.y,
-            width: input_right_edge - input_x - RIGHT_PAD,
-            height: 1,
-        };
-
-        let style = if focused {
-            Style::default()
-                .fg(theme.settings_input_fg(true))
-                .bg(theme.settings_input_bg(true))
-        } else {
-            Style::default()
-                .fg(theme.settings_input_fg(false))
-                .bg(theme.settings_input_bg(false))
-        };
-        let prefix = if focused { "▎" } else { " " };
-        let text = format!("{prefix}{}", input.value());
-        frame.render_widget(Paragraph::new(text).style(style), input_area);
-
-        if focused {
-            let cursor_x = input_area.x + 1 + input.visual_cursor() as u16;
-            if cursor_x < input_area.right() {
-                frame.set_cursor_position((cursor_x, input_area.y));
-            }
-        }
-    }
-
     fn build_settings(&self) -> Settings {
         let snippet_line_count = self
             .snippet_line_count_input
@@ -555,6 +488,74 @@ fn pad_rect(area: Rect) -> Rect {
         x: area.x.saturating_add(2),
         width: area.width.saturating_sub(4),
         ..area
+    }
+}
+
+/// Render a single row with a fixed-width label column on the left and
+/// a text input filling the rest.
+fn render_inline_text_field(
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    label: &str,
+    input: &Input,
+    focused: bool,
+) {
+    const LABEL_COL_WIDTH: u16 = 21;
+    const LEFT_PAD: u16 = 2;
+    const RIGHT_PAD: u16 = 2;
+
+    let label_style = if focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme.muted)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let label_area = Rect {
+        x: area.x + LEFT_PAD,
+        y: area.y,
+        width: LABEL_COL_WIDTH.min(area.width.saturating_sub(LEFT_PAD)),
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(label.to_owned()).style(label_style),
+        label_area,
+    );
+
+    let input_x = area.x + LEFT_PAD + LABEL_COL_WIDTH;
+    let input_right_edge = area.x + area.width;
+    if input_x + RIGHT_PAD >= input_right_edge {
+        return;
+    }
+    let input_area = Rect {
+        x: input_x,
+        y: area.y,
+        width: input_right_edge - input_x - RIGHT_PAD,
+        height: 1,
+    };
+
+    let style = if focused {
+        Style::default()
+            .fg(theme.settings_input_fg(true))
+            .bg(theme.settings_input_bg(true))
+    } else {
+        Style::default()
+            .fg(theme.settings_input_fg(false))
+            .bg(theme.settings_input_bg(false))
+    };
+    let prefix = if focused { "▎" } else { " " };
+    let text = format!("{prefix}{}", input.value());
+    frame.render_widget(Paragraph::new(text).style(style), input_area);
+
+    if focused {
+        let cursor_x = input_area.x + 1 + input.visual_cursor() as u16;
+        if cursor_x < input_area.right() {
+            frame.set_cursor_position((cursor_x, input_area.y));
+        }
     }
 }
 
@@ -790,12 +791,13 @@ fn builtin_body(backend: SummarizeBackend) -> &'static str {
         SummarizeBackend::Claude => concat!(
             "cd '{{jsonl_dir}}'\n",
             "cat '{{prompt_file}}' | '{{claude_command}}' {{claude_args}} ",
-            "-p > '{{output_file}}'\n",
+            "{{model_flag}} {{effort_flag}} -p > '{{output_file}}'\n",
         ),
         SummarizeBackend::Codex => concat!(
             "cd '{{jsonl_dir}}'\n",
             "cat '{{prompt_file}}' | '{{codex_command}}' {{codex_args}} ",
-            "exec --full-auto --skip-git-repo-check > '{{output_file}}'\n",
+            "{{model_flag}} {{effort_flag}} exec --full-auto ",
+            "--skip-git-repo-check > '{{output_file}}'\n",
         ),
         SummarizeBackend::Custom => "",
     }
@@ -809,6 +811,159 @@ fn render_preset_template(shell: TemplateShell, backend: SummarizeBackend) -> St
 enum TemplatePickerField {
     Shell,
     Backend,
+    Model,
+    Effort,
+}
+
+const CLAUDE_MODELS: [Option<&'static str>; 4] =
+    [None, Some("opus"), Some("sonnet"), Some("haiku")];
+const CLAUDE_EFFORTS: [Option<&'static str>; 5] = [
+    None,
+    Some("low"),
+    Some("medium"),
+    Some("high"),
+    Some("max"),
+];
+
+fn option_label(opt: Option<&str>) -> String {
+    opt.unwrap_or("unset").to_owned()
+}
+
+#[derive(Debug, Clone)]
+struct CodexModelEntry {
+    slug: String,
+    efforts: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+enum CodexSelectors {
+    Cached {
+        models: Vec<CodexModelEntry>,
+        model: RingCursor<Option<String>>,
+        effort: RingCursor<Option<String>>,
+    },
+    Freeform {
+        model: Input,
+        effort: Input,
+    },
+}
+
+impl CodexSelectors {
+    fn load() -> Self {
+        match read_codex_cache() {
+            Some(models) if !models.is_empty() => {
+                let model_items: Vec<Option<String>> = std::iter::once(None)
+                    .chain(models.iter().map(|m| Some(m.slug.clone())))
+                    .collect();
+                let model = RingCursor::new(model_items);
+                let effort: RingCursor<Option<String>> = RingCursor::new(vec![None]);
+                CodexSelectors::Cached {
+                    models,
+                    model,
+                    effort,
+                }
+            }
+            _ => CodexSelectors::Freeform {
+                model: Input::default(),
+                effort: Input::default(),
+            },
+        }
+    }
+
+    fn model_value(&self) -> Option<String> {
+        match self {
+            CodexSelectors::Cached { model, .. } => model.current().clone(),
+            CodexSelectors::Freeform { model, .. } => {
+                let v = model.value().trim();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_owned())
+                }
+            }
+        }
+    }
+
+    fn effort_value(&self) -> Option<String> {
+        match self {
+            CodexSelectors::Cached { effort, .. } => effort.current().clone(),
+            CodexSelectors::Freeform { effort, .. } => {
+                let v = effort.value().trim();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_owned())
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexCacheFile {
+    #[serde(default)]
+    models: Vec<RawCodexModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCodexModel {
+    #[serde(default)]
+    slug: String,
+    #[serde(default)]
+    supported_reasoning_levels: Vec<RawCodexReasoning>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCodexReasoning {
+    #[serde(default)]
+    effort: String,
+}
+
+fn codex_cache_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join(".codex").join("models_cache.json"))
+}
+
+fn read_codex_cache() -> Option<Vec<CodexModelEntry>> {
+    let path = codex_cache_path()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let cache: CodexCacheFile = serde_json::from_str(&text).ok()?;
+    Some(
+        cache
+            .models
+            .into_iter()
+            .filter(|m| !m.slug.is_empty())
+            .map(|m| CodexModelEntry {
+                slug: m.slug,
+                efforts: m
+                    .supported_reasoning_levels
+                    .into_iter()
+                    .map(|r| r.effort)
+                    .filter(|e| !e.is_empty())
+                    .collect(),
+            })
+            .collect(),
+    )
+}
+
+/// Collapse runs of ASCII spaces into a single space. Preserves newlines and
+/// other whitespace. Used after inlining `{{model_flag}}` / `{{effort_flag}}`
+/// so an unset flag doesn't leave stray double-spaces in the resolved string.
+fn collapse_spaces(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for c in s.chars() {
+        if c == ' ' {
+            if !prev_space {
+                out.push(' ');
+            }
+            prev_space = true;
+        } else {
+            out.push(c);
+            prev_space = false;
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -816,6 +971,9 @@ struct TemplatePicker {
     field: RingCursor<TemplatePickerField>,
     shell: RingCursor<TemplateShell>,
     backend: RingCursor<SummarizeBackend>,
+    claude_model: RingCursor<Option<&'static str>>,
+    claude_effort: RingCursor<Option<&'static str>>,
+    codex: CodexSelectors,
 }
 
 enum TemplatePickerOutcome {
@@ -832,53 +990,270 @@ impl TemplatePicker {
         let field = RingCursor::new(vec![
             TemplatePickerField::Shell,
             TemplatePickerField::Backend,
+            TemplatePickerField::Model,
+            TemplatePickerField::Effort,
         ]);
+        let mut claude_model = RingCursor::new(CLAUDE_MODELS.to_vec());
+        claude_model.set(&Some("sonnet"));
+        let mut claude_effort = RingCursor::new(CLAUDE_EFFORTS.to_vec());
+        claude_effort.set(&Some("medium"));
         Self {
             field,
             shell,
             backend,
+            claude_model,
+            claude_effort,
+            codex: CodexSelectors::load(),
+        }
+    }
+
+    fn model_flag(&self) -> String {
+        match *self.backend.current() {
+            SummarizeBackend::Claude => match self.claude_model.current() {
+                Some(m) => format!("--model {m}"),
+                None => String::new(),
+            },
+            SummarizeBackend::Codex => match self.codex.model_value() {
+                Some(s) => format!("--model {s}"),
+                None => String::new(),
+            },
+            SummarizeBackend::Custom => String::new(),
+        }
+    }
+
+    fn effort_flag(&self) -> String {
+        match *self.backend.current() {
+            SummarizeBackend::Claude => match self.claude_effort.current() {
+                Some(e) => format!("--effort {e}"),
+                None => String::new(),
+            },
+            SummarizeBackend::Codex => match self.codex.effort_value() {
+                Some(e) => format!("--config model_reasoning_effort={e}"),
+                None => String::new(),
+            },
+            SummarizeBackend::Custom => String::new(),
         }
     }
 
     fn resolved(&self) -> String {
-        render_preset_template(*self.shell.current(), *self.backend.current())
+        let base = render_preset_template(*self.shell.current(), *self.backend.current());
+        let expanded = base
+            .replace("{{model_flag}}", &self.model_flag())
+            .replace("{{effort_flag}}", &self.effort_flag());
+        collapse_spaces(&expanded)
+    }
+
+    fn move_model(&mut self, forward: bool) {
+        match *self.backend.current() {
+            SummarizeBackend::Claude => {
+                if forward {
+                    self.claude_model.move_next();
+                } else {
+                    self.claude_model.move_prev();
+                }
+            }
+            SummarizeBackend::Codex => match &mut self.codex {
+                CodexSelectors::Cached {
+                    models,
+                    model,
+                    effort,
+                } => {
+                    if forward {
+                        model.move_next();
+                    } else {
+                        model.move_prev();
+                    }
+                    let idx = model.index();
+                    let items: Vec<Option<String>> = if idx == 0 {
+                        vec![None]
+                    } else {
+                        std::iter::once(None)
+                            .chain(models[idx - 1].efforts.iter().cloned().map(Some))
+                            .collect()
+                    };
+                    *effort = RingCursor::new(items);
+                }
+                CodexSelectors::Freeform { .. } => {}
+            },
+            SummarizeBackend::Custom => {}
+        }
+    }
+
+    fn move_effort(&mut self, forward: bool) {
+        match *self.backend.current() {
+            SummarizeBackend::Claude => {
+                if forward {
+                    self.claude_effort.move_next();
+                } else {
+                    self.claude_effort.move_prev();
+                }
+            }
+            SummarizeBackend::Codex => match &mut self.codex {
+                CodexSelectors::Cached { effort, .. } => {
+                    if forward {
+                        effort.move_next();
+                    } else {
+                        effort.move_prev();
+                    }
+                }
+                CodexSelectors::Freeform { .. } => {}
+            },
+            SummarizeBackend::Custom => {}
+        }
+    }
+
+    fn forward_to_input(&mut self, key: KeyEvent, which: TemplatePickerField) {
+        if !matches!(*self.backend.current(), SummarizeBackend::Codex) {
+            return;
+        }
+        if let CodexSelectors::Freeform { model, effort } = &mut self.codex {
+            let target = match which {
+                TemplatePickerField::Model => model,
+                TemplatePickerField::Effort => effort,
+                _ => return,
+            };
+            target.handle_event(&Event::Key(key));
+        }
+    }
+
+    fn is_freeform_input_field(&self, field: TemplatePickerField) -> bool {
+        matches!(field, TemplatePickerField::Model | TemplatePickerField::Effort)
+            && matches!(*self.backend.current(), SummarizeBackend::Codex)
+            && matches!(self.codex, CodexSelectors::Freeform { .. })
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> TemplatePickerOutcome {
+        // Enter/Esc always terminate, even in freeform inputs.
         match key.code {
             KeyCode::Esc => return TemplatePickerOutcome::Cancel,
             KeyCode::Enter => return TemplatePickerOutcome::Insert(self.resolved()),
-            KeyCode::Tab | KeyCode::Down => {
+            KeyCode::Tab => {
                 self.field.move_next();
+                return TemplatePickerOutcome::Stay;
             }
-            KeyCode::BackTab | KeyCode::Up => {
+            KeyCode::BackTab => {
                 self.field.move_prev();
+                return TemplatePickerOutcome::Stay;
             }
-            KeyCode::Left | KeyCode::Char('h') => match *self.field.current() {
+            _ => {}
+        }
+
+        let field = *self.field.current();
+        // Freeform inputs consume everything else (letters, arrows for text
+        // cursor, backspace, etc.).
+        if self.is_freeform_input_field(field) {
+            self.forward_to_input(key, field);
+            return TemplatePickerOutcome::Stay;
+        }
+
+        match key.code {
+            KeyCode::Left | KeyCode::Char('h') => match field {
                 TemplatePickerField::Shell => {
                     self.shell.move_prev();
                 }
                 TemplatePickerField::Backend => {
                     self.backend.move_prev();
                 }
+                TemplatePickerField::Model => self.move_model(false),
+                TemplatePickerField::Effort => self.move_effort(false),
             },
-            KeyCode::Right | KeyCode::Char('l') => match *self.field.current() {
+            KeyCode::Right | KeyCode::Char('l') => match field {
                 TemplatePickerField::Shell => {
                     self.shell.move_next();
                 }
                 TemplatePickerField::Backend => {
                     self.backend.move_next();
                 }
+                TemplatePickerField::Model => self.move_model(true),
+                TemplatePickerField::Effort => self.move_effort(true),
             },
             _ => {}
         }
         TemplatePickerOutcome::Stay
     }
 
-    /// Render the picker as a popup inset by 1 cell on each edge of
-    /// `host` (the settings dialog rect). This produces the "just inside"
-    /// nested-dialog look instead of a second centered popup that can
-    /// drift well outside the settings frame on tall/narrow terminals.
+    fn render_model_row(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let focused = self.field == TemplatePickerField::Model;
+        match *self.backend.current() {
+            SummarizeBackend::Claude => {
+                let items: Vec<String> = CLAUDE_MODELS.iter().map(|m| option_label(*m)).collect();
+                let line = inline_radio_row(
+                    "Model",
+                    &items,
+                    self.claude_model.index(),
+                    area.width,
+                    theme,
+                    focused,
+                );
+                frame.render_widget(Paragraph::new(line), area);
+            }
+            SummarizeBackend::Codex => match &self.codex {
+                CodexSelectors::Cached { model, .. } => {
+                    let items: Vec<String> = model
+                        .items()
+                        .iter()
+                        .map(|o| option_label(o.as_deref()))
+                        .collect();
+                    let line = inline_radio_row(
+                        "Model",
+                        &items,
+                        model.index(),
+                        area.width,
+                        theme,
+                        focused,
+                    );
+                    frame.render_widget(Paragraph::new(line), area);
+                }
+                CodexSelectors::Freeform { model, .. } => {
+                    render_inline_text_field(frame, area, theme, "Model", model, focused);
+                }
+            },
+            SummarizeBackend::Custom => {}
+        }
+    }
+
+    fn render_effort_row(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let focused = self.field == TemplatePickerField::Effort;
+        match *self.backend.current() {
+            SummarizeBackend::Claude => {
+                let items: Vec<String> = CLAUDE_EFFORTS.iter().map(|m| option_label(*m)).collect();
+                let line = inline_radio_row(
+                    "Effort",
+                    &items,
+                    self.claude_effort.index(),
+                    area.width,
+                    theme,
+                    focused,
+                );
+                frame.render_widget(Paragraph::new(line), area);
+            }
+            SummarizeBackend::Codex => match &self.codex {
+                CodexSelectors::Cached { effort, .. } => {
+                    let items: Vec<String> = effort
+                        .items()
+                        .iter()
+                        .map(|o| option_label(o.as_deref()))
+                        .collect();
+                    let line = inline_radio_row(
+                        "Effort",
+                        &items,
+                        effort.index(),
+                        area.width,
+                        theme,
+                        focused,
+                    );
+                    frame.render_widget(Paragraph::new(line), area);
+                }
+                CodexSelectors::Freeform { effort, .. } => {
+                    render_inline_text_field(frame, area, theme, "Effort", effort, focused);
+                }
+            },
+            SummarizeBackend::Custom => {}
+        }
+    }
+
+    /// Render the picker as a popup inset by 1 cell on each edge of `host`
+    /// (the settings dialog rect).
     fn render(&self, frame: &mut Frame, host: Rect, theme: &Theme) {
         let popup = Rect {
             x: host.x.saturating_add(1),
@@ -897,16 +1272,17 @@ impl TemplatePicker {
 
         let rows = Layout::vertical([
             Constraint::Length(1), // 0 padding
-            Constraint::Length(1), // 1 shell radio
-            Constraint::Length(1), // 2 spacing
-            Constraint::Length(1), // 3 backend radio
-            Constraint::Length(1), // 4 spacing
-            Constraint::Length(1), // 5 preview label
-            Constraint::Min(3),    // 6 preview
-            Constraint::Length(1), // 7 spacing
-            Constraint::Length(4), // 8 docs
-            Constraint::Length(1), // 9 divider
-            Constraint::Length(1), // 10 hints
+            Constraint::Length(1), // 1 shell
+            Constraint::Length(1), // 2 backend
+            Constraint::Length(1), // 3 model
+            Constraint::Length(1), // 4 effort
+            Constraint::Length(1), // 5 spacing
+            Constraint::Length(1), // 6 preview label
+            Constraint::Min(3),    // 7 preview
+            Constraint::Length(1), // 8 spacing
+            Constraint::Length(4), // 9 docs
+            Constraint::Length(1), // 10 divider
+            Constraint::Length(1), // 11 hints
         ])
         .split(inner);
 
@@ -932,13 +1308,16 @@ impl TemplatePicker {
                 .map(|b| backend_label(*b).to_owned())
                 .collect::<Vec<_>>(),
             self.backend.index(),
-            rows[3].width,
+            rows[2].width,
             theme,
             backend_focused,
         );
-        frame.render_widget(Paragraph::new(backend_line), rows[3]);
+        frame.render_widget(Paragraph::new(backend_line), rows[2]);
 
-        render_field_label(frame, rows[5], theme, "Preview", false);
+        self.render_model_row(frame, rows[3], theme);
+        self.render_effort_row(frame, rows[4], theme);
+
+        render_field_label(frame, rows[6], theme, "Preview", false);
         let preview = self.resolved();
         let bg = theme.settings_input_bg(false);
         let preview_style = Style::default().fg(theme.text).bg(bg);
@@ -947,32 +1326,33 @@ impl TemplatePicker {
                 .style(preview_style)
                 .block(Block::default().style(Style::default().bg(bg)))
                 .wrap(Wrap { trim: false }),
-            pad_rect(rows[6]),
+            pad_rect(rows[7]),
         );
 
         let docs = concat!(
             "Placeholders: {{jsonl_dir}}, {{prompt_file}}, {{output_file}},\n",
-            "  {{claude_command}}, {{claude_args}}, {{codex_command}}, {{codex_args}}.\n",
+            "  {{claude_command}}, {{claude_args}}, {{codex_command}}, {{codex_args}},\n",
+            "  {{model_flag}}, {{effort_flag}} (resolved on insert from pickers above).\n",
             "Edit after inserting; we run it verbatim through your shell."
         );
         frame.render_widget(
             Paragraph::new(docs)
                 .style(Style::default().fg(theme.muted))
                 .wrap(Wrap { trim: false }),
-            pad_rect(rows[8]),
+            pad_rect(rows[9]),
         );
 
         frame.render_widget(
             Paragraph::new("─".repeat(inner.width as usize))
                 .style(Style::default().fg(theme.focus_border)),
-            rows[9],
+            rows[10],
         );
         const HINTS: [keymap_hint::KeymapHint; 3] = [
-            keymap_hint::KeymapHint::new("Tab/↑↓", "navigate"),
+            keymap_hint::KeymapHint::new("Tab/⇧Tab", "navigate"),
             keymap_hint::KeymapHint::new("⏎", "insert"),
             keymap_hint::KeymapHint::new("Esc", "cancel"),
         ];
-        keymap_hint::render(frame, rows[10], &HINTS, theme, "");
+        keymap_hint::render(frame, rows[11], &HINTS, theme, "");
     }
 }
 
@@ -981,8 +1361,12 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::style::Style;
 
-    use super::{SettingsField, SettingsModalState, SettingsOutcome};
+    use super::{
+        collapse_spaces, SettingsField, SettingsModalState, SettingsOutcome, TemplatePicker,
+        TemplatePickerField, TemplateShell,
+    };
     use crate::settings::{Settings, ThemeName};
+    use crate::summary::SummarizeBackend;
     use crate::tui::theme::Theme;
 
     #[test]
@@ -1038,6 +1422,49 @@ mod tests {
         assert_eq!(
             rendered.spans[9].style,
             Style::default().fg(theme.muted_greater)
+        );
+    }
+
+    #[test]
+    fn collapse_spaces_reduces_runs_but_keeps_newlines() {
+        assert_eq!(collapse_spaces("a  b   c"), "a b c");
+        assert_eq!(collapse_spaces("x\n  y"), "x\n y");
+        assert_eq!(collapse_spaces("trailing   "), "trailing ");
+    }
+
+    #[test]
+    fn claude_picker_defaults_include_sonnet_and_medium_flags() {
+        let picker = TemplatePicker::new(TemplateShell::Zsh);
+        assert!(picker.backend == SummarizeBackend::Claude);
+        let resolved = picker.resolved();
+        assert!(resolved.contains("--model sonnet"), "got: {resolved}");
+        assert!(resolved.contains("--effort medium"), "got: {resolved}");
+        // No stray double-spaces after inlining flags.
+        assert!(!resolved.contains("  "), "got: {resolved}");
+    }
+
+    #[test]
+    fn claude_picker_with_unset_model_drops_model_flag() {
+        let mut picker = TemplatePicker::new(TemplateShell::Zsh);
+        assert!(picker.field.set(&TemplatePickerField::Model));
+        // Left from sonnet -> opus, from opus -> unset.
+        let ev = KeyEvent::new(KeyCode::Left, KeyModifiers::empty());
+        picker.handle_key(ev);
+        picker.handle_key(ev);
+        let resolved = picker.resolved();
+        assert!(!resolved.contains("--model"), "got: {resolved}");
+        assert!(resolved.contains("--effort medium"));
+    }
+
+    #[test]
+    fn codex_picker_defaults_to_unset_flags() {
+        let mut picker = TemplatePicker::new(TemplateShell::Zsh);
+        picker.backend.set(&SummarizeBackend::Codex);
+        let resolved = picker.resolved();
+        assert!(!resolved.contains("--model"), "got: {resolved}");
+        assert!(
+            !resolved.contains("model_reasoning_effort"),
+            "got: {resolved}"
         );
     }
 

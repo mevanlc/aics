@@ -21,6 +21,10 @@ impl<T> RingCursor<T> {
         self.index
     }
 
+    pub fn items(&self) -> &[T] {
+        &self.items
+    }
+
     pub fn move_next(&mut self) -> &T {
         self.index = (self.index + 1) % self.items.len();
         self.current()
