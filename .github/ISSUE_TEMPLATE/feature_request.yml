@@ -1,0 +1,59 @@
+name: Feature request
+description: Suggest a new feature, enhancement, or UX improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem are you trying to solve? What's the user story?
+      placeholder: "When searching across thousands of Codex sessions I can't..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the feature or change you'd like. Mockups, key bindings, or example commands welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you've considered and why they fall short.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of aics does this touch?
+      multiple: true
+      options:
+        - Search / indexing (tantivy)
+        - TUI / rendering (ratatui)
+        - Parsers (Claude Code / Codex JSONL)
+        - Clipboard / export
+        - Configuration / CLI
+        - Packaging / release
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links, related issues, screenshots, or prior art.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
