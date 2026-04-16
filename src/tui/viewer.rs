@@ -15,6 +15,7 @@ use crate::parse::Session;
 use crate::search_query::extract_highlight_terms;
 use crate::settings::ThemeName;
 use crate::summary::SummarySidecar;
+use crate::tui::actions::ACTION_LETTER_HINTS;
 use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::markdown::render_markdown_message;
 use crate::tui::preview::{render_message_body, render_session_text};
@@ -221,6 +222,7 @@ impl ViewerState {
         summary: Option<&SummarySidecar>,
         theme: &Theme,
         theme_name: ThemeName,
+        menu_armed: bool,
     ) {
         let _profile = profile::scope("viewer.render");
         frame.render_widget(Clear, area);
@@ -269,12 +271,16 @@ impl ViewerState {
                 .title(block_title(Span::styled(
                     "Search",
                     Style::default().fg(theme.accent),
-                )))
-                .title(search_focus_title(theme)),
+                ))),
         );
         frame.render_widget(search_bar, footer_chunks[0]);
 
-        keymap_hint::render(frame, footer_chunks[1], &Self::HINTS, theme, "");
+        let hints: &[KeymapHint] = if menu_armed {
+            &ACTION_LETTER_HINTS[..]
+        } else {
+            &Self::HINTS[..]
+        };
+        keymap_hint::render(frame, footer_chunks[1], hints, theme, "");
 
         let cursor_x = footer_chunks[0]
             .x
@@ -479,19 +485,6 @@ fn viewer_title(session: &Session, theme: &Theme, scroll_percent: usize) -> Line
             Style::default().fg(theme.accent),
         ),
     ])
-}
-
-fn search_focus_title(theme: &Theme) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            "Focused",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        ),
-        Span::styled("─", Style::default().fg(theme.border)),
-    ])
-    .right_aligned()
 }
 
 fn scroll_progress_percent(scroll: usize, viewport_height: usize, total_rows: usize) -> usize {
@@ -742,7 +735,6 @@ mod tests {
 
     use chrono::Utc;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::layout::Alignment;
     use ratatui::layout::Rect;
     use ratatui::text::{Line, Text};
     use tui_input::Input;
@@ -757,8 +749,8 @@ mod tests {
     use super::{
         collect_match_rows, collect_message_rows, match_scrolloff, message_header_text,
         message_row_for_scroll, next_match_index, previous_match_index, scroll_for_match,
-        scroll_progress_percent, search_focus_title, viewer_title, MessageDirection,
-        MessageJumpScope, ViewerOutcome, ViewerState,
+        scroll_progress_percent, viewer_title, MessageDirection, MessageJumpScope,
+        ViewerOutcome, ViewerState,
     };
 
     #[test]
@@ -896,21 +888,6 @@ mod tests {
         let state = ViewerState::new();
 
         assert!(state.active_match.is_none());
-    }
-
-    #[test]
-    fn search_focus_title_is_right_aligned() {
-        let focused = search_focus_title(&Theme::default());
-
-        assert_eq!(focused.alignment, Some(Alignment::Right));
-        assert_eq!(
-            focused
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>(),
-            "Focused─"
-        );
     }
 
     #[test]

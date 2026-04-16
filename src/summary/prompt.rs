@@ -11,7 +11,8 @@ The session is stored as JSONL at this absolute path:
 Read the entire file yourself. Produce a concise Markdown summary that
 helps a developer triage this session later at a glance.
 
-Structure the summary with these sections (keep each short):
+Structure the summary with these sections (keep each short, and start
+your reply with ## TL;DR as below):
 
 ## TL;DR
 One or two sentences — what was the session about and what was the outcome.

@@ -125,7 +125,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 19] = [
     ),
 ];
 
-const VIEWER_ITEMS: [HelpItem; 15] = [
+const VIEWER_ITEMS: [HelpItem; 17] = [
     HelpItem::new(
         "?",
         "open this help",
@@ -135,6 +135,16 @@ const VIEWER_ITEMS: [HelpItem; 15] = [
         "Esc",
         "close viewer",
         "Close the dedicated viewer and return to the session list. Esc no longer clears the viewer search field first.",
+    ),
+    HelpItem::new(
+        "Enter",
+        "open actions menu",
+        "Open the session actions menu for the session currently shown in the dedicated viewer. Cancelling that menu returns you to the same viewer state.",
+    ),
+    HelpItem::new(
+        "^X + letter",
+        "run menu action",
+        "Press Ctrl+X followed by a main-menu letter such as v, d, e, r, or f to run that action for the session currently shown in the viewer.",
     ),
     HelpItem::new(
         "Type",

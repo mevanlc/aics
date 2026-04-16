@@ -23,6 +23,22 @@ const ACTIONS: [ActionItem; 9] = [
     ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
 ];
 
+/// Footer hints shown while the `^X` action-letter prefix is armed.
+/// Shared between the session list and the viewer.
+pub const ACTION_LETTER_HINTS: [keymap_hint::KeymapHint; 11] = [
+    keymap_hint::KeymapHint::new("Esc", "cancel ^x"),
+    keymap_hint::KeymapHint::new("v", "view"),
+    keymap_hint::KeymapHint::new("s", "summarize"),
+    keymap_hint::KeymapHint::new("e", "export"),
+    keymap_hint::KeymapHint::new("i", "copy id"),
+    keymap_hint::KeymapHint::new("p", "copy path"),
+    keymap_hint::KeymapHint::new("o", "copy dir"),
+    keymap_hint::KeymapHint::new("d", "delete session"),
+    keymap_hint::KeymapHint::new("r", "resume"),
+    keymap_hint::KeymapHint::new("f", "fork"),
+    keymap_hint::KeymapHint::new("?", "help"),
+];
+
 pub fn action_for_key(ch: char) -> Option<SessionAction> {
     ACTIONS
         .iter()

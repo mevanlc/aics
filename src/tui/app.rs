@@ -255,6 +255,7 @@ pub struct App {
     pending_main_menu_action: bool,
     pending_list_click: Option<PendingListClick>,
     pending_action_menu_click: Option<PendingListClick>,
+    viewer_before_actions: Option<ViewerState>,
 }
 
 impl App {
@@ -269,19 +270,6 @@ impl App {
         keymap_hint::KeymapHint::new("Esc", "clear/cancel"),
         keymap_hint::KeymapHint::new("^C", "quit"),
         keymap_hint::KeymapHint::new("PgUp/PgDn", "scroll"),
-    ];
-    const MAIN_MENU_HINTS: [keymap_hint::KeymapHint; 11] = [
-        keymap_hint::KeymapHint::new("Esc", "cancel ^x"),
-        keymap_hint::KeymapHint::new("v", "view"),
-        keymap_hint::KeymapHint::new("s", "summarize"),
-        keymap_hint::KeymapHint::new("e", "export"),
-        keymap_hint::KeymapHint::new("i", "copy id"),
-        keymap_hint::KeymapHint::new("p", "copy path"),
-        keymap_hint::KeymapHint::new("o", "copy dir"),
-        keymap_hint::KeymapHint::new("d", "delete session"),
-        keymap_hint::KeymapHint::new("r", "resume"),
-        keymap_hint::KeymapHint::new("f", "fork"),
-        keymap_hint::KeymapHint::new("?", "help"),
     ];
 
     fn new(
@@ -345,6 +333,7 @@ impl App {
             pending_main_menu_action: false,
             pending_list_click: None,
             pending_action_menu_click: None,
+            viewer_before_actions: None,
         }
     }
 
@@ -643,7 +632,7 @@ impl App {
         }
 
         let hints = if self.pending_main_menu_action {
-            &Self::MAIN_MENU_HINTS[..]
+            &actions::ACTION_LETTER_HINTS[..]
         } else {
             &Self::MAIN_HINTS[..]
         };
@@ -658,14 +647,35 @@ impl App {
             .map(|hit| (hit.session.agent, hit.session.file_path.clone()));
         let viewer_summary = viewer_summary_target
             .and_then(|(agent, path)| self.summary_sidecar_for_path(agent, &path));
+        let menu_armed = self.pending_main_menu_action;
         let results = &self.results;
         let preview_cache = &self.preview_cache;
+        let viewer_before_actions = &mut self.viewer_before_actions;
         match &mut self.overlay {
             Overlay::None => {}
             Overlay::Filters(filter_state) => {
                 filter_state.render(frame, frame.area(), &theme, &local_scope_label);
             }
-            Overlay::Actions(action_menu) => action_menu.render(frame, frame.area(), &theme),
+            Overlay::Actions(action_menu) => {
+                if let Some(viewer_state) = viewer_before_actions.as_mut() {
+                    let session = results
+                        .get(selected)
+                        .and_then(|hit| preview_cache.get(&hit.session.file_path))
+                        .and_then(|session| session.as_ref());
+                    if let Some(session) = session {
+                        viewer_state.render(
+                            frame,
+                            frame.area(),
+                            session,
+                            viewer_summary.as_ref(),
+                            &theme,
+                            viewer_theme_name,
+                            menu_armed,
+                        );
+                    }
+                }
+                action_menu.render(frame, frame.area(), &theme);
+            }
             Overlay::Viewer(viewer_state) => {
                 let session = results
                     .get(selected)
@@ -679,6 +689,7 @@ impl App {
                         viewer_summary.as_ref(),
                         &theme,
                         viewer_theme_name,
+                        menu_armed,
                     );
                 }
             }
@@ -847,6 +858,26 @@ impl App {
             return Ok(());
         }
 
+        if matches!(self.overlay, Overlay::Viewer(_)) && self.handle_pending_main_menu_key(key)? {
+            return Ok(());
+        }
+
+        if matches!(self.overlay, Overlay::Viewer(_))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('x')
+        {
+            self.pending_main_menu_action = self.selected_index().is_some();
+            return Ok(());
+        }
+
+        if matches!(self.overlay, Overlay::Viewer(_))
+            && key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+        {
+            self.open_actions_menu();
+            return Ok(());
+        }
+
         let viewer_area = self.last_frame_area;
         let viewer_theme_name = self.current_frame_theme_name();
         let viewer_session = if matches!(self.overlay, Overlay::Viewer(_)) {
@@ -876,12 +907,11 @@ impl App {
                 ActionOutcome::Stay => {}
                 ActionOutcome::Close => {
                     self.pending_action_menu_click = None;
-                    self.overlay = Overlay::None;
+                    self.close_actions_overlay();
                 }
                 ActionOutcome::Run(action) => {
                     self.pending_action_menu_click = None;
-                    self.overlay = Overlay::None;
-                    if let Err(error) = self.run_session_action(action) {
+                    if let Err(error) = self.run_action_from_actions_overlay(action) {
                         self.statusline = Some(statusline::Entry::failed(format!("{error:#}")));
                     }
                 }
@@ -1043,10 +1073,10 @@ impl App {
                         self.pending_action_menu_click = None;
                     }
                     if close_overlay {
-                        self.overlay = Overlay::None;
+                        self.close_actions_overlay();
                     }
                     if let Some(action) = action_to_run {
-                        if let Err(error) = self.run_session_action(action) {
+                        if let Err(error) = self.run_action_from_actions_overlay(action) {
                             self.statusline = Some(statusline::Entry::failed(format!("{error:#}")));
                         }
                     }
@@ -1419,14 +1449,59 @@ impl App {
             self.pending_main_menu_action = false;
             self.pending_list_click = None;
             self.pending_action_menu_click = None;
+            self.viewer_before_actions = None;
             self.overlay = Overlay::Viewer(ViewerState::with_search(&self.committed_query));
         }
+    }
+
+    fn open_actions_menu(&mut self) {
+        if self.selected_index().is_none() {
+            return;
+        }
+
+        self.pending_main_menu_action = false;
+        self.pending_action_menu_click = None;
+
+        let previous_overlay = std::mem::replace(&mut self.overlay, Overlay::None);
+        self.viewer_before_actions = match previous_overlay {
+            Overlay::Viewer(state) => Some(state),
+            other => {
+                self.overlay = other;
+                None
+            }
+        };
+        self.overlay = Overlay::Actions(ActionMenuState::new());
+    }
+
+    fn close_actions_overlay(&mut self) {
+        self.overlay = self
+            .viewer_before_actions
+            .take()
+            .map(Overlay::Viewer)
+            .unwrap_or(Overlay::None);
+    }
+
+    fn run_action_from_actions_overlay(&mut self, action: SessionAction) -> Result<()> {
+        if matches!(action, SessionAction::View) && self.viewer_before_actions.is_some() {
+            self.close_actions_overlay();
+            return Ok(());
+        }
+
+        self.close_actions_overlay();
+        self.run_session_action(action)
     }
 
     fn handle_pending_main_menu_key(&mut self, key: KeyEvent) -> Result<bool> {
         if !self.pending_main_menu_action {
             return Ok(false);
         }
+
+        let from_viewer = matches!(self.overlay, Overlay::Viewer(_));
+        let help_tab = if from_viewer {
+            HelpTab::Viewer
+        } else {
+            HelpTab::SessionList
+        };
 
         match key.code {
             KeyCode::Esc => {
@@ -1435,7 +1510,7 @@ impl App {
             }
             KeyCode::Char('?') if key.modifiers.is_empty() => {
                 self.pending_main_menu_action = false;
-                self.open_help(HelpTab::SessionList);
+                self.open_help(help_tab);
                 Ok(true)
             }
             KeyCode::Char(ch)
@@ -1445,6 +1520,9 @@ impl App {
             {
                 if let Some(action) = actions::action_for_key(ch) {
                     self.pending_main_menu_action = false;
+                    if from_viewer && matches!(action, SessionAction::View) {
+                        return Ok(true);
+                    }
                     self.run_session_action(action)?;
                     return Ok(true);
                 }
@@ -2612,6 +2690,63 @@ mod tests {
             app.help.as_ref().map(|state| state.tab()),
             Some(HelpTab::Viewer)
         );
+    }
+
+    #[test]
+    fn enter_in_viewer_opens_actions_overlay() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.open_viewer();
+
+        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::Actions(_)));
+    }
+
+    #[test]
+    fn closing_actions_opened_from_viewer_restores_viewer() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.open_viewer();
+        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
+
+        app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+    }
+
+    #[test]
+    fn ctrl_x_then_v_keeps_viewer_open_when_viewer_is_visible() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.open_viewer();
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        app.handle_key(crossterm_key(KeyCode::Char('v'))).unwrap();
+
+        assert!(!app.pending_main_menu_action);
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+    }
+
+    #[test]
+    fn ctrl_x_then_d_from_viewer_opens_delete_confirmation() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.open_viewer();
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        app.handle_key(crossterm_key(KeyCode::Char('d'))).unwrap();
+
+        assert!(!app.pending_main_menu_action);
+        assert!(matches!(app.overlay, super::Overlay::ConfirmDelete));
     }
 
     #[test]
