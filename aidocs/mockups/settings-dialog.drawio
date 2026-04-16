@@ -1,6 +1,6 @@
 <mxfile host="Electron" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.6.6 Chrome/144.0.7559.236 Electron/40.8.4 Safari/537.36" version="29.6.6">
   <diagram name="aics Settings dialog" id="aics-settings-modal">
-    <mxGraphModel dx="1231" dy="908" grid="0" gridSize="10" guides="1" tooltips="1" connect="0" arrows="0" fold="0" page="1" pageScale="1" pageWidth="820" pageHeight="540" background="#000000" math="0" shadow="0">
+    <mxGraphModel dx="1554" dy="1590" grid="0" gridSize="10" guides="1" tooltips="1" connect="0" arrows="0" fold="0" page="1" pageScale="1" pageWidth="820" pageHeight="540" background="#000000" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -48,13 +48,10 @@
         <mxCell id="9Jfk4WQGNPr11rYVo2e6-5" parent="1" style="rounded=0;whiteSpace=wrap;html=1;strokeColor=light-dark(#000000, #333333);" value="" vertex="1">
           <mxGeometry height="1" width="593" x="115" y="149" as="geometry" />
         </mxCell>
-        <mxCell id="9Jfk4WQGNPr11rYVo2e6-6" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontFamily=Courier New;fontSize=12;" value="&lt;span style=&quot;color:#888888;&quot;&gt;&amp;nbsp;&amp;nbsp;&lt;/span&gt;&lt;b style=&quot;color:#888888;&quot;&gt;&amp;nbsp;&amp;lt;&amp;nbsp;&lt;/b&gt;&lt;span style=&quot;background-color:#224477;color:#FFFFFF;&quot;&gt;&lt;b&gt;● Claude&lt;/b&gt;&lt;/span&gt;&lt;span style=&quot;color:#555555;&quot;&gt;&amp;nbsp;&amp;nbsp;&lt;/span&gt;&lt;span style=&quot;color:#888888;&quot;&gt;○ Codex&lt;/span&gt;&lt;span style=&quot;color:#555555;&quot;&gt;&amp;nbsp;&amp;nbsp;&lt;/span&gt;&lt;span style=&quot;color:#888888;&quot;&gt;○ Custom&lt;/span&gt;&lt;b style=&quot;color:#555555;&quot;&gt;&amp;nbsp;&lt;/b&gt;" vertex="1">
-          <mxGeometry height="18" width="402" x="230" y="261" as="geometry" />
+        <mxCell id="9Jfk4WQGNPr11rYVo2e6-7" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontFamily=Courier New;fontSize=12;fontColor=light-dark(#000000,#888888);fontStyle=1" value="&lt;span style=&quot;font-weight: normal;&quot;&gt;&amp;nbsp;&amp;nbsp;Session summarizer command (press ^N to insert a preset template)&lt;/span&gt;" vertex="1">
+          <mxGeometry height="18" width="589" x="97" y="261" as="geometry" />
         </mxCell>
-        <mxCell id="9Jfk4WQGNPr11rYVo2e6-7" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontFamily=Courier New;fontSize=12;fontColor=light-dark(#000000,#888888);fontStyle=1" value="&lt;span style=&quot;font-weight: normal;&quot;&gt;&amp;nbsp;&amp;nbsp;Session summarizer&lt;/span&gt;" vertex="1">
-          <mxGeometry height="18" width="203" x="97" y="261" as="geometry" />
-        </mxCell>
-        <mxCell id="9Jfk4WQGNPr11rYVo2e6-8" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#111111;strokeColor=#333333;fontColor=#DDDDDD;fontFamily=Courier New;fontSize=12;align=left;verticalAlign=top;spacingLeft=4;" value="{{codex_cmd}} exec ..." vertex="1">
+        <mxCell id="9Jfk4WQGNPr11rYVo2e6-8" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#111111;strokeColor=#333333;fontColor=#DDDDDD;fontFamily=Courier New;fontSize=12;align=left;verticalAlign=top;spacingLeft=4;" value="..." vertex="1">
           <mxGeometry height="49" width="596" x="112" y="289" as="geometry" />
         </mxCell>
         <mxCell id="9Jfk4WQGNPr11rYVo2e6-9" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#111111;strokeColor=#333333;fontColor=#DDDDDD;fontFamily=Courier New;fontSize=12;align=left;verticalAlign=top;spacingLeft=4;" value="Summarize the JSONL session at {{session_file}}." vertex="1">

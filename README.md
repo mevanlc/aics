@@ -2,7 +2,7 @@
 
 `aics` (AI Chat Search) is a cross-platform Rust TUI for searching local Claude Code and Codex CLI chat session history.
 
-It builds a local Tantivy index over your session JSONL files and gives you an interactive terminal UI with full-text search, live previews, filters, and a markdown-rendered session viewer. It can also emit JSONL results for scripting.
+It builds a local Tantivy index over your session JSONL files and gives you an interactive terminal UI with full-text search, live previews, filters, and a markdown-rendered session viewer. It can also emit JSONL results for scripting, delete unwanted sessions, resume sessions, attach an AI-generated (Claude Code or Codex CLI) summary to sessions, and more.
 
 ## Features
 
@@ -21,17 +21,13 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 
 Pre-built binaries for Linux, macOS (Intel + Apple Silicon), and Windows are published on the [releases page](https://github.com/mevanlc/aics/releases).
 
-From source:
-
-```bash
-cargo install --path .
-```
+From source: `cargo install --path .`
 
 ## Screenshots
 
 <img src="https://i.imgur.com/AnwmZGF.png">
 
-<img src="https://i.imgur.com/p6LscZu.png">
+<img src="https://i.imgur.com/V2s9irA.png">
 
 <img src="https://i.imgur.com/ZgzA25c.png">
 
@@ -42,22 +38,13 @@ cargo install --path .
 
 ```bash
 # Search sessions for the current directory, open the TUI
-aics deploy
-
+aics
 # Search across all indexed sessions
 aics -g
-
-# Filter to Claude sessions after a date, sorted by relevance
-aics -g --agent claude --after 2026-03-01 --sort-by relevance "vector db"
-
 # Emit JSONL instead of launching the TUI
 aics --json -g "vector db"
-
-# Rebuild the index from scratch
-aics --rebuild-index
-
-# Nuke the index and exit
-aics --delete-index
+# Delete or rebuild the index
+aics <--rebuild-index|--delete-index>
 ```
 
 Run `aics --help` for the full flag list.
@@ -123,16 +110,16 @@ Override the config root with `AICS_CONFIG_ROOT`.
 Available options:
 
 - `theme` (`lazygit`, `aics`, `sunset`, `late.sh`)
-- `claude_command` default: `claude --dangerously-skip-permissions`
-- `codex_command` default: `codex --yolo`
+- `claude_command` default: `claude`, `claude_args` default: `--dangerously-skip-permissions`
+- `codex_command` default: `codex`, `codex_args` default: `--yolo`
 - `show_preview`
 - `preview_width_pct`
 - `session_separator`
 - `snippet_line_count`
-- `summarize_backend` (`claude`, `codex`, `custom`)
-- `summarize_command_custom`
+- `summarize_command`
 - `summarize_prompt`
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
