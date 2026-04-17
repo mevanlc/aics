@@ -59,7 +59,8 @@ use crate::tui::util::{
     wrapped_text_height,
 };
 use crate::tui::viewer::{
-    collect_message_rows, message_row_for_scroll, MessageDirection, MessageJumpScope,
+    collect_match_rows_in_text, collect_message_rows, message_row_for_scroll, next_match_index,
+    previous_match_index, scroll_for_match, MatchDirection, MessageDirection, MessageJumpScope,
     ViewerOutcome, ViewerState,
 };
 use crate::tui::{keymap_hint, layout, list, preview, search};
@@ -112,11 +113,13 @@ struct PreviewRenderCache {
     theme_name: ThemeName,
     wrapped_height: Option<usize>,
     text: Text<'static>,
+    match_rows: Vec<usize>,
 }
 
 pub struct PreviewRenderState<'a> {
     pub text: &'a Text<'static>,
     pub max_scroll: usize,
+    pub active_match_row: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -235,6 +238,7 @@ pub struct App {
     preview_cache: HashMap<PathBuf, Option<Session>>,
     hidden_deleted_paths: HashSet<PathBuf>,
     preview_render_cache: Option<PreviewRenderCache>,
+    preview_active_match: Option<usize>,
     committed_query: String,
     pending_search: bool,
     last_edit_at: Option<Instant>,
@@ -259,14 +263,15 @@ pub struct App {
 }
 
 impl App {
-    const MAIN_HINTS: [keymap_hint::KeymapHint; 10] = [
+    const MAIN_HINTS: [keymap_hint::KeymapHint; 11] = [
         keymap_hint::KeymapHint::new("?", "help"),
         keymap_hint::KeymapHint::new("↑↓", "select"),
         keymap_hint::KeymapHint::new("⏎", "actions"),
         keymap_hint::KeymapHint::new("^F", "filters"),
-        keymap_hint::KeymapHint::new("^S", "settings"),
+        keymap_hint::KeymapHint::new("^T", "settings"),
         keymap_hint::KeymapHint::new("^Y", "cycle snippet"),
-        keymap_hint::KeymapHint::new("^P", "toggle preview"),
+        keymap_hint::KeymapHint::new("^S", "toggle preview"),
+        keymap_hint::KeymapHint::new("^N/^P", "next/prev hit"),
         keymap_hint::KeymapHint::new("Esc", "clear/cancel"),
         keymap_hint::KeymapHint::new("^C", "quit"),
         keymap_hint::KeymapHint::new("PgUp/PgDn", "scroll"),
@@ -311,6 +316,7 @@ impl App {
             preview_cache: HashMap::new(),
             hidden_deleted_paths: HashSet::new(),
             preview_render_cache: None,
+            preview_active_match: None,
             committed_query: initial_request.query,
             pending_search: true,
             last_edit_at: None,
@@ -500,6 +506,7 @@ impl App {
                 highlight_query,
                 self.summary_inflight.contains(&path),
             );
+            let match_rows = collect_match_rows_in_text(&text, &query, width);
             self.preview_render_cache = Some(PreviewRenderCache {
                 path: path.clone(),
                 query: query.clone(),
@@ -507,7 +514,9 @@ impl App {
                 theme_name,
                 wrapped_height: None,
                 text,
+                match_rows,
             });
+            self.preview_active_match = None;
         } else {
             profile::event("preview.cache.hit");
         }
@@ -533,9 +542,13 @@ impl App {
                 .unwrap_or_default()
                 .saturating_sub(viewport_height)
         };
+        let active_match_row = self
+            .preview_active_match
+            .and_then(|index| cache.match_rows.get(index).copied());
         Some(PreviewRenderState {
             text: &cache.text,
             max_scroll,
+            active_match_row,
         })
     }
 
@@ -759,8 +772,11 @@ impl App {
                     );
                 }
             }
-            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_settings()
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_preview()
             }
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_filters()
@@ -819,8 +835,11 @@ impl App {
                     self.overlay = Overlay::Actions(ActionMenuState::new());
                 }
             }
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_preview()
+            KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
+                self.jump_preview_match(MatchDirection::Next)
+            }
+            KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                self.jump_preview_match(MatchDirection::Previous)
             }
             KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.cycle_snippet_source()
@@ -1107,6 +1126,7 @@ impl App {
         let request_id = self.next_search_id;
         self.next_search_id = self.next_search_id.saturating_add(1);
         self.committed_query = self.query.value().to_owned();
+        self.preview_active_match = None;
         debug!(
             "dispatch_search id={} query={:?} scope={:?} sort={:?} limit={} current_results={} hidden_deleted_paths={}",
             request_id,
@@ -1267,6 +1287,7 @@ impl App {
             self.selected = next as usize;
             self.ensure_selection_visible();
             self.preview_scroll = 0;
+            self.preview_active_match = None;
         }
     }
 
@@ -1277,6 +1298,7 @@ impl App {
         self.selected = index.min(self.results.len().saturating_sub(1));
         self.ensure_selection_visible();
         self.preview_scroll = 0;
+        self.preview_active_match = None;
     }
 
     fn list_index_at(&self, area: Rect, row: u16) -> Option<usize> {
@@ -1374,6 +1396,50 @@ impl App {
                 self.preview_scroll = target;
             }
         }
+    }
+
+    fn jump_preview_match(&mut self, direction: MatchDirection) {
+        if !self.preview_available() || self.committed_query.trim().is_empty() {
+            return;
+        }
+        let Some(layout) = self.last_layout else {
+            return;
+        };
+        let Some(preview_area) = layout.preview else {
+            return;
+        };
+
+        let theme = self.current_frame_theme();
+        // Building the render state populates the match-row cache and clamps
+        // max_scroll, both of which we rely on to pick the target scroll.
+        let max_scroll = match self.preview_render_state(preview_area, &theme) {
+            Some(state) => state.max_scroll,
+            None => return,
+        };
+        let Some(cache) = self.preview_render_cache.as_ref() else {
+            return;
+        };
+        if cache.match_rows.is_empty() {
+            self.preview_active_match = None;
+            return;
+        }
+
+        let next_index = match direction {
+            MatchDirection::Next => next_match_index(
+                &cache.match_rows,
+                self.preview_active_match,
+                self.preview_scroll,
+            ),
+            MatchDirection::Previous => previous_match_index(
+                &cache.match_rows,
+                self.preview_active_match,
+                self.preview_scroll,
+            ),
+        };
+        let target_row = cache.match_rows[next_index];
+        self.preview_active_match = Some(next_index);
+        let viewport_height = preview_area.height.saturating_sub(2) as usize;
+        self.preview_scroll = scroll_for_match(target_row, viewport_height, max_scroll);
     }
 
     fn trigger_search_now(&mut self) -> Result<()> {
@@ -2595,17 +2661,30 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_p_toggles_preview_visibility() {
+    fn ctrl_s_toggles_preview_visibility() {
         let mut app = test_app();
         let visible_before = app.preview_visible;
 
         app.handle_key(crossterm_key_mods(
-            KeyCode::Char('p'),
+            KeyCode::Char('s'),
             KeyModifiers::CONTROL,
         ))
         .unwrap();
 
         assert_eq!(app.preview_visible, !visible_before);
+    }
+
+    #[test]
+    fn ctrl_t_opens_settings() {
+        let mut app = test_app();
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::Settings(_)));
     }
 
     #[test]

@@ -4,9 +4,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use log::warn;
 use tantivy::collector::TopDocs;
 use tantivy::query::{AllQuery, BooleanQuery, BoostQuery, Query, QueryParser};
 use tantivy::schema::Value;
+use tantivy::snippet::{Snippet, SnippetGenerator};
 use tantivy::{DocAddress, Index, IndexReader, Order, ReloadPolicy, TantivyDocument};
 
 use crate::index::schema::IndexSchema;
@@ -113,12 +115,14 @@ struct SearchCandidate {
     session: StoredSession,
     score: f32,
     is_live: bool,
+    snippet_html: String,
 }
 
 const MIN_CANDIDATES: usize = 32;
 const PAGE_SIZE: usize = 128;
 const MAX_EMPTY_QUERY_CANDIDATES: usize = 5_000;
 const MAX_QUERY_CANDIDATES: usize = 2_000;
+const SNIPPET_MAX_CHARS: usize = 240;
 
 pub struct SearchEngine {
     index: Index,
@@ -186,6 +190,7 @@ impl SearchEngine {
         let query_parser = self.default_query_parser();
         let (base_query, _) = query_parser.parse_query_lenient(query_text);
         let final_query = build_phrase_boosted_query(&query_parser, query_text, base_query);
+        let snippet_generator = self.make_snippet_generator(&searcher, &*final_query);
 
         let mut candidates = Vec::new();
         let mut offset = 0usize;
@@ -207,6 +212,7 @@ impl SearchEngine {
                 &searcher,
                 docs,
                 request,
+                snippet_generator.as_ref(),
                 &live_ids,
                 &mut session_cache,
                 &mut candidates,
@@ -225,7 +231,7 @@ impl SearchEngine {
                 .then_with(|| left.session.file_path.cmp(&right.session.file_path))
         });
         candidates.truncate(limit);
-        Ok(self.build_hits(candidates, request.query.trim()))
+        Ok(self.build_hits(candidates))
     }
 
     fn search_recent(
@@ -293,6 +299,7 @@ impl SearchEngine {
         let query_parser = self.default_query_parser();
         let (base_query, _) = query_parser.parse_query_lenient(query_text);
         let final_query = build_phrase_boosted_query(&query_parser, query_text, base_query);
+        let snippet_generator = self.make_snippet_generator(searcher, &*final_query);
         let modified_ts_field = self.fields.schema.get_field_name(self.fields.modified_ts);
         let candidate_limit = candidate_limit(request, false);
 
@@ -313,14 +320,22 @@ impl SearchEngine {
             let docs_len = docs.len();
             offset += docs_len;
             for (_, address) in docs {
-                let session = self.load_session(searcher, address, session_cache)?;
+                let document = searcher.doc::<TantivyDocument>(address)?;
+                let session =
+                    self.session_from_doc(address, &document, session_cache)?;
                 let is_live = live_ids.contains(&session.session_id);
                 if !matches_request(request, &session, is_live) {
                     continue;
                 }
 
+                let snippet_html = build_snippet_html(
+                    snippet_generator.as_ref(),
+                    &document,
+                    &session,
+                    query_text,
+                );
                 hits.push(SearchHit {
-                    snippet_html: fallback_snippet(&session, query_text),
+                    snippet_html,
                     score: session.modified_ts as f32,
                     session,
                     is_live,
@@ -349,41 +364,46 @@ impl SearchEngine {
         searcher: &tantivy::Searcher,
         docs: Vec<(f32, DocAddress)>,
         request: &SearchRequest,
+        snippet_generator: Option<&SnippetGenerator>,
         live_ids: &HashSet<String>,
         session_cache: &mut HashMap<DocAddress, StoredSession>,
         hits: &mut Vec<SearchCandidate>,
     ) -> Result<()> {
         for (score, address) in docs {
-            let session = self.load_session(searcher, address, session_cache)?;
+            let document = searcher.doc::<TantivyDocument>(address)?;
+            let session = self.session_from_doc(address, &document, session_cache)?;
             let is_live = live_ids.contains(&session.session_id);
             if !matches_request(request, &session, is_live) {
                 continue;
             }
 
+            let snippet_html = build_snippet_html(
+                snippet_generator,
+                &document,
+                &session,
+                request.query.trim(),
+            );
             hits.push(SearchCandidate {
                 score: score * recency_boost(session.modified_ts),
                 session,
                 is_live,
+                snippet_html,
             });
         }
 
         Ok(())
     }
 
-    fn build_hits(&self, candidates: Vec<SearchCandidate>, query_text: &str) -> Vec<SearchHit> {
-        let mut hits = Vec::with_capacity(candidates.len());
-
-        for candidate in candidates {
-            let snippet_html = fallback_snippet(&candidate.session, query_text);
-            hits.push(SearchHit {
+    fn build_hits(&self, candidates: Vec<SearchCandidate>) -> Vec<SearchHit> {
+        candidates
+            .into_iter()
+            .map(|candidate| SearchHit {
                 session: candidate.session,
-                snippet_html,
+                snippet_html: candidate.snippet_html,
                 score: candidate.score,
                 is_live: candidate.is_live,
-            });
-        }
-
-        hits
+            })
+            .collect()
     }
 
     fn load_session(
@@ -400,6 +420,37 @@ impl SearchEngine {
         let session = stored_session_from_document(&document, self.fields.session_json)?;
         session_cache.insert(address, session.clone());
         Ok(session)
+    }
+
+    fn session_from_doc(
+        &self,
+        address: DocAddress,
+        document: &TantivyDocument,
+        session_cache: &mut HashMap<DocAddress, StoredSession>,
+    ) -> Result<StoredSession> {
+        if let Some(session) = session_cache.get(&address).cloned() {
+            return Ok(session);
+        }
+        let session = stored_session_from_document(document, self.fields.session_json)?;
+        session_cache.insert(address, session.clone());
+        Ok(session)
+    }
+
+    fn make_snippet_generator(
+        &self,
+        searcher: &tantivy::Searcher,
+        query: &dyn Query,
+    ) -> Option<SnippetGenerator> {
+        match SnippetGenerator::create(searcher, query, self.fields.content) {
+            Ok(mut generator) => {
+                generator.set_max_num_chars(SNIPPET_MAX_CHARS);
+                Some(generator)
+            }
+            Err(error) => {
+                warn!("failed to build snippet generator: {error:#}");
+                None
+            }
+        }
     }
 }
 
@@ -545,6 +596,49 @@ fn recency_boost(modified_ts: u64) -> f32 {
     let age_seconds = now.saturating_sub(modified_ts) as f32;
     let half_life = 7.0 * 24.0 * 60.0 * 60.0;
     1.0 + f32::exp(-age_seconds / half_life)
+}
+
+fn build_snippet_html(
+    snippet_generator: Option<&SnippetGenerator>,
+    document: &TantivyDocument,
+    session: &StoredSession,
+    query: &str,
+) -> String {
+    if let Some(generator) = snippet_generator {
+        let snippet = generator.snippet_from_doc(document);
+        if !snippet.fragment().is_empty() && !snippet.highlighted().is_empty() {
+            return render_snippet_html(&snippet);
+        }
+    }
+    fallback_snippet(session, query)
+}
+
+/// Build `<b>…</b>` markup from a Tantivy snippet without HTML-escaping the
+/// surrounding text. The TUI renderer (`parse_highlighted_html`) expects plain
+/// text with literal `<b>` tags and treats other angle brackets as literals,
+/// so `Snippet::to_html` (which escapes entities) would leak `&lt;` into the
+/// UI.
+fn render_snippet_html(snippet: &Snippet) -> String {
+    let fragment = snippet.fragment();
+    let mut ranges: Vec<_> = snippet.highlighted().to_vec();
+    ranges.sort_by_key(|range| range.start);
+
+    let mut out = String::with_capacity(fragment.len() + ranges.len() * 7);
+    let mut cursor = 0usize;
+    for range in ranges {
+        let start = range.start.min(fragment.len());
+        let end = range.end.min(fragment.len());
+        if start < cursor || end <= start {
+            continue;
+        }
+        out.push_str(fragment.get(cursor..start).unwrap_or(""));
+        out.push_str("<b>");
+        out.push_str(fragment.get(start..end).unwrap_or(""));
+        out.push_str("</b>");
+        cursor = end;
+    }
+    out.push_str(fragment.get(cursor..).unwrap_or(""));
+    out
 }
 
 fn fallback_snippet(session: &StoredSession, query: &str) -> String {

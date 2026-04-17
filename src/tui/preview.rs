@@ -16,18 +16,24 @@ use crate::tui::util::{block_title, session_message_label, wrapped_text_height};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let _profile = profile::scope("preview.render");
-    let (text, max_scroll) = if let Some(state) = app.preview_render_state(area, theme) {
-        (state.text.clone(), state.max_scroll)
-    } else {
-        (
-            Text::from(Line::from(Span::styled(
-                "Select a session to preview",
-                Style::default().fg(theme.muted),
-            ))),
-            0,
-        )
-    };
+    let (mut text, max_scroll, active_match_row) =
+        if let Some(state) = app.preview_render_state(area, theme) {
+            (state.text.clone(), state.max_scroll, state.active_match_row)
+        } else {
+            (
+                Text::from(Line::from(Span::styled(
+                    "Select a session to preview",
+                    Style::default().fg(theme.muted),
+                ))),
+                0,
+                None,
+            )
+        };
     app.preview_scroll = app.preview_scroll.min(max_scroll);
+    if let Some(row) = active_match_row {
+        let width = area.width.saturating_sub(2);
+        crate::tui::viewer::highlight_active_match(&mut text, row, width, theme);
+    }
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)

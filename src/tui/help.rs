@@ -27,7 +27,7 @@ const RIGHT_PANEL_MIN_CONTENT_WIDTH: u16 = 12;
 const RIGHT_PANEL_HORIZONTAL_CHROME: u16 = 3;
 const RIGHT_PANEL_MIN_WIDTH: u16 = RIGHT_PANEL_MIN_CONTENT_WIDTH + RIGHT_PANEL_HORIZONTAL_CHROME;
 
-const SESSION_LIST_ITEMS: [HelpItem; 19] = [
+const SESSION_LIST_ITEMS: [HelpItem; 20] = [
     HelpItem::new(
         "Type",
         "filter sessions",
@@ -79,14 +79,19 @@ const SESSION_LIST_ITEMS: [HelpItem; 19] = [
         "Toggle the Scope Filter between Global and Local/cwd, then rerun the current search with the new scope immediately.",
     ),
     HelpItem::new(
-        "^S",
+        "^T",
         "settings",
         "Open settings to change theme, CLI handoff commands, session separators, and snippet line count.",
     ),
     HelpItem::new(
-        "^P",
+        "^S",
         "toggle preview",
         "Show or hide the preview pane. This preference is saved so the next launch uses the same preview visibility.",
+    ),
+    HelpItem::new(
+        "^N / ^P",
+        "next/prev hit in preview",
+        "When the preview pane is visible and the search query is non-empty, jump to the next or previous highlighted match inside the preview. The active match is emphasized. Navigation wraps around.",
     ),
     HelpItem::new(
         "^Y",

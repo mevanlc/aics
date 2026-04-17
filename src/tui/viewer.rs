@@ -58,7 +58,7 @@ pub enum ViewerOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MatchDirection {
+pub(crate) enum MatchDirection {
     Next,
     Previous,
 }
@@ -500,15 +500,57 @@ fn match_scrolloff(viewport_height: usize) -> usize {
     VIEWER_MATCH_SCROLLOFF.min(viewport_height / 3)
 }
 
-fn scroll_for_match(match_row: usize, viewport_height: usize, max_scroll: usize) -> usize {
+pub(crate) fn scroll_for_match(
+    match_row: usize,
+    viewport_height: usize,
+    max_scroll: usize,
+) -> usize {
     match_row
         .saturating_sub(match_scrolloff(viewport_height))
         .min(max_scroll)
 }
 
+/// Collect wrapped-row indices that contain a match for `query` within an
+/// already-rendered `Text`. Shared with the preview pane so it can navigate
+/// matches without re-rendering the session.
+pub(crate) fn collect_match_rows_in_text(
+    text: &Text<'_>,
+    query: &str,
+    width: u16,
+) -> Vec<usize> {
+    let terms = extract_highlight_terms(query);
+    if terms.is_empty() || width == 0 {
+        return Vec::new();
+    }
+
+    let width = width as usize;
+    let mut rows = Vec::new();
+    let mut row_offset = 0usize;
+    for line in &text.lines {
+        let content = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        for relative_row in collect_line_match_rows(&content, width, &terms) {
+            let absolute_row = row_offset + relative_row;
+            if rows.last().copied() != Some(absolute_row) {
+                rows.push(absolute_row);
+            }
+        }
+        row_offset += wrapped_rendered_line_height(line, width);
+    }
+    rows
+}
+
 /// Re-style search-match spans on the source line containing the active match
 /// row so the "current" match stands out from the rest.
-fn highlight_active_match(text: &mut Text<'_>, active_row: usize, width: u16, theme: &Theme) {
+pub(crate) fn highlight_active_match(
+    text: &mut Text<'_>,
+    active_row: usize,
+    width: u16,
+    theme: &Theme,
+) {
     if width == 0 {
         return;
     }
@@ -691,7 +733,11 @@ fn wrapped_rendered_line_height(line: &Line<'_>, width: usize) -> usize {
     wrapped_text_height(&Text::from(line.clone()), width as u16)
 }
 
-fn next_match_index(matches: &[usize], active_match: Option<usize>, scroll: usize) -> usize {
+pub(crate) fn next_match_index(
+    matches: &[usize],
+    active_match: Option<usize>,
+    scroll: usize,
+) -> usize {
     if let Some(index) = active_match.filter(|index| *index < matches.len()) {
         return (index + 1) % matches.len();
     }
@@ -699,7 +745,11 @@ fn next_match_index(matches: &[usize], active_match: Option<usize>, scroll: usiz
     matches.iter().position(|row| *row >= scroll).unwrap_or(0)
 }
 
-fn previous_match_index(matches: &[usize], active_match: Option<usize>, scroll: usize) -> usize {
+pub(crate) fn previous_match_index(
+    matches: &[usize],
+    active_match: Option<usize>,
+    scroll: usize,
+) -> usize {
     if let Some(index) = active_match.filter(|index| *index < matches.len()) {
         return if index == 0 {
             matches.len() - 1

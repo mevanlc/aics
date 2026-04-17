@@ -192,6 +192,18 @@ mod tests {
     use crate::ring_cursor::RingCursor;
 
     #[test]
+    fn fresh_install_has_preview_pane_on() {
+        // When a user launches aics for the first time (no config file yet),
+        // `load` is expected to return `Self::default()`, so this guards the
+        // contract "preview pane on by default" at that specific entry point.
+        let settings = Settings::default();
+        assert!(
+            settings.show_preview,
+            "default settings must enable the preview pane on first run"
+        );
+    }
+
+    #[test]
     fn default_settings_round_trip() {
         let settings = Settings::default();
         let json = serde_json::to_string(&settings).unwrap();

@@ -107,6 +107,41 @@ fn explicit_or_operator_broadens_query() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn snippet_is_drawn_from_body_when_first_user_msg_does_not_match() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+
+    // `basic_session.jsonl` opens with "Show me the current git status…", but
+    // "validation" only appears deeper in the assistant's reply ("Add input
+    // validation"). The snippet should highlight the hit wherever it is.
+    let hits = engine.search(&SearchRequest {
+        query: "validation".to_owned(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Relevance,
+        filters: SearchFilters::default(),
+    })?;
+
+    let hit = hits
+        .iter()
+        .find(|hit| hit.session.file_path.ends_with("basic_session.jsonl"))
+        .expect("basic_session should match `validation`");
+    assert!(
+        !hit.session.first_user_msg_content.contains("validation"),
+        "fixture precondition: first user message should not contain the query term"
+    );
+    assert!(
+        hit.snippet_html.contains("<b>validation</b>"),
+        "expected highlighted snippet drawn from session body, got {:?}",
+        hit.snippet_html
+    );
+    Ok(())
+}
+
 fn fixture_roots(temp: &TempDir) -> Result<SessionRoots> {
     copy_fixture(
         temp,
