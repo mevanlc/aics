@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -527,7 +527,9 @@ fn paths_equal(a: &str, b: &str) -> bool {
     if cfg!(windows) {
         paths_equal_windows(a, b)
     } else {
-        a == b
+        // `Path` equality compares by components, so trailing separators
+        // (e.g. Claude Code sometimes records `cwd` as `/foo/bar/`) are ignored.
+        Path::new(a) == Path::new(b)
     }
 }
 
@@ -872,6 +874,15 @@ mod tests {
             Some(PathBuf::from("/real/repo")),
         );
         let session = stub_session("unrelated", Some("/real/repo"));
+        assert!(matches_scope(&scope, &session));
+    }
+
+    #[test]
+    fn scope_matches_cwd_with_trailing_slash() {
+        // Claude Code sometimes records `cwd` with a trailing separator;
+        // `env::current_dir()` does not. Both forms must match.
+        let scope = Scope::CurrentDir(PathBuf::from("/Users/me/proj"), None);
+        let session = stub_session("irrelevant", Some("/Users/me/proj/"));
         assert!(matches_scope(&scope, &session));
     }
 
