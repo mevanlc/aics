@@ -268,9 +268,9 @@ impl App {
         keymap_hint::KeymapHint::new("↑↓", "select"),
         keymap_hint::KeymapHint::new("⏎", "actions"),
         keymap_hint::KeymapHint::new("^F", "filters"),
-        keymap_hint::KeymapHint::new("^T", "settings"),
+        keymap_hint::KeymapHint::new("^S", "settings"),
         keymap_hint::KeymapHint::new("^Y", "cycle snippet"),
-        keymap_hint::KeymapHint::new("^S", "toggle preview"),
+        keymap_hint::KeymapHint::new("^T", "preview"),
         keymap_hint::KeymapHint::new("^N/^P", "next/prev hit"),
         keymap_hint::KeymapHint::new("Esc", "clear/cancel"),
         keymap_hint::KeymapHint::new("^C", "quit"),
@@ -772,10 +772,10 @@ impl App {
                     );
                 }
             }
-            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_settings()
             }
-            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.toggle_preview()
             }
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -2661,12 +2661,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_s_toggles_preview_visibility() {
+    fn ctrl_t_toggles_preview_visibility() {
         let mut app = test_app();
         let visible_before = app.preview_visible;
 
         app.handle_key(crossterm_key_mods(
-            KeyCode::Char('s'),
+            KeyCode::Char('t'),
             KeyModifiers::CONTROL,
         ))
         .unwrap();
@@ -2675,11 +2675,11 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_t_opens_settings() {
+    fn ctrl_s_opens_settings() {
         let mut app = test_app();
 
         app.handle_key(crossterm_key_mods(
-            KeyCode::Char('t'),
+            KeyCode::Char('s'),
             KeyModifiers::CONTROL,
         ))
         .unwrap();

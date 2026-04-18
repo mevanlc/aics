@@ -66,7 +66,7 @@ By default, searches are scoped to the current working directory. Use `-g` / `--
 | `⏎` | Open actions menu for selected session |
 | `^F` | Filters modal |
 | `^S` | Settings modal |
-| `^P` | Toggle preview panel |
+| `^T` | Toggle preview panel |
 | `^Y` | Toggle session/summary preview mode |
 | `^H` / `^L` | Resize list/preview split |
 | `^X` + action letter | Run a session action directly; in `^X` mode the action letter wins even if `Ctrl` is still held |

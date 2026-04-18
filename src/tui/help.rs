@@ -79,13 +79,13 @@ const SESSION_LIST_ITEMS: [HelpItem; 20] = [
         "Toggle the Scope Filter between Global and Local/cwd, then rerun the current search with the new scope immediately.",
     ),
     HelpItem::new(
-        "^T",
+        "^S",
         "settings",
         "Open settings to change theme, CLI handoff commands, session separators, and snippet line count.",
     ),
     HelpItem::new(
-        "^S",
-        "toggle preview",
+        "^T",
+        "preview",
         "Show or hide the preview pane. This preference is saved so the next launch uses the same preview visibility.",
     ),
     HelpItem::new(
