@@ -29,8 +29,7 @@ enum SettingsField {
     ClaudeArgs,
     CodexCommand,
     CodexArgs,
-    SummarizeCommand,
-    SummarizePrompt,
+    EditSummarizer,
 }
 
 #[derive(Debug, Clone)]
@@ -43,9 +42,7 @@ pub struct SettingsModalState {
     claude_args_input: Input,
     codex_command_input: Input,
     codex_args_input: Input,
-    summarize_command_textarea: TextArea<'static>,
-    prompt_textarea: TextArea<'static>,
-    picker: Option<TemplatePicker>,
+    summarizer: Option<SummarizerModalState>,
     base: Settings,
 }
 
@@ -68,9 +65,7 @@ impl SettingsModalState {
             claude_args_input: Input::default().with_value(settings.claude_args.clone()),
             codex_command_input: Input::default().with_value(settings.codex_command.clone()),
             codex_args_input: Input::default().with_value(settings.codex_args.clone()),
-            summarize_command_textarea: build_textarea(&settings.summarize_command),
-            prompt_textarea: build_textarea(&settings.summarize_prompt),
-            picker: None,
+            summarizer: None,
             base: settings.clone(),
         }
     }
@@ -80,15 +75,16 @@ impl SettingsModalState {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsOutcome {
-        if let Some(picker) = self.picker.as_mut() {
-            match picker.handle_key(key) {
-                TemplatePickerOutcome::Stay => {}
-                TemplatePickerOutcome::Cancel => {
-                    self.picker = None;
+        if let Some(summarizer) = self.summarizer.as_mut() {
+            match summarizer.handle_key(key) {
+                SummarizerOutcome::Stay => {}
+                SummarizerOutcome::Cancel => {
+                    self.summarizer = None;
                 }
-                TemplatePickerOutcome::Insert(text) => {
-                    self.summarize_command_textarea = build_textarea(&text);
-                    self.picker = None;
+                SummarizerOutcome::Apply { command, prompt } => {
+                    self.base.summarize_command = command;
+                    self.base.summarize_prompt = prompt;
+                    self.summarizer = None;
                 }
             }
             return SettingsOutcome::Stay;
@@ -96,18 +92,8 @@ impl SettingsModalState {
 
         match key.code {
             KeyCode::Esc => return SettingsOutcome::Close,
-            KeyCode::Enter if key.modifiers.is_empty() => {
-                return SettingsOutcome::Apply(self.build_settings());
-            }
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return SettingsOutcome::Apply(self.build_settings());
-            }
-            KeyCode::Char('t') | KeyCode::Char('T')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.field.set(&SettingsField::SummarizeCommand);
-                self.picker = Some(TemplatePicker::new(detect_shell()));
-                return SettingsOutcome::Stay;
             }
             KeyCode::Tab => {
                 self.field.move_next();
@@ -115,6 +101,16 @@ impl SettingsModalState {
             }
             KeyCode::BackTab => {
                 self.field.move_prev();
+                return SettingsOutcome::Stay;
+            }
+            KeyCode::Enter
+                if key.modifiers.is_empty()
+                    && *self.field.current() == SettingsField::EditSummarizer =>
+            {
+                self.summarizer = Some(SummarizerModalState::new(
+                    &self.base.summarize_command,
+                    &self.base.summarize_prompt,
+                ));
                 return SettingsOutcome::Stay;
             }
             _ => {}
@@ -148,18 +144,13 @@ impl SettingsModalState {
             SettingsField::CodexArgs => {
                 self.codex_args_input.handle_event(&Event::Key(key));
             }
-            SettingsField::SummarizeCommand => {
-                self.summarize_command_textarea.input(key);
-            }
-            SettingsField::SummarizePrompt => {
-                self.prompt_textarea.input(key);
-            }
+            SettingsField::EditSummarizer => {}
         }
         SettingsOutcome::Stay
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let popup = layout::centered_rect(area, 72, 85);
+        let popup = layout::centered_rect(area, 72, 70);
         frame.render_widget(Clear, popup);
 
         let block = Block::default()
@@ -171,68 +162,71 @@ impl SettingsModalState {
         frame.render_widget(block, popup);
 
         let rows = Layout::vertical([
-            Constraint::Length(1), // 0  padding
-            Constraint::Length(1), // 1  Theme inline (label + radio)
-            Constraint::Length(1), // 2  Session Separator inline
-            Constraint::Length(1), // 3  Snippet Lines inline
+            Constraint::Length(1), // 0  top padding
+            Constraint::Length(1), // 1  Theme inline
+            Constraint::Length(1), // 2  spacing
+            Constraint::Length(1), // 3  divider
             Constraint::Length(1), // 4  spacing
-            Constraint::Length(1), // 5  divider
-            Constraint::Length(1), // 6  spacing
-            Constraint::Length(1), // 7  Claude Code Command inline
-            Constraint::Length(1), // 8  Claude Code Args inline
+            Constraint::Length(1), // 5  Session Separator inline
+            Constraint::Length(1), // 6  Snippet Lines inline
+            Constraint::Length(1), // 7  spacing
+            Constraint::Length(1), // 8  divider
             Constraint::Length(1), // 9  spacing
-            Constraint::Length(1), // 10 Codex CLI Command inline
-            Constraint::Length(1), // 11 Codex CLI Args inline
+            Constraint::Length(1), // 10 Claude Code Command inline
+            Constraint::Length(1), // 11 Claude Code Args inline
             Constraint::Length(1), // 12 spacing
-            Constraint::Length(1), // 13 Session summarizer command label
-            Constraint::Length(5), // 14 summarize command textarea
+            Constraint::Length(1), // 13 Codex CLI Command inline
+            Constraint::Length(1), // 14 Codex CLI Args inline
             Constraint::Length(1), // 15 spacing
-            Constraint::Length(1), // 16 Session summarizer prompt label
-            Constraint::Min(3),    // 17 prompt textarea (absorbs remaining)
-            Constraint::Length(1), // 18 divider
-            Constraint::Length(1), // 19 hints
+            Constraint::Length(1), // 16 divider
+            Constraint::Length(1), // 17 spacing
+            Constraint::Length(1), // 18 Edit summarizer button
+            Constraint::Min(0),    // 19 flex slack
+            Constraint::Length(1), // 20 bottom divider
+            Constraint::Length(1), // 21 hints
         ])
         .split(inner);
 
-        // Theme inline (label + radio)
+        // Theme inline
         let theme_focused = self.field == SettingsField::Theme;
         let theme_line = self.render_inline_theme_row(rows[1].width, theme, theme_focused);
         frame.render_widget(Paragraph::new(theme_line), rows[1]);
 
-        // Session Separator (inline)
+        frame.render_widget(
+            Paragraph::new("─".repeat(inner.width as usize))
+                .style(Style::default().fg(theme.focus_border)),
+            rows[3],
+        );
+
         let sep_focused = self.field == SettingsField::SessionSeparator;
         render_inline_text_field(
             frame,
-            rows[2],
+            rows[5],
             theme,
             "Session Separator",
             &self.separator_input,
             sep_focused,
         );
-
-        // Snippet Lines (inline)
         let snip_focused = self.field == SettingsField::SnippetLineCount;
         render_inline_text_field(
             frame,
-            rows[3],
+            rows[6],
             theme,
             "Snippet Lines",
             &self.snippet_line_count_input,
             snip_focused,
         );
 
-        // Divider between display prefs and command/summarize fields
         frame.render_widget(
             Paragraph::new("─".repeat(inner.width as usize))
                 .style(Style::default().fg(theme.focus_border)),
-            rows[5],
+            rows[8],
         );
 
-        // Claude Code Command + Args
         let claude_cmd_focused = self.field == SettingsField::ClaudeCommand;
         render_inline_text_field(
             frame,
-            rows[7],
+            rows[10],
             theme,
             "Claude Code Command",
             &self.claude_command_input,
@@ -241,18 +235,17 @@ impl SettingsModalState {
         let claude_args_focused = self.field == SettingsField::ClaudeArgs;
         render_inline_text_field(
             frame,
-            rows[8],
+            rows[11],
             theme,
             "Claude Code Args",
             &self.claude_args_input,
             claude_args_focused,
         );
 
-        // Codex CLI Command + Args
         let codex_cmd_focused = self.field == SettingsField::CodexCommand;
         render_inline_text_field(
             frame,
-            rows[10],
+            rows[13],
             theme,
             "Codex CLI Command",
             &self.codex_command_input,
@@ -261,55 +254,38 @@ impl SettingsModalState {
         let codex_args_focused = self.field == SettingsField::CodexArgs;
         render_inline_text_field(
             frame,
-            rows[11],
+            rows[14],
             theme,
             "Codex CLI Args",
             &self.codex_args_input,
             codex_args_focused,
         );
 
-        // Session summarizer command label + textarea
-        let cmd_focused = self.field == SettingsField::SummarizeCommand;
-        let cmd_label = responsive_label(
-            rows[13].width,
-            &[
-                "Session summarizer command (^T to choose a command template)",
-                "Session summarizer command (^T choose template)",
-                "Session summarizer command",
-            ],
-        );
-        render_field_label(frame, rows[13], theme, cmd_label, cmd_focused);
-        style_textarea(&mut self.summarize_command_textarea, theme, cmd_focused);
-        frame.render_widget(&self.summarize_command_textarea, pad_rect(rows[14]));
-
-        // Prompt label + textarea
-        let prompt_focused = self.field == SettingsField::SummarizePrompt;
-        render_field_label(
-            frame,
+        frame.render_widget(
+            Paragraph::new("─".repeat(inner.width as usize))
+                .style(Style::default().fg(theme.focus_border)),
             rows[16],
-            theme,
-            "Session summarizer prompt",
-            prompt_focused,
         );
-        style_textarea(&mut self.prompt_textarea, theme, prompt_focused);
-        frame.render_widget(&self.prompt_textarea, pad_rect(rows[17]));
+
+        let button_focused = self.field == SettingsField::EditSummarizer;
+        render_edit_summarizer_button(frame, rows[18], theme, button_focused);
 
         // Bottom divider + hints
         frame.render_widget(
             Paragraph::new("─".repeat(inner.width as usize))
                 .style(Style::default().fg(theme.focus_border)),
-            rows[18],
+            rows[20],
         );
         const HINTS: [keymap_hint::KeymapHint; 4] = [
             keymap_hint::KeymapHint::new("Tab/⇧Tab", "navigate"),
             keymap_hint::KeymapHint::new("←→", "change value"),
-            keymap_hint::KeymapHint::new("⏎/^S", "save"),
+            keymap_hint::KeymapHint::new("^S", "save"),
             keymap_hint::KeymapHint::new("Esc", "cancel"),
         ];
-        keymap_hint::render(frame, rows[19], &HINTS, theme, "");
+        keymap_hint::render(frame, rows[21], &HINTS, theme, "");
 
-        if let Some(picker) = self.picker.as_ref() {
-            picker.render(frame, popup, theme);
+        if let Some(summarizer) = self.summarizer.as_mut() {
+            summarizer.render(frame, popup, theme);
         }
     }
 
@@ -444,8 +420,8 @@ impl SettingsModalState {
             codex_args: self.codex_args_input.value().to_owned(),
             session_separator: self.separator_input.value().to_owned(),
             snippet_line_count,
-            summarize_command: self.summarize_command_textarea.lines().join("\n"),
-            summarize_prompt: self.prompt_textarea.lines().join("\n"),
+            summarize_command: self.base.summarize_command.clone(),
+            summarize_prompt: self.base.summarize_prompt.clone(),
             ..self.base.clone()
         }
     }
@@ -460,8 +436,7 @@ fn settings_field_cursor(selected: SettingsField) -> RingCursor<SettingsField> {
         SettingsField::ClaudeArgs,
         SettingsField::CodexCommand,
         SettingsField::CodexArgs,
-        SettingsField::SummarizeCommand,
-        SettingsField::SummarizePrompt,
+        SettingsField::EditSummarizer,
     ]);
     assert!(cursor.set(&selected));
     cursor
@@ -597,6 +572,30 @@ fn style_textarea(textarea: &mut TextArea<'_>, theme: &Theme, focused: bool) {
     } else {
         textarea.set_cursor_style(base);
     }
+}
+
+fn render_edit_summarizer_button(frame: &mut Frame, area: Rect, theme: &Theme, focused: bool) {
+    let text = "[ Edit session summarizer settings ⏎ ]";
+    let text_w = UnicodeWidthStr::width(text) as u16;
+    const LEFT_PAD: u16 = 2;
+    let available = area.width.saturating_sub(LEFT_PAD);
+    let button_area = Rect {
+        x: area.x.saturating_add(LEFT_PAD),
+        y: area.y,
+        width: text_w.min(available),
+        height: 1,
+    };
+    let style = if focused {
+        Style::default()
+            .fg(theme.text)
+            .bg(theme.selection)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme.muted)
+            .add_modifier(Modifier::BOLD)
+    };
+    frame.render_widget(Paragraph::new(text).style(style), button_area);
 }
 
 fn inline_radio_row(
@@ -1356,6 +1355,155 @@ impl TemplatePicker {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummarizerField {
+    Command,
+    Prompt,
+}
+
+#[derive(Debug, Clone)]
+pub struct SummarizerModalState {
+    field: RingCursor<SummarizerField>,
+    command_textarea: TextArea<'static>,
+    prompt_textarea: TextArea<'static>,
+    picker: Option<TemplatePicker>,
+}
+
+enum SummarizerOutcome {
+    Stay,
+    Cancel,
+    Apply { command: String, prompt: String },
+}
+
+impl SummarizerModalState {
+    fn new(command: &str, prompt: &str) -> Self {
+        let mut field = RingCursor::new(vec![SummarizerField::Command, SummarizerField::Prompt]);
+        field.set(&SummarizerField::Command);
+        Self {
+            field,
+            command_textarea: build_textarea(command),
+            prompt_textarea: build_textarea(prompt),
+            picker: None,
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> SummarizerOutcome {
+        if let Some(picker) = self.picker.as_mut() {
+            match picker.handle_key(key) {
+                TemplatePickerOutcome::Stay => {}
+                TemplatePickerOutcome::Cancel => {
+                    self.picker = None;
+                }
+                TemplatePickerOutcome::Insert(text) => {
+                    self.command_textarea = build_textarea(&text);
+                    self.picker = None;
+                }
+            }
+            return SummarizerOutcome::Stay;
+        }
+
+        match key.code {
+            KeyCode::Esc => return SummarizerOutcome::Cancel,
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return SummarizerOutcome::Apply {
+                    command: self.command_textarea.lines().join("\n"),
+                    prompt: self.prompt_textarea.lines().join("\n"),
+                };
+            }
+            KeyCode::Char('t') | KeyCode::Char('T')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.field.set(&SummarizerField::Command);
+                self.picker = Some(TemplatePicker::new(detect_shell()));
+                return SummarizerOutcome::Stay;
+            }
+            KeyCode::Tab => {
+                self.field.move_next();
+                return SummarizerOutcome::Stay;
+            }
+            KeyCode::BackTab => {
+                self.field.move_prev();
+                return SummarizerOutcome::Stay;
+            }
+            _ => {}
+        }
+
+        match *self.field.current() {
+            SummarizerField::Command => {
+                self.command_textarea.input(key);
+            }
+            SummarizerField::Prompt => {
+                self.prompt_textarea.input(key);
+            }
+        }
+        SummarizerOutcome::Stay
+    }
+
+    fn render(&mut self, frame: &mut Frame, host: Rect, theme: &Theme) {
+        let popup = Rect {
+            x: host.x.saturating_add(1),
+            y: host.y.saturating_add(1),
+            width: host.width.saturating_sub(2),
+            height: host.height.saturating_sub(2),
+        };
+        frame.render_widget(Clear, popup);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(theme.border_style(true))
+            .title(block_title("Session Summarizer Settings"));
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+
+        let rows = Layout::vertical([
+            Constraint::Length(1), // 0 top padding
+            Constraint::Length(1), // 1 command label
+            Constraint::Length(6), // 2 command textarea
+            Constraint::Length(1), // 3 spacing
+            Constraint::Length(1), // 4 prompt label
+            Constraint::Min(3),    // 5 prompt textarea
+            Constraint::Length(1), // 6 divider
+            Constraint::Length(1), // 7 hints
+        ])
+        .split(inner);
+
+        let cmd_focused = self.field == SummarizerField::Command;
+        let cmd_label = responsive_label(
+            rows[1].width,
+            &[
+                "Session summarizer command (^T to choose a command template)",
+                "Session summarizer command (^T choose template)",
+                "Session summarizer command",
+            ],
+        );
+        render_field_label(frame, rows[1], theme, cmd_label, cmd_focused);
+        style_textarea(&mut self.command_textarea, theme, cmd_focused);
+        frame.render_widget(&self.command_textarea, pad_rect(rows[2]));
+
+        let prompt_focused = self.field == SummarizerField::Prompt;
+        render_field_label(frame, rows[4], theme, "Session summarizer prompt", prompt_focused);
+        style_textarea(&mut self.prompt_textarea, theme, prompt_focused);
+        frame.render_widget(&self.prompt_textarea, pad_rect(rows[5]));
+
+        frame.render_widget(
+            Paragraph::new("─".repeat(inner.width as usize))
+                .style(Style::default().fg(theme.focus_border)),
+            rows[6],
+        );
+        const HINTS: [keymap_hint::KeymapHint; 4] = [
+            keymap_hint::KeymapHint::new("Tab/⇧Tab", "navigate"),
+            keymap_hint::KeymapHint::new("⏎", "newline"),
+            keymap_hint::KeymapHint::new("^S", "save"),
+            keymap_hint::KeymapHint::new("Esc", "cancel"),
+        ];
+        keymap_hint::render(frame, rows[7], &HINTS, theme, "");
+
+        if let Some(picker) = self.picker.as_ref() {
+            picker.render(frame, popup, theme);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1370,16 +1518,59 @@ mod tests {
     use crate::tui::theme::Theme;
 
     #[test]
-    fn enter_applies_settings_from_theme_field() {
+    fn ctrl_s_applies_settings_from_theme_field() {
         let mut state = SettingsModalState::new(&Settings::default());
         assert!(state.theme.set(&ThemeName::Sunset));
         assert!(state.field.set(&SettingsField::Theme));
 
-        let outcome = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        let outcome = state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
 
         match outcome {
             SettingsOutcome::Apply(settings) => {
                 assert_eq!(settings.theme, ThemeName::Sunset);
+            }
+            other => panic!("expected apply outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_on_theme_field_does_not_apply() {
+        let mut state = SettingsModalState::new(&Settings::default());
+        assert!(state.field.set(&SettingsField::Theme));
+
+        let outcome = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert!(matches!(outcome, SettingsOutcome::Stay));
+    }
+
+    #[test]
+    fn enter_on_edit_summarizer_button_opens_submodal() {
+        let mut state = SettingsModalState::new(&Settings::default());
+        assert!(state.field.set(&SettingsField::EditSummarizer));
+
+        let outcome = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert!(matches!(outcome, SettingsOutcome::Stay));
+        assert!(state.summarizer.is_some());
+    }
+
+    #[test]
+    fn summarizer_ctrl_s_commits_values_into_parent_draft() {
+        let mut state = SettingsModalState::new(&Settings::default());
+        assert!(state.field.set(&SettingsField::EditSummarizer));
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        let summarizer = state.summarizer.as_mut().expect("submodal should be open");
+        summarizer.command_textarea = super::build_textarea("echo hi");
+        summarizer.prompt_textarea = super::build_textarea("be brief");
+
+        state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        assert!(state.summarizer.is_none());
+        let outcome = state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        match outcome {
+            SettingsOutcome::Apply(settings) => {
+                assert_eq!(settings.summarize_command, "echo hi");
+                assert_eq!(settings.summarize_prompt, "be brief");
             }
             other => panic!("expected apply outcome, got {other:?}"),
         }
