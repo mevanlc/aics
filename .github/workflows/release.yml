@@ -5,6 +5,11 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
+    inputs:
+      version:
+        description: Release version to stamp into Cargo.toml for this run (for example 1.2.3)
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,19 +17,43 @@ env:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      release_version: ${{ steps.resolve-version.outputs.release_version }}
     steps:
       - uses: actions/checkout@v6
 
-      - name: Validate version matches tag
-        if: github.event_name == 'push'
+      - name: Validate manifest placeholder
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
           CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-            echo "::error::Tag version ($TAG_VERSION) doesn't match Cargo.toml ($CARGO_VERSION)"
+          if [ "$CARGO_VERSION" != "0.0.0" ]; then
+            echo "::error::Expected Cargo.toml to remain at placeholder version 0.0.0, found $CARGO_VERSION"
             exit 1
           fi
-          echo "Version validated: $TAG_VERSION"
+          echo "Manifest placeholder validated: $CARGO_VERSION"
+
+      - name: Resolve release version
+        id: resolve-version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            RAW_VERSION="$GITHUB_REF_NAME"
+          else
+            RAW_VERSION="$INPUT_VERSION"
+          fi
+
+          RELEASE_VERSION="${RAW_VERSION#v}"
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release version must match X.Y.Z; got '$RAW_VERSION'"
+            exit 1
+          fi
+
+          {
+            echo "release_version=$RELEASE_VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved release version: $RELEASE_VERSION"
 
   build:
     needs: validate
@@ -56,6 +85,33 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+
+      - name: Stamp Cargo.toml version
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          release_version = os.environ["RELEASE_VERSION"]
+          cargo_toml = Path("Cargo.toml")
+          original = cargo_toml.read_text()
+          updated, count = re.subn(
+              r'(?m)^version\s*=\s*"0\.0\.0"$',
+              f'version = "{release_version}"',
+              original,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit(
+                  "Expected exactly one placeholder version entry in Cargo.toml"
+              )
+          cargo_toml.write_text(updated)
+          PY
+          grep '^version' Cargo.toml
 
       - name: Install Rust
         run: |
