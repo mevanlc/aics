@@ -196,7 +196,7 @@ impl<'a> MarkdownRenderer<'a> {
     fn start_block(&mut self) {
         self.finish_line();
         if !self.lines.is_empty() && !self.lines.last().is_some_and(|line| line.spans.is_empty()) {
-            self.lines.push(Line::default());
+            self.lines.push(self.blank_line());
         }
     }
 
@@ -291,16 +291,20 @@ impl<'a> MarkdownRenderer<'a> {
                 )
             };
 
-            self.lines.push(Line::from(spans));
+            self.lines
+                .push(Self::line_with_style(spans, code_block.base_style));
         }
     }
 
     fn push_rule(&mut self) {
         self.start_block();
-        self.lines.push(Line::from(Span::styled(
-            "────────────────────────",
-            self.base_style.fg(self.theme.muted),
-        )));
+        self.lines.push(Self::line_with_style(
+            vec![Span::styled(
+                "────────────────────────",
+                self.base_style.fg(self.theme.muted),
+            )],
+            self.base_style,
+        ));
     }
 
     fn finish_line(&mut self) {
@@ -308,8 +312,9 @@ impl<'a> MarkdownRenderer<'a> {
             return;
         }
 
+        let spans = std::mem::take(&mut self.current_line);
         self.lines
-            .push(Line::from(std::mem::take(&mut self.current_line)));
+            .push(Self::line_with_style(spans, self.base_style));
     }
 
     fn ensure_line_prefix(&mut self) {
@@ -363,6 +368,16 @@ impl<'a> MarkdownRenderer<'a> {
         };
 
         self.base_style.fg(color).add_modifier(Modifier::BOLD)
+    }
+
+    fn blank_line(&self) -> Line<'static> {
+        Self::line_with_style(Vec::new(), self.base_style)
+    }
+
+    fn line_with_style(spans: Vec<Span<'static>>, style: Style) -> Line<'static> {
+        let mut line = Line::from(spans);
+        line.style = style;
+        line
     }
 }
 

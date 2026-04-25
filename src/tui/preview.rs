@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders};
 use ratatui::Frame;
 
 use crate::parse::{Agent, MessageRole, Session};
@@ -12,7 +12,9 @@ use crate::tui::app::App;
 use crate::tui::markdown::render_markdown_message;
 use crate::tui::profile;
 use crate::tui::theme::Theme;
-use crate::tui::util::{block_title, session_message_label, wrapped_text_height};
+use crate::tui::util::{
+    block_title, session_message_label, wrapped_text_height, FullLineBackgroundParagraph,
+};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let _profile = profile::scope("preview.render");
@@ -43,10 +45,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
             Style::default().fg(theme.accent),
         )));
 
-    let paragraph = Paragraph::new(text)
+    let paragraph = FullLineBackgroundParagraph::new(text)
         .block(block)
-        .wrap(Wrap { trim: false })
-        .scroll((app.preview_scroll as u16, 0));
+        .scroll(app.preview_scroll);
     frame.render_widget(paragraph, area);
 }
 

@@ -3,8 +3,11 @@ use std::sync::OnceLock;
 
 use chrono::{Local, TimeZone, Utc};
 use directories::BaseDirs;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Paragraph, Widget, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_truncate::UnicodeTruncateStr;
 
@@ -236,6 +239,82 @@ pub fn wrapped_text_height(text: &Text<'_>, width: u16) -> usize {
         .line_count(width)
 }
 
+pub struct FullLineBackgroundParagraph<'a> {
+    text: Text<'a>,
+    block: Option<Block<'a>>,
+    scroll: usize,
+}
+
+impl<'a> FullLineBackgroundParagraph<'a> {
+    pub fn new(text: Text<'a>) -> Self {
+        Self {
+            text,
+            block: None,
+            scroll: 0,
+        }
+    }
+
+    pub fn block(mut self, block: Block<'a>) -> Self {
+        self.block = Some(block);
+        self
+    }
+
+    pub fn scroll(mut self, scroll: usize) -> Self {
+        self.scroll = scroll;
+        self
+    }
+}
+
+impl Widget for FullLineBackgroundParagraph<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let inner = self.block.as_ref().map_or(area, |block| block.inner(area));
+        let paragraph = Paragraph::new(self.text.clone())
+            .wrap(Wrap { trim: false })
+            .scroll((self.scroll.min(u16::MAX as usize) as u16, 0));
+        let paragraph = if let Some(block) = self.block {
+            paragraph.block(block)
+        } else {
+            paragraph
+        };
+
+        paragraph.render(area, buf);
+        fill_line_background_tails(&self.text, inner, self.scroll, buf);
+    }
+}
+
+fn fill_line_background_tails(text: &Text<'_>, area: Rect, scroll: usize, buf: &mut Buffer) {
+    if area.is_empty() {
+        return;
+    }
+
+    let mut rendered_row = 0usize;
+    for line in &text.lines {
+        let line_height = wrapped_text_height(&Text::from(line.clone()), area.width).max(1);
+        for _ in 0..line_height {
+            if rendered_row >= scroll {
+                let viewport_row = rendered_row - scroll;
+                if viewport_row >= area.height as usize {
+                    return;
+                }
+                if let Some(bg) = line.style.bg.filter(|bg| *bg != Color::Reset) {
+                    fill_reset_background_cells(area, viewport_row as u16, bg, buf);
+                }
+            }
+            rendered_row += 1;
+        }
+    }
+}
+
+fn fill_reset_background_cells(area: Rect, viewport_row: u16, bg: Color, buf: &mut Buffer) {
+    let y = area.y.saturating_add(viewport_row);
+    for x in area.x..area.right() {
+        let cell = &mut buf[(x, y)];
+        if cell.bg == Color::Reset {
+            cell.set_bg(bg);
+        }
+    }
+}
+
 fn unescape_html(value: &str) -> String {
     value
         .replace("&lt;", "<")
@@ -275,8 +354,11 @@ fn discover_home_dir() -> Option<PathBuf> {
 mod tests {
     use std::path::Path;
 
+    use ratatui::backend::TestBackend;
     use ratatui::style::{Color, Style};
-    use ratatui::text::Line;
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders};
+    use ratatui::Terminal;
     use unicode_segmentation::UnicodeSegmentation;
 
     use ratatui::text::Text;
@@ -284,6 +366,7 @@ mod tests {
     use super::{
         abbreviate_home_path_with, block_title, highlight_spans, highlight_styled_spans,
         parse_highlighted_html, session_display_title, truncate_plain, wrapped_text_height,
+        FullLineBackgroundParagraph,
     };
 
     #[test]
@@ -365,6 +448,83 @@ mod tests {
     fn wrapped_text_height_counts_wide_wrapped_lines() {
         let text = Text::from("alpha\n漢字漢字\n");
         assert_eq!(wrapped_text_height(&text, 4), 4);
+    }
+
+    #[test]
+    fn full_line_background_paragraph_extends_line_bg_to_inner_edge() {
+        let bg = Color::Blue;
+        let mut line = Line::from(Span::styled("hi", Style::default().fg(Color::White).bg(bg)));
+        line.style = Style::default().bg(bg);
+        let text = Text::from(line);
+        let backend = TestBackend::new(10, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    FullLineBackgroundParagraph::new(text.clone())
+                        .block(Block::default().borders(Borders::ALL)),
+                    frame.area(),
+                );
+            })
+            .unwrap();
+
+        let rendered = terminal.backend().buffer();
+        assert_eq!(rendered[(8, 1)].symbol(), " ");
+        assert_eq!(rendered[(8, 1)].bg, bg);
+        assert_ne!(rendered[(9, 1)].bg, bg);
+    }
+
+    #[test]
+    fn full_line_background_paragraph_preserves_search_match_bg() {
+        let line_bg = Color::Blue;
+        let match_bg = Color::Yellow;
+        let mut line = Line::from(vec![
+            Span::styled("alpha", Style::default().bg(match_bg)),
+            Span::styled(" beta", Style::default().bg(line_bg)),
+        ]);
+        line.style = Style::default().bg(line_bg);
+        let text = Text::from(line);
+        let backend = TestBackend::new(14, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                frame.render_widget(FullLineBackgroundParagraph::new(text.clone()), frame.area());
+            })
+            .unwrap();
+
+        let rendered = terminal.backend().buffer();
+        assert_eq!(rendered[(0, 0)].bg, match_bg);
+        assert_eq!(rendered[(4, 0)].bg, match_bg);
+        assert_eq!(rendered[(5, 0)].bg, line_bg);
+        assert_eq!(rendered[(13, 0)].bg, line_bg);
+    }
+
+    #[test]
+    fn full_line_background_paragraph_extends_wrapped_and_scrolled_rows() {
+        let bg = Color::Green;
+        let mut line = Line::from(Span::styled(
+            "alpha beta gamma",
+            Style::default().fg(Color::White).bg(bg),
+        ));
+        line.style = Style::default().bg(bg);
+        let text = Text::from(line);
+        let backend = TestBackend::new(8, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    FullLineBackgroundParagraph::new(text.clone()).scroll(1),
+                    frame.area(),
+                );
+            })
+            .unwrap();
+
+        let rendered = terminal.backend().buffer();
+        assert_eq!(rendered[(7, 0)].bg, bg);
+        assert_eq!(rendered[(7, 1)].bg, bg);
     }
 
     #[test]

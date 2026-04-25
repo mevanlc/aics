@@ -4,7 +4,7 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
@@ -23,7 +23,7 @@ use crate::tui::profile;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
     abbreviate_home_path, agent_badge, block_title, format_line_count, relative_time,
-    session_display_title, session_message_label, wrapped_text_height,
+    session_display_title, session_message_label, wrapped_text_height, FullLineBackgroundParagraph,
 };
 
 const VIEWER_PAGE_STEP: usize = 12;
@@ -252,7 +252,7 @@ impl ViewerState {
         let viewport_height = body_area.height.saturating_sub(2) as usize;
         let scroll = self.scroll.min(total_rows.saturating_sub(viewport_height));
         let scroll_percent = scroll_progress_percent(scroll, viewport_height, total_rows);
-        let body = Paragraph::new(text)
+        let body = FullLineBackgroundParagraph::new(text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -260,8 +260,7 @@ impl ViewerState {
                     .border_style(theme.border_style(false))
                     .title(block_title(viewer_title(session, theme, scroll_percent))),
             )
-            .wrap(Wrap { trim: false })
-            .scroll((scroll.min(u16::MAX as usize) as u16, 0));
+            .scroll(scroll);
         frame.render_widget(body, body_area);
 
         // Split footer into search bar (bordered) and keymap hints.
