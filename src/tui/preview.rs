@@ -9,18 +9,30 @@ use crate::summary::{
     AicsSummaryPreview, ClaudeAutosummaryPreview, SummaryPreview, SummarySources,
 };
 use crate::tui::app::App;
-use crate::tui::markdown::render_markdown_message;
+use crate::tui::markdown::{render_markdown_message, render_markdown_message_with_headings};
 use crate::tui::profile;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
     block_title, session_message_label, wrapped_text_height, FullLineBackgroundParagraph,
+    StickyHeader, StickyHeaderWidget, StickyLineMarker, STICKY_HEADER_HEIGHT,
 };
+
+#[derive(Debug, Clone)]
+pub struct DisplayDocument {
+    pub text: Text<'static>,
+    pub sticky_markers: Vec<StickyLineMarker>,
+}
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let _profile = profile::scope("preview.render");
-    let (mut text, max_scroll, active_match_row) =
+    let (mut text, max_scroll, active_match_row, sticky_header) =
         if let Some(state) = app.preview_render_state(area, theme) {
-            (state.text.clone(), state.max_scroll, state.active_match_row)
+            (
+                state.text.clone(),
+                state.max_scroll,
+                state.active_match_row,
+                state.sticky_header.clone(),
+            )
         } else {
             (
                 Text::from(Line::from(Span::styled(
@@ -28,6 +40,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
                     Style::default().fg(theme.muted),
                 ))),
                 0,
+                None,
                 None,
             )
         };
@@ -45,10 +58,17 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
             Style::default().fg(theme.accent),
         )));
 
-    let paragraph = FullLineBackgroundParagraph::new(text)
-        .block(block)
-        .scroll(app.preview_scroll);
-    frame.render_widget(paragraph, area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let (header_area, body_area) = split_sticky_body(inner);
+    frame.render_widget(
+        StickyHeaderWidget::new(sticky_header.as_ref(), theme),
+        header_area,
+    );
+    frame.render_widget(
+        FullLineBackgroundParagraph::new(text).scroll(app.preview_scroll),
+        body_area,
+    );
 }
 
 pub fn max_scroll(area: Rect, session: Option<&Session>, theme: &Theme, query: &str) -> usize {
@@ -66,11 +86,26 @@ pub fn render_session_text(
     theme: &Theme,
     highlight_query: Option<&str>,
 ) -> Text<'static> {
+    render_session_document(session, theme, highlight_query).text
+}
+
+pub fn render_session_document(
+    session: &Session,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) -> DisplayDocument {
     let _profile = profile::scope("preview.render_session_text");
     let mut lines = Vec::new();
+    let mut sticky_markers = Vec::new();
     for message in &session.messages {
         let (label_color, _) = message_colors(session.agent, message.role, theme);
         let label = session_message_label(message);
+        let header_line = lines.len();
+        let base_header = sticky_header_for_message(session.agent, message);
+        sticky_markers.push(StickyLineMarker {
+            line_index: header_line,
+            header: base_header.clone(),
+        });
         lines.push(Line::from(vec![
             Span::styled(
                 label,
@@ -88,17 +123,29 @@ pub fn render_session_text(
             ),
         ]));
 
-        let rendered = render_message_body(
+        let rendered = render_message_body_document(
             session.agent,
             message.role,
             message.content.as_str(),
             theme,
             highlight_query,
         );
-        lines.extend(rendered.lines);
+        let body_start = lines.len();
+        for heading in rendered.sticky_markers {
+            let mut header = base_header.clone();
+            header.subject = heading.header.subject;
+            sticky_markers.push(StickyLineMarker {
+                line_index: body_start + heading.line_index,
+                header,
+            });
+        }
+        lines.extend(rendered.text.lines);
         lines.push(Line::default());
     }
-    Text::from(lines)
+    DisplayDocument {
+        text: Text::from(lines),
+        sticky_markers,
+    }
 }
 
 pub fn render_composite_text(
@@ -108,14 +155,37 @@ pub fn render_composite_text(
     highlight_query: Option<&str>,
     summary_inflight: bool,
 ) -> Text<'static> {
-    let mut lines =
-        render_summary_sections(summaries, theme, highlight_query, summary_inflight).lines;
-    if !lines.is_empty() && session.is_some() {
-        lines.push(Line::default());
+    render_composite_document(session, summaries, theme, highlight_query, summary_inflight).text
+}
+
+pub fn render_composite_document(
+    session: Option<&Session>,
+    summaries: &SummarySources,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+    summary_inflight: bool,
+) -> DisplayDocument {
+    let mut summary =
+        render_summary_sections_document(summaries, theme, highlight_query, summary_inflight);
+    if !summary.text.lines.is_empty() && session.is_some() {
+        summary.text.lines.push(Line::default());
     }
 
-    lines.extend(render_session_section(session, theme, highlight_query).lines);
-    Text::from(lines)
+    let session_doc = render_session_section_document(session, theme, highlight_query);
+    let session_offset = summary.text.lines.len();
+    summary.text.lines.extend(session_doc.text.lines);
+    summary
+        .sticky_markers
+        .extend(
+            session_doc
+                .sticky_markers
+                .into_iter()
+                .map(|marker| StickyLineMarker {
+                    line_index: marker.line_index + session_offset,
+                    header: marker.header,
+                }),
+        );
+    summary
 }
 
 pub fn render_summary_sections(
@@ -124,7 +194,17 @@ pub fn render_summary_sections(
     highlight_query: Option<&str>,
     summary_inflight: bool,
 ) -> Text<'static> {
+    render_summary_sections_document(summaries, theme, highlight_query, summary_inflight).text
+}
+
+pub fn render_summary_sections_document(
+    summaries: &SummarySources,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+    summary_inflight: bool,
+) -> DisplayDocument {
     let mut lines = Vec::new();
+    let mut sticky_markers = Vec::new();
 
     for (index, summary) in summaries.claude_autosummaries.iter().enumerate() {
         if !lines.is_empty() {
@@ -135,13 +215,34 @@ pub fn render_summary_sections(
         } else {
             "# Claude Auto-summary".to_owned()
         };
-        lines.extend(
-            render_section(
-                &title,
-                &render_claude_summary_text(summary, theme, highlight_query),
-                theme,
-            )
-            .lines,
+        let section_start = lines.len();
+        let body = render_claude_summary_text(summary, theme, highlight_query);
+        lines.extend(render_section(&title, &body, theme).lines);
+        sticky_markers.push(StickyLineMarker {
+            line_index: section_start,
+            header: StickyHeader::new(
+                "Claude autosummary",
+                summary
+                    .generated_at
+                    .map(|generated_at| generated_at.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_default(),
+                title.trim_start_matches("# "),
+            ),
+        });
+        add_summary_heading_markers(
+            &mut sticky_markers,
+            &summary.body,
+            theme,
+            highlight_query,
+            section_start + 2,
+            StickyHeader::new(
+                "Claude autosummary",
+                summary
+                    .generated_at
+                    .map(|generated_at| generated_at.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_default(),
+                "",
+            ),
         );
     }
 
@@ -149,18 +250,31 @@ pub fn render_summary_sections(
         if !lines.is_empty() {
             lines.push(Line::default());
         }
-        lines.extend(
-            render_section(
-                "# AICS summary",
-                &render_aics_summary_text(summary, theme, highlight_query),
-                theme,
-            )
-            .lines,
+        let section_start = lines.len();
+        let body = render_aics_summary_text(summary, theme, highlight_query);
+        lines.extend(render_section("# AICS summary", &body, theme).lines);
+        let generated_at = summary
+            .sidecar
+            .generated_at
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        sticky_markers.push(StickyLineMarker {
+            line_index: section_start,
+            header: StickyHeader::new("AICS summary", generated_at.clone(), "AICS summary"),
+        });
+        add_summary_heading_markers(
+            &mut sticky_markers,
+            &summary.sidecar.body,
+            theme,
+            highlight_query,
+            section_start + 2,
+            StickyHeader::new("AICS summary", generated_at, ""),
         );
     } else if summary_inflight {
         if !lines.is_empty() {
             lines.push(Line::default());
         }
+        let section_start = lines.len();
         lines.extend(
             render_section(
                 "# AICS summary",
@@ -169,9 +283,16 @@ pub fn render_summary_sections(
             )
             .lines,
         );
+        sticky_markers.push(StickyLineMarker {
+            line_index: section_start,
+            header: StickyHeader::new("AICS summary", "", "AICS summary"),
+        });
     }
 
-    Text::from(lines)
+    DisplayDocument {
+        text: Text::from(lines),
+        sticky_markers,
+    }
 }
 
 pub fn render_session_section(
@@ -179,12 +300,43 @@ pub fn render_session_section(
     theme: &Theme,
     highlight_query: Option<&str>,
 ) -> Text<'static> {
+    render_session_section_document(session, theme, highlight_query).text
+}
+
+pub fn render_session_section_document(
+    session: Option<&Session>,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) -> DisplayDocument {
     let body = if let Some(session) = session {
-        render_session_text(session, theme, highlight_query)
+        render_session_document(session, theme, highlight_query)
     } else {
-        render_summary_missing(theme, "Session log is unavailable for this entry.", false)
+        DisplayDocument {
+            text: render_summary_missing(
+                theme,
+                "Session log is unavailable for this entry.",
+                false,
+            ),
+            sticky_markers: Vec::new(),
+        }
     };
-    render_section("# Session Log", &body, theme)
+    let text = render_section("# Session Log", &body.text, theme);
+    let mut sticky_markers = vec![StickyLineMarker {
+        line_index: 0,
+        header: StickyHeader::new("Session", "", "Session Log"),
+    }];
+    sticky_markers.extend(
+        body.sticky_markers
+            .into_iter()
+            .map(|marker| StickyLineMarker {
+                line_index: marker.line_index + 2,
+                header: marker.header,
+            }),
+    );
+    DisplayDocument {
+        text,
+        sticky_markers,
+    }
 }
 
 fn render_section(title: &str, body: &Text<'static>, theme: &Theme) -> Text<'static> {
@@ -349,9 +501,30 @@ pub(crate) fn render_message_body(
     theme: &Theme,
     highlight_query: Option<&str>,
 ) -> Text<'static> {
+    render_message_body_document(agent, role, content, theme, highlight_query).text
+}
+
+pub(crate) fn render_message_body_document(
+    agent: Agent,
+    role: MessageRole,
+    content: &str,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) -> DisplayDocument {
     let (_, bubble_bg) = message_colors(agent, role, theme);
     let base = Style::default().fg(theme.text).bg(bubble_bg);
-    render_markdown_message(content, theme, base, highlight_query)
+    let rendered = render_markdown_message_with_headings(content, theme, base, highlight_query);
+    DisplayDocument {
+        text: rendered.text,
+        sticky_markers: rendered
+            .headings
+            .into_iter()
+            .map(|heading| StickyLineMarker {
+                line_index: heading.line_index,
+                header: StickyHeader::new("", "", heading.text),
+            })
+            .collect(),
+    }
 }
 
 fn message_colors(
@@ -376,9 +549,73 @@ fn normalize_highlight_query(query: &str) -> Option<&str> {
 }
 
 fn scroll_limit_for_text(text: &Text<'_>, area: Rect) -> usize {
-    let viewport_height = area.height.saturating_sub(2) as usize;
+    let viewport_height = area
+        .height
+        .saturating_sub(2)
+        .saturating_sub(STICKY_HEADER_HEIGHT) as usize;
     let viewport_width = area.width.saturating_sub(2);
     wrapped_text_height(text, viewport_width).saturating_sub(viewport_height)
+}
+
+pub fn split_sticky_body(inner: Rect) -> (Rect, Rect) {
+    let header_height = STICKY_HEADER_HEIGHT.min(inner.height);
+    let header = Rect::new(inner.x, inner.y, inner.width, header_height);
+    let body = Rect::new(
+        inner.x,
+        inner.y.saturating_add(header_height),
+        inner.width,
+        inner.height.saturating_sub(header_height),
+    );
+    (header, body)
+}
+
+fn sticky_header_for_message(agent: Agent, message: &crate::parse::SessionMessage) -> StickyHeader {
+    let from = match message.role {
+        MessageRole::User => "User",
+        MessageRole::Assistant => "Agent",
+        MessageRole::System => "System",
+        MessageRole::Summary => "Summary",
+        MessageRole::ToolCall | MessageRole::ToolResult => "Tool",
+    };
+    let datetime = message
+        .timestamp
+        .map(|timestamp| timestamp.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default();
+    let subject = match message.role {
+        MessageRole::ToolCall | MessageRole::ToolResult => {
+            message.tool_name.clone().unwrap_or_default()
+        }
+        MessageRole::Assistant => match agent {
+            Agent::Claude => "Claude".to_owned(),
+            Agent::Codex => "Codex".to_owned(),
+        },
+        _ => String::new(),
+    };
+    StickyHeader::new(from, datetime, subject)
+}
+
+fn add_summary_heading_markers(
+    markers: &mut Vec<StickyLineMarker>,
+    markdown: &str,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+    line_offset: usize,
+    base_header: StickyHeader,
+) {
+    let rendered = render_markdown_message_with_headings(
+        markdown,
+        theme,
+        Style::default().fg(theme.text),
+        highlight_query,
+    );
+    for heading in rendered.headings {
+        let mut header = base_header.clone();
+        header.subject = heading.text;
+        markers.push(StickyLineMarker {
+            line_index: line_offset + 2 + heading.line_index,
+            header,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -394,8 +631,8 @@ mod tests {
     };
 
     use super::{
-        normalize_highlight_query, render_composite_text, render_session_text,
-        render_summary_missing, render_summary_text,
+        normalize_highlight_query, render_composite_text, render_session_document,
+        render_session_text, render_summary_missing, render_summary_text,
     };
     use crate::tui::theme::Theme;
 
@@ -457,6 +694,49 @@ mod tests {
             .contains(ratatui::style::Modifier::BOLD));
         assert_eq!(alpha.style.fg, Some(theme.text));
         assert_eq!(alpha.style.bg, Some(theme.search_match_bg));
+    }
+
+    #[test]
+    fn render_session_document_records_message_and_heading_sticky_markers() {
+        let theme = Theme::default();
+        let session = Session {
+            session_id: "session-1".to_owned(),
+            agent: Agent::Claude,
+            project: "/tmp/demo".to_owned(),
+            branch: Some("main".to_owned()),
+            cwd: Some("/tmp/demo".to_owned()),
+            created: None,
+            modified: None,
+            modified_ts: 0,
+            lines: 3,
+            file_path: PathBuf::from("/tmp/demo/session.jsonl"),
+            first_msg_role: Some(MessageRole::User),
+            first_msg_content: "# Topic\n\nBody".to_owned(),
+            last_msg_role: Some(MessageRole::User),
+            last_msg_content: "# Topic\n\nBody".to_owned(),
+            first_user_msg_content: "# Topic\n\nBody".to_owned(),
+            derivation_type: DerivationType::Original,
+            is_sidechain: false,
+            custom_title: None,
+            messages: vec![SessionMessage {
+                role: MessageRole::User,
+                content: "# Topic\n\nBody".to_owned(),
+                timestamp: Some(Utc.with_ymd_and_hms(2026, 4, 25, 10, 11, 12).unwrap()),
+                tool_name: None,
+            }],
+            content: "# Topic\n\nBody".to_owned(),
+        };
+
+        let document = render_session_document(&session, &theme, None);
+
+        assert_eq!(document.sticky_markers[0].line_index, 0);
+        assert_eq!(document.sticky_markers[0].header.from, "User");
+        assert_eq!(
+            document.sticky_markers[0].header.datetime,
+            "2026-04-25 10:11:12"
+        );
+        assert_eq!(document.sticky_markers[1].line_index, 1);
+        assert_eq!(document.sticky_markers[1].header.subject, "Topic");
     }
 
     #[test]

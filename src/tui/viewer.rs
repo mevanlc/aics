@@ -18,12 +18,16 @@ use crate::summary::SummarySidecar;
 use crate::tui::actions::ACTION_LETTER_HINTS;
 use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::markdown::render_markdown_message;
-use crate::tui::preview::{render_message_body, render_session_text};
+use crate::tui::preview::{
+    render_message_body, render_session_document, split_sticky_body, DisplayDocument,
+};
 use crate::tui::profile;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
     abbreviate_home_path, agent_badge, block_title, format_line_count, relative_time,
-    session_display_title, session_message_label, wrapped_text_height, FullLineBackgroundParagraph,
+    session_display_title, session_message_label, sticky_header_for_scroll,
+    sticky_rows_from_line_markers, wrapped_text_height, FullLineBackgroundParagraph,
+    StickyHeaderWidget, StickyRowMarker, STICKY_HEADER_HEIGHT,
 };
 
 const VIEWER_PAGE_STEP: usize = 12;
@@ -49,6 +53,7 @@ struct ViewerRenderCache {
     summary_stamp: Option<(i64, usize, usize)>,
     total_rows: usize,
     text: Text<'static>,
+    sticky_rows: Vec<StickyRowMarker>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,27 +246,41 @@ impl ViewerState {
         let chunks = split_viewer(area);
         let body_area = chunks[0];
 
-        let (total_rows, mut text) = {
+        let (total_rows, mut text, sticky_rows) = {
             let cache = self.render_cache(area, session, summary, theme, theme_name);
-            (cache.total_rows, cache.text.clone())
+            (
+                cache.total_rows,
+                cache.text.clone(),
+                cache.sticky_rows.clone(),
+            )
         };
         if self.active_match.is_some() {
             let viewport_width = body_area.width.saturating_sub(2);
             highlight_active_match(&mut text, self.scroll, viewport_width, theme);
         }
-        let viewport_height = body_area.height.saturating_sub(2) as usize;
+        let viewport_height = body_area
+            .height
+            .saturating_sub(2)
+            .saturating_sub(STICKY_HEADER_HEIGHT) as usize;
         let scroll = self.scroll.min(total_rows.saturating_sub(viewport_height));
+        let sticky_header = sticky_header_for_scroll(&sticky_rows, scroll);
         let scroll_percent = scroll_progress_percent(scroll, viewport_height, total_rows);
-        let body = FullLineBackgroundParagraph::new(text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(theme.border_style(false))
-                    .title(block_title(viewer_title(session, theme, scroll_percent))),
-            )
-            .scroll(scroll);
-        frame.render_widget(body, body_area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(theme.border_style(false))
+            .title(block_title(viewer_title(session, theme, scroll_percent)));
+        let inner = block.inner(body_area);
+        frame.render_widget(block, body_area);
+        let (header_area, body_content_area) = split_sticky_body(inner);
+        frame.render_widget(
+            StickyHeaderWidget::new(sticky_header.as_ref(), theme),
+            header_area,
+        );
+        frame.render_widget(
+            FullLineBackgroundParagraph::new(text).scroll(scroll),
+            body_content_area,
+        );
 
         // Split footer into search bar (bordered) and keymap hints.
         let footer_chunks = Layout::vertical([
@@ -310,7 +329,10 @@ impl ViewerState {
     ) -> usize {
         let body_area = split_viewer(area)[0];
         let cache = self.render_cache(area, session, summary, theme, theme_name);
-        let viewport_height = body_area.height.saturating_sub(2) as usize;
+        let viewport_height = body_area
+            .height
+            .saturating_sub(2)
+            .saturating_sub(STICKY_HEADER_HEIGHT) as usize;
         cache.total_rows.saturating_sub(viewport_height)
     }
 
@@ -404,8 +426,10 @@ impl ViewerState {
         if cache_miss {
             profile::event("viewer.cache.miss");
             let highlight_query = (!query.is_empty()).then_some(query.as_str());
-            let text = render_viewer_text(session, summary, theme, highlight_query);
+            let document = render_viewer_document(session, summary, theme, highlight_query);
+            let text = document.text;
             let total_rows = wrapped_text_height(&text, width).max(1);
+            let sticky_rows = sticky_rows_from_line_markers(&text, &document.sticky_markers, width);
             self.render_cache = Some(ViewerRenderCache {
                 path,
                 query,
@@ -414,6 +438,7 @@ impl ViewerState {
                 summary_stamp,
                 total_rows,
                 text,
+                sticky_rows,
             });
         } else {
             profile::event("viewer.cache.hit");
@@ -431,20 +456,41 @@ fn split_viewer(area: Rect) -> [Rect; 2] {
     [chunks[0], chunks[1]]
 }
 
-fn render_viewer_text(
+fn render_viewer_document(
     session: &Session,
     summary: Option<&SummarySidecar>,
     theme: &Theme,
     highlight_query: Option<&str>,
-) -> Text<'static> {
+) -> DisplayDocument {
     let mut lines = Vec::new();
+    let mut sticky_markers = Vec::new();
     if let Some(summary) = summary {
+        let summary_start = lines.len();
         lines.extend(render_summary_leadin(summary, theme, highlight_query).lines);
+        sticky_markers.push(crate::tui::util::StickyLineMarker {
+            line_index: summary_start,
+            header: crate::tui::util::StickyHeader::new(
+                "AICS summary",
+                summary.generated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                "Summary",
+            ),
+        });
         lines.push(Line::default());
         lines.push(Line::default());
     }
-    lines.extend(render_session_text(session, theme, highlight_query).lines);
-    Text::from(lines)
+    let session_start = lines.len();
+    let session_doc = render_session_document(session, theme, highlight_query);
+    lines.extend(session_doc.text.lines);
+    sticky_markers.extend(session_doc.sticky_markers.into_iter().map(|marker| {
+        crate::tui::util::StickyLineMarker {
+            line_index: marker.line_index + session_start,
+            header: marker.header,
+        }
+    }));
+    DisplayDocument {
+        text: Text::from(lines),
+        sticky_markers,
+    }
 }
 
 fn render_summary_leadin(

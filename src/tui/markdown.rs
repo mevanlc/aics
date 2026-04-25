@@ -24,6 +24,27 @@ pub fn render_markdown_message(
     base_style: Style,
     highlight_query: Option<&str>,
 ) -> Text<'static> {
+    render_markdown_message_with_headings(content, theme, base_style, highlight_query).text
+}
+
+#[derive(Debug, Clone)]
+pub struct MarkdownRender {
+    pub text: Text<'static>,
+    pub headings: Vec<MarkdownHeading>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownHeading {
+    pub line_index: usize,
+    pub text: String,
+}
+
+pub fn render_markdown_message_with_headings(
+    content: &str,
+    theme: &Theme,
+    base_style: Style,
+    highlight_query: Option<&str>,
+) -> MarkdownRender {
     let mut options = ParseOptions::empty();
     options.insert(ParseOptions::ENABLE_STRIKETHROUGH);
     options.insert(ParseOptions::ENABLE_TASKLISTS);
@@ -40,6 +61,7 @@ struct MarkdownRenderer<'a> {
     search_highlight: Style,
     terms: Vec<String>,
     lines: Vec<Line<'static>>,
+    headings: Vec<MarkdownHeading>,
     current_line: Vec<Span<'static>>,
     inline_styles: Vec<Style>,
     list_stack: Vec<ListState>,
@@ -65,6 +87,7 @@ impl<'a> MarkdownRenderer<'a> {
             search_highlight: theme.search_match_style(),
             terms: extract_highlight_terms(highlight_query.unwrap_or_default()),
             lines: Vec::new(),
+            headings: Vec::new(),
             current_line: Vec::new(),
             inline_styles: vec![base_style],
             list_stack: Vec::new(),
@@ -73,7 +96,7 @@ impl<'a> MarkdownRenderer<'a> {
         }
     }
 
-    fn render<'b>(mut self, parser: Parser<'b>) -> Text<'static> {
+    fn render<'b>(mut self, parser: Parser<'b>) -> MarkdownRender {
         for event in parser {
             self.handle_event(event);
         }
@@ -83,7 +106,10 @@ impl<'a> MarkdownRenderer<'a> {
             self.lines.pop();
         }
 
-        Text::from(self.lines)
+        MarkdownRender {
+            text: Text::from(self.lines),
+            headings: self.headings,
+        }
     }
 
     fn handle_event<'b>(&mut self, event: Event<'b>) {
@@ -162,8 +188,15 @@ impl<'a> MarkdownRenderer<'a> {
         match tag {
             TagEnd::Paragraph | TagEnd::HtmlBlock => self.finish_line(),
             TagEnd::Heading(_) => {
+                let subject = spans_text(&self.current_line).trim().to_owned();
                 self.pop_inline_style();
                 self.finish_line();
+                if !subject.is_empty() {
+                    self.headings.push(MarkdownHeading {
+                        line_index: self.lines.len().saturating_sub(1),
+                        text: subject,
+                    });
+                }
             }
             TagEnd::BlockQuote(_) => {
                 self.blockquote_depth = self.blockquote_depth.saturating_sub(1);
@@ -429,11 +462,18 @@ fn trim_trailing_newline(spans: &mut Vec<Span<'static>>) {
     }
 }
 
+fn spans_text(spans: &[Span<'_>]) -> String {
+    spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::style::{Modifier, Style};
 
-    use super::render_markdown_message;
+    use super::{render_markdown_message, render_markdown_message_with_headings};
     use crate::tui::theme::Theme;
 
     #[test]
@@ -505,6 +545,18 @@ mod tests {
         assert!(alpha.style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(alpha.style.fg, Some(theme.text));
         assert_eq!(alpha.style.bg, Some(theme.search_match_bg));
+    }
+
+    #[test]
+    fn records_markdown_heading_line_indices_for_sticky_subjects() {
+        let theme = Theme::default();
+        let base = Style::default().fg(theme.text).bg(theme.bubble_user);
+        let rendered =
+            render_markdown_message_with_headings("Intro\n\n## Plan\n\nBody", &theme, base, None);
+
+        assert_eq!(rendered.headings.len(), 1);
+        assert_eq!(rendered.headings[0].line_index, 2);
+        assert_eq!(rendered.headings[0].text, "Plan");
     }
 
     #[test]

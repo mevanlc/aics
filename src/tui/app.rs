@@ -56,7 +56,8 @@ use crate::tui::statusline;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
     block_title, highlight_spans, parse_highlighted_html, session_display_title,
-    wrapped_text_height,
+    sticky_header_for_scroll, sticky_rows_from_line_markers, wrapped_text_height, StickyHeader,
+    StickyRowMarker, STICKY_HEADER_HEIGHT,
 };
 use crate::tui::viewer::{
     collect_match_rows_in_text, collect_message_rows, message_row_for_scroll, next_match_index,
@@ -115,12 +116,14 @@ struct PreviewRenderCache {
     wrapped_height: Option<usize>,
     text: Text<'static>,
     match_rows: Vec<usize>,
+    sticky_rows: Vec<StickyRowMarker>,
 }
 
 pub struct PreviewRenderState<'a> {
     pub text: &'a Text<'static>,
     pub max_scroll: usize,
     pub active_match_row: Option<usize>,
+    pub sticky_header: Option<StickyHeader>,
 }
 
 #[derive(Debug)]
@@ -495,14 +498,16 @@ impl App {
             let highlight_query = (!query.is_empty()).then_some(query.as_str());
             let session = self.selected_preview().cloned();
             self.ensure_summary_cache(agent, &path);
-            let text = preview::render_composite_text(
+            let document = preview::render_composite_document(
                 session.as_ref(),
                 self.summary_cache.get(&path)?,
                 theme,
                 highlight_query,
                 self.summary_inflight.contains(&path),
             );
+            let text = document.text;
             let match_rows = collect_match_rows_in_text(&text, &query, width);
+            let sticky_rows = sticky_rows_from_line_markers(&text, &document.sticky_markers, width);
             self.preview_render_cache = Some(PreviewRenderCache {
                 path: path.clone(),
                 query: query.clone(),
@@ -511,6 +516,7 @@ impl App {
                 wrapped_height: None,
                 text,
                 match_rows,
+                sticky_rows,
             });
             self.preview_active_match = None;
         } else {
@@ -532,7 +538,10 @@ impl App {
         let max_scroll = if self.preview_scroll == 0 {
             0
         } else {
-            let viewport_height = area.height.saturating_sub(2) as usize;
+            let viewport_height = area
+                .height
+                .saturating_sub(2)
+                .saturating_sub(STICKY_HEADER_HEIGHT) as usize;
             cache
                 .wrapped_height
                 .unwrap_or_default()
@@ -541,10 +550,12 @@ impl App {
         let active_match_row = self
             .preview_active_match
             .and_then(|index| cache.match_rows.get(index).copied());
+        let effective_scroll = self.preview_scroll.min(max_scroll);
         Some(PreviewRenderState {
             text: &cache.text,
             max_scroll,
             active_match_row,
+            sticky_header: sticky_header_for_scroll(&cache.sticky_rows, effective_scroll),
         })
     }
 
@@ -1439,7 +1450,10 @@ impl App {
         };
         let target_row = cache.match_rows[next_index];
         self.preview_active_match = Some(next_index);
-        let viewport_height = preview_area.height.saturating_sub(2) as usize;
+        let viewport_height = preview_area
+            .height
+            .saturating_sub(2)
+            .saturating_sub(STICKY_HEADER_HEIGHT) as usize;
         self.preview_scroll = scroll_for_match(target_row, viewport_height, max_scroll);
     }
 

@@ -5,7 +5,7 @@ use chrono::{Local, TimeZone, Utc};
 use directories::BaseDirs;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Paragraph, Widget, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
@@ -15,6 +15,90 @@ use crate::index::SearchHit;
 use crate::parse::{normalize_session_path, Agent, MessageRole, SessionMessage};
 use crate::search_query::extract_highlight_terms;
 use crate::tui::theme::Theme;
+
+pub const STICKY_HEADER_HEIGHT: u16 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StickyHeader {
+    pub from: String,
+    pub datetime: String,
+    pub subject: String,
+}
+
+impl StickyHeader {
+    pub fn new(
+        from: impl Into<String>,
+        datetime: impl Into<String>,
+        subject: impl Into<String>,
+    ) -> Self {
+        Self {
+            from: from.into(),
+            datetime: datetime.into(),
+            subject: subject.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StickyLineMarker {
+    pub line_index: usize,
+    pub header: StickyHeader,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StickyRowMarker {
+    pub row: usize,
+    pub header: StickyHeader,
+}
+
+pub fn sticky_rows_from_line_markers(
+    text: &Text<'_>,
+    markers: &[StickyLineMarker],
+    width: u16,
+) -> Vec<StickyRowMarker> {
+    if markers.is_empty() || width == 0 {
+        return Vec::new();
+    }
+
+    let mut markers = markers.to_vec();
+    markers.sort_by_key(|marker| marker.line_index);
+    let mut rows = Vec::with_capacity(markers.len());
+    let mut marker_index = 0usize;
+    let mut row = 0usize;
+
+    for (line_index, line) in text.lines.iter().enumerate() {
+        while marker_index < markers.len() && markers[marker_index].line_index == line_index {
+            rows.push(StickyRowMarker {
+                row,
+                header: markers[marker_index].header.clone(),
+            });
+            marker_index += 1;
+        }
+        row += wrapped_text_height(&Text::from(line.clone()), width).max(1);
+    }
+
+    while marker_index < markers.len() {
+        rows.push(StickyRowMarker {
+            row,
+            header: markers[marker_index].header.clone(),
+        });
+        marker_index += 1;
+    }
+
+    rows
+}
+
+pub fn sticky_header_for_scroll(
+    markers: &[StickyRowMarker],
+    scroll: usize,
+) -> Option<StickyHeader> {
+    markers
+        .iter()
+        .rev()
+        .find(|marker| marker.row <= scroll)
+        .or_else(|| markers.first())
+        .map(|marker| marker.header.clone())
+}
 
 pub fn agent_badge(agent: Agent, theme: &Theme) -> (&'static str, Color) {
     match agent {
@@ -315,6 +399,72 @@ fn fill_reset_background_cells(area: Rect, viewport_row: u16, bg: Color, buf: &m
     }
 }
 
+pub struct StickyHeaderWidget<'a> {
+    header: Option<&'a StickyHeader>,
+    theme: &'a Theme,
+}
+
+impl<'a> StickyHeaderWidget<'a> {
+    pub fn new(header: Option<&'a StickyHeader>, theme: &'a Theme) -> Self {
+        Self { header, theme }
+    }
+}
+
+impl Widget for StickyHeaderWidget<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.is_empty() {
+            return;
+        }
+
+        let empty = StickyHeader::new("", "", "");
+        let header = self.header.unwrap_or(&empty);
+        let from_value = if header.datetime.is_empty() {
+            header.from.clone()
+        } else if header.from.is_empty() {
+            header.datetime.clone()
+        } else {
+            format!("{} - {}", header.from, header.datetime)
+        };
+        let from = sticky_header_line("From   : ", &from_value, area.width, self.theme);
+        let subject = sticky_header_line("Subject: ", &header.subject, area.width, self.theme);
+        let rule = Line::from(Span::styled(
+            "─".repeat(area.width as usize),
+            Style::default().fg(self.theme.border),
+        ));
+
+        Paragraph::new(from).render(Rect::new(area.x, area.y, area.width, 1), buf);
+        if area.height > 1 {
+            Paragraph::new(subject).render(Rect::new(area.x, area.y + 1, area.width, 1), buf);
+        }
+        if area.height > 2 {
+            Paragraph::new(rule).render(Rect::new(area.x, area.y + 2, area.width, 1), buf);
+        }
+    }
+}
+
+fn sticky_header_line(
+    label: &'static str,
+    value: &str,
+    width: u16,
+    theme: &Theme,
+) -> Line<'static> {
+    let label_width = label.len();
+    let value_width = width as usize;
+    let value_width = value_width.saturating_sub(label_width);
+    Line::from(vec![
+        Span::styled(
+            label,
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            truncate_plain(value, value_width),
+            Style::default().fg(theme.text),
+        ),
+    ])
+}
+
 fn unescape_html(value: &str) -> String {
     value
         .replace("&lt;", "<")
@@ -365,8 +515,9 @@ mod tests {
 
     use super::{
         abbreviate_home_path_with, block_title, highlight_spans, highlight_styled_spans,
-        parse_highlighted_html, session_display_title, truncate_plain, wrapped_text_height,
-        FullLineBackgroundParagraph,
+        parse_highlighted_html, session_display_title, sticky_header_for_scroll,
+        sticky_rows_from_line_markers, truncate_plain, wrapped_text_height,
+        FullLineBackgroundParagraph, StickyHeader, StickyLineMarker,
     };
 
     #[test]
@@ -525,6 +676,34 @@ mod tests {
         let rendered = terminal.backend().buffer();
         assert_eq!(rendered[(7, 0)].bg, bg);
         assert_eq!(rendered[(7, 1)].bg, bg);
+    }
+
+    #[test]
+    fn sticky_rows_follow_wrapped_line_positions() {
+        let text = Text::from(vec![Line::from("alpha beta gamma"), Line::from("delta")]);
+        let markers = vec![
+            StickyLineMarker {
+                line_index: 0,
+                header: StickyHeader::new("User", "", ""),
+            },
+            StickyLineMarker {
+                line_index: 1,
+                header: StickyHeader::new("Agent", "", "Reply"),
+            },
+        ];
+
+        let rows = sticky_rows_from_line_markers(&text, &markers, 8);
+
+        assert_eq!(rows[0].row, 0);
+        assert_eq!(rows[1].row, 3);
+        assert_eq!(
+            sticky_header_for_scroll(&rows, 2).map(|header| header.from),
+            Some("User".to_owned())
+        );
+        assert_eq!(
+            sticky_header_for_scroll(&rows, 3).map(|header| header.from),
+            Some("Agent".to_owned())
+        );
     }
 
     #[test]
