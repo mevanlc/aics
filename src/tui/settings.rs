@@ -375,6 +375,7 @@ impl SettingsModalState {
             },
         ));
 
+        #[allow(clippy::needless_range_loop)]
         for index in start..end {
             if index > start {
                 spans.push(Span::styled(sep, separator_style));
@@ -701,6 +702,7 @@ fn radio_spans(
         },
     ));
 
+    #[allow(clippy::needless_range_loop)]
     for i in start..end {
         if i > start {
             spans.push(Span::styled(sep, separator_style));
@@ -774,8 +776,7 @@ fn detect_shell() -> TemplateShell {
     }
 }
 
-const PICKER_BACKENDS: [SummarizeBackend; 2] =
-    [SummarizeBackend::Claude, SummarizeBackend::Codex];
+const PICKER_BACKENDS: [SummarizeBackend; 2] = [SummarizeBackend::Claude, SummarizeBackend::Codex];
 
 fn backend_label(backend: SummarizeBackend) -> &'static str {
     match backend {
@@ -816,13 +817,8 @@ enum TemplatePickerField {
 
 const CLAUDE_MODELS: [Option<&'static str>; 4] =
     [None, Some("opus"), Some("sonnet"), Some("haiku")];
-const CLAUDE_EFFORTS: [Option<&'static str>; 5] = [
-    None,
-    Some("low"),
-    Some("medium"),
-    Some("high"),
-    Some("max"),
-];
+const CLAUDE_EFFORTS: [Option<&'static str>; 5] =
+    [None, Some("low"), Some("medium"), Some("high"), Some("max")];
 
 fn option_label(opt: Option<&str>) -> String {
     opt.unwrap_or("unset").to_owned()
@@ -1116,8 +1112,10 @@ impl TemplatePicker {
     }
 
     fn is_freeform_input_field(&self, field: TemplatePickerField) -> bool {
-        matches!(field, TemplatePickerField::Model | TemplatePickerField::Effort)
-            && matches!(*self.backend.current(), SummarizeBackend::Codex)
+        matches!(
+            field,
+            TemplatePickerField::Model | TemplatePickerField::Effort
+        ) && matches!(*self.backend.current(), SummarizeBackend::Codex)
             && matches!(self.codex, CodexSelectors::Freeform { .. })
     }
 
@@ -1481,7 +1479,13 @@ impl SummarizerModalState {
         frame.render_widget(&self.command_textarea, pad_rect(rows[2]));
 
         let prompt_focused = self.field == SummarizerField::Prompt;
-        render_field_label(frame, rows[4], theme, "Session summarizer prompt", prompt_focused);
+        render_field_label(
+            frame,
+            rows[4],
+            theme,
+            "Session summarizer prompt",
+            prompt_focused,
+        );
         style_textarea(&mut self.prompt_textarea, theme, prompt_focused);
         frame.render_widget(&self.prompt_textarea, pad_rect(rows[5]));
 
@@ -1587,8 +1591,10 @@ mod tests {
 
     #[test]
     fn theme_selector_shows_offscreen_arrows_when_width_is_tight() {
-        let mut settings = Settings::default();
-        settings.theme = ThemeName::Sunset;
+        let settings = Settings {
+            theme: ThemeName::Sunset,
+            ..Settings::default()
+        };
         let state = SettingsModalState::new(&settings);
         let theme = Theme::default();
 

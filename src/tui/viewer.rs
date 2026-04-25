@@ -75,6 +75,12 @@ pub(crate) enum MessageJumpScope {
     UserOnly,
 }
 
+impl Default for ViewerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ViewerState {
     const HINTS: [KeymapHint; 6] = [
         KeymapHint::new("↑↓/PgUp/PgDn/Home/End", "scroll"),
@@ -138,12 +144,17 @@ impl ViewerState {
                 ViewerOutcome::Stay
             }
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.jump_to_match(MatchDirection::Next, area, session, summary, theme, theme_name);
+                self.jump_to_match(
+                    MatchDirection::Next,
+                    area,
+                    session,
+                    summary,
+                    theme,
+                    theme_name,
+                );
                 ViewerOutcome::Stay
             }
-            KeyCode::Char('p')
-                if key.modifiers == KeyModifiers::CONTROL =>
-            {
+            KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
                 self.jump_to_match(
                     MatchDirection::Previous,
                     area,
@@ -214,6 +225,7 @@ impl ViewerState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         frame: &mut Frame,
@@ -343,6 +355,7 @@ impl ViewerState {
         self.scroll = scroll_for_match(matches[next_index], viewport_height, max_scroll);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn jump_to_message(
         &mut self,
         direction: MessageDirection,
@@ -513,11 +526,7 @@ pub(crate) fn scroll_for_match(
 /// Collect wrapped-row indices that contain a match for `query` within an
 /// already-rendered `Text`. Shared with the preview pane so it can navigate
 /// matches without re-rendering the session.
-pub(crate) fn collect_match_rows_in_text(
-    text: &Text<'_>,
-    query: &str,
-    width: u16,
-) -> Vec<usize> {
+pub(crate) fn collect_match_rows_in_text(text: &Text<'_>, query: &str, width: u16) -> Vec<usize> {
     let terms = extract_highlight_terms(query);
     if terms.is_empty() || width == 0 {
         return Vec::new();
@@ -649,12 +658,15 @@ pub(crate) fn collect_message_rows(
     let width = width as usize;
     let mut rows = Vec::with_capacity(session.messages.len());
     let mut row_offset = summary
-        .map(|summary| wrapped_text_height(&render_summary_leadin(summary, theme, None), width as u16) + 2)
+        .map(|summary| {
+            wrapped_text_height(&render_summary_leadin(summary, theme, None), width as u16) + 2
+        })
         .unwrap_or(0);
 
     for message in &session.messages {
         if matches!(scope, MessageJumpScope::Any)
-            || matches!(scope, MessageJumpScope::UserOnly) && message.role == crate::parse::MessageRole::User
+            || matches!(scope, MessageJumpScope::UserOnly)
+                && message.role == crate::parse::MessageRole::User
         {
             rows.push(row_offset);
         }
@@ -793,14 +805,14 @@ mod tests {
     use crate::settings::ThemeName;
     use crate::summary::{Fingerprint, SummarizeBackend, SummarySidecar};
     use crate::tui::preview::render_message_body;
-    use crate::tui::util::wrapped_text_height;
     use crate::tui::theme::Theme;
+    use crate::tui::util::wrapped_text_height;
 
     use super::{
         collect_match_rows, collect_message_rows, match_scrolloff, message_header_text,
         message_row_for_scroll, next_match_index, previous_match_index, scroll_for_match,
-        scroll_progress_percent, viewer_title, MessageDirection, MessageJumpScope,
-        ViewerOutcome, ViewerState,
+        scroll_progress_percent, viewer_title, MessageDirection, MessageJumpScope, ViewerOutcome,
+        ViewerState,
     };
 
     #[test]
@@ -850,19 +862,19 @@ mod tests {
         let rows = collect_message_rows(&session, None, &theme, width, MessageJumpScope::Any);
 
         let first = &session.messages[0];
-        let expected_second_start = wrapped_text_height(
-            &Text::from(Line::from(message_header_text(first))),
-            width,
-        ) + wrapped_text_height(
-            &render_message_body(
-                session.agent,
-                first.role,
-                first.content.as_str(),
-                &theme,
-                None,
-            ),
-            width,
-        ) + 1;
+        let expected_second_start =
+            wrapped_text_height(&Text::from(Line::from(message_header_text(first))), width)
+                + wrapped_text_height(
+                    &render_message_body(
+                        session.agent,
+                        first.role,
+                        first.content.as_str(),
+                        &theme,
+                        None,
+                    ),
+                    width,
+                )
+                + 1;
 
         assert_eq!(rows, vec![0, expected_second_start]);
     }
@@ -974,7 +986,8 @@ mod tests {
         let session = sample_session();
         let summary = sample_summary("alpha summary");
 
-        let match_rows = collect_match_rows(&session, Some(&summary), &Theme::default(), "alpha", 80);
+        let match_rows =
+            collect_match_rows(&session, Some(&summary), &Theme::default(), "alpha", 80);
         let message_rows = collect_message_rows(
             &session,
             Some(&summary),
@@ -1130,10 +1143,7 @@ mod tests {
         let mut state = ViewerState::new();
 
         state.handle_key(
-            KeyEvent::new(
-                KeyCode::Down,
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            ),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
             area,
             Some(&session),
             None,
@@ -1291,8 +1301,9 @@ mod tests {
                     tool_name: None,
                 },
             ],
-            content: "first user\nfirst assistant\nrun tool\ntool output\nsecond user\nsecond assistant"
-                .to_owned(),
+            content:
+                "first user\nfirst assistant\nrun tool\ntool output\nsecond user\nsecond assistant"
+                    .to_owned(),
         }
     }
 

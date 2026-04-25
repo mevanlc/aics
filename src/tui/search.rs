@@ -21,8 +21,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         + " · ".chars().count()
         + scope_label.chars().count()
         + " · ".chars().count();
-    let status_budget = (area.width as usize)
-        .saturating_sub(2 + fixed_width); // 2 for the two border corners
+    let status_budget = (area.width as usize).saturating_sub(2 + fixed_width); // 2 for the two border corners
     let status_text: std::borrow::Cow<str> = if status_text.chars().count() <= status_budget {
         status_text.into()
     } else {

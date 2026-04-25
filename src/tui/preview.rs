@@ -107,7 +107,8 @@ pub fn render_composite_text(
     highlight_query: Option<&str>,
     summary_inflight: bool,
 ) -> Text<'static> {
-    let mut lines = render_summary_sections(summaries, theme, highlight_query, summary_inflight).lines;
+    let mut lines =
+        render_summary_sections(summaries, theme, highlight_query, summary_inflight).lines;
     if !lines.is_empty() && session.is_some() {
         lines.push(Line::default());
     }
@@ -133,23 +134,40 @@ pub fn render_summary_sections(
         } else {
             "# Claude Auto-summary".to_owned()
         };
-        lines.extend(render_section(&title, &render_claude_summary_text(summary, theme, highlight_query), theme).lines);
+        lines.extend(
+            render_section(
+                &title,
+                &render_claude_summary_text(summary, theme, highlight_query),
+                theme,
+            )
+            .lines,
+        );
     }
 
     if let Some(summary) = summaries.aics_sidecar.as_ref() {
         if !lines.is_empty() {
             lines.push(Line::default());
         }
-        lines.extend(render_section("# AICS summary", &render_aics_summary_text(summary, theme, highlight_query), theme).lines);
+        lines.extend(
+            render_section(
+                "# AICS summary",
+                &render_aics_summary_text(summary, theme, highlight_query),
+                theme,
+            )
+            .lines,
+        );
     } else if summary_inflight {
         if !lines.is_empty() {
             lines.push(Line::default());
         }
-        lines.extend(render_section(
-            "# AICS summary",
-            &render_summary_missing(theme, "Summary is being generated…", false),
-            theme,
-        ).lines);
+        lines.extend(
+            render_section(
+                "# AICS summary",
+                &render_summary_missing(theme, "Summary is being generated…", false),
+                theme,
+            )
+            .lines,
+        );
     }
 
     Text::from(lines)
@@ -375,8 +393,8 @@ mod tests {
     };
 
     use super::{
-        normalize_highlight_query, render_composite_text, render_session_text, render_summary_missing,
-        render_summary_text,
+        normalize_highlight_query, render_composite_text, render_session_text,
+        render_summary_missing, render_summary_text,
     };
     use crate::tui::theme::Theme;
 

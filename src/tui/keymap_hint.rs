@@ -71,11 +71,9 @@ pub fn layout_hints<'a>(
         }
     }
 
-    for (i, hint) in hints.iter().enumerate() {
+    for hint in hints.iter() {
         let hint_w = hint.width();
-        let need = if spans.is_empty() || (i == 0 && line_width == 0) {
-            hint_w
-        } else if line_width == 0 {
+        let need = if spans.is_empty() || line_width == 0 {
             hint_w
         } else {
             SEP_WIDTH + hint_w

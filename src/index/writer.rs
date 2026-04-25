@@ -454,8 +454,8 @@ fn add_session_document(
     let stored = StoredSession::from(session);
     let stored_json = serde_json::to_string(&stored).context("failed to serialize session")?;
 
-    document.add_text(fields.file_path, &normalize_path_key(&session.file_path));
-    document.add_text(fields.content, &searchable_content(session));
+    document.add_text(fields.file_path, normalize_path_key(&session.file_path));
+    document.add_text(fields.content, searchable_content(session));
     document.add_u64(fields.modified_ts, session.modified_ts);
     document.add_text(fields.session_json, &stored_json);
 

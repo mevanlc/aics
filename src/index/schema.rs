@@ -18,6 +18,12 @@ pub struct IndexSchema {
     pub session_json: Field,
 }
 
+impl Default for IndexSchema {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IndexSchema {
     pub fn new() -> Self {
         let mut builder = Schema::builder();

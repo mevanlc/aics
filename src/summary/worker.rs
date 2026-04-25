@@ -232,7 +232,10 @@ fn append_error_log(jsonl_path: &std::path::Path, error: &str) {
         .open(&log_path)
         .and_then(|mut f| f.write_all(entry.as_bytes()))
     {
-        warn!("failed to write summarizer error log {}: {e}", log_path.display());
+        warn!(
+            "failed to write summarizer error log {}: {e}",
+            log_path.display()
+        );
     }
 }
 

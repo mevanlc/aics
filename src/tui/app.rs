@@ -88,6 +88,7 @@ pub enum Focus {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Overlay {
     None,
     Filters(FilterModalState),
@@ -128,17 +129,12 @@ enum AppExit {
     Handoff(ExternalCommand),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SnippetMode {
+    #[default]
     ContentPreview,
     AicsSummary,
     BuiltinSummary,
-}
-
-impl Default for SnippetMode {
-    fn default() -> Self {
-        Self::ContentPreview
-    }
 }
 
 impl SnippetMode {
@@ -564,11 +560,7 @@ impl App {
         (&self.results[offset..end], Some(self.selected - offset))
     }
 
-    pub fn list_snippet_line(
-        &mut self,
-        hit: &SearchHit,
-        theme: &Theme,
-    ) -> Line<'static> {
+    pub fn list_snippet_line(&mut self, hit: &SearchHit, theme: &Theme) -> Line<'static> {
         if let Some(snippet) = self.active_summary_snippet_text(hit) {
             return Line::from(highlight_spans(
                 &snippet,
@@ -1345,7 +1337,7 @@ impl App {
     }
 
     fn preview_available(&self) -> bool {
-        self.last_layout.map_or(false, |l| l.preview.is_some())
+        self.last_layout.is_some_and(|l| l.preview.is_some())
     }
 
     fn jump_preview_message(&mut self, direction: MessageDirection, scope: MessageJumpScope) {
@@ -1777,8 +1769,13 @@ impl App {
             .and_then(|hit| self.preview_cache.get(&hit.session.file_path))
             .and_then(|session| session.as_ref());
         if let (Overlay::Viewer(state), Some(session)) = (&mut self.overlay, viewer_session) {
-            let max_scroll =
-                state.max_scroll(frame_area, session, viewer_summary.as_ref(), &theme, theme_name);
+            let max_scroll = state.max_scroll(
+                frame_area,
+                session,
+                viewer_summary.as_ref(),
+                &theme,
+                theme_name,
+            );
             state.scroll = state.scroll.min(max_scroll);
         }
     }
@@ -2436,11 +2433,7 @@ mod tests {
         assert_eq!(claude.program, "claude");
         assert_eq!(
             claude.args,
-            vec![
-                "--dangerously-skip-permissions",
-                "--resume",
-                "session-123",
-            ]
+            vec!["--dangerously-skip-permissions", "--resume", "session-123",]
         );
         assert_eq!(
             claude.env,
@@ -2913,7 +2906,8 @@ mod tests {
             preview: Some(Rect::new(60, 3, 60, 20)),
             status: Rect::new(0, 23, 120, 2),
         });
-        app.preview_cache.insert(path, Some(sample_preview_session()));
+        app.preview_cache
+            .insert(path, Some(sample_preview_session()));
 
         app.handle_search_key(crossterm_key_mods(
             KeyCode::Down,
@@ -3159,7 +3153,10 @@ mod tests {
         assert_eq!(app.active_summary_snippet_text(&hit), None);
 
         app.snippet_mode = super::SnippetMode::AicsSummary;
-        assert_eq!(app.active_summary_snippet_text(&hit).as_deref(), Some("AICS body"));
+        assert_eq!(
+            app.active_summary_snippet_text(&hit).as_deref(),
+            Some("AICS body")
+        );
 
         app.snippet_mode = super::SnippetMode::BuiltinSummary;
         assert_eq!(
@@ -3568,8 +3565,9 @@ mod tests {
                     tool_name: None,
                 },
             ],
-            content: "first user\nfirst assistant\nrun tool\ntool output\nsecond user\nsecond assistant"
-                .to_owned(),
+            content:
+                "first user\nfirst assistant\nrun tool\ntool output\nsecond user\nsecond assistant"
+                    .to_owned(),
         }
     }
 

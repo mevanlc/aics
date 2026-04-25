@@ -75,6 +75,12 @@ pub enum ActionOutcome {
     Run(SessionAction),
 }
 
+impl Default for ActionMenuState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ActionMenuState {
     pub fn new() -> Self {
         Self {

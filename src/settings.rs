@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::summary::prompt::DEFAULT_PROMPT;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeName {
+    #[default]
     Lazygit,
     Aics,
     Sunset,
@@ -31,12 +32,6 @@ impl ThemeName {
             ThemeName::Sunset => "sunset",
             ThemeName::LateSh => "late.sh",
         }
-    }
-}
-
-impl Default for ThemeName {
-    fn default() -> Self {
-        ThemeName::Lazygit
     }
 }
 
@@ -159,18 +154,23 @@ impl Settings {
     pub fn claude_program_and_args(&self) -> (String, Vec<String>) {
         (
             self.claude_command.clone(),
-            self.claude_args.split_whitespace().map(str::to_owned).collect(),
+            self.claude_args
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect(),
         )
     }
 
     pub fn codex_program_and_args(&self) -> (String, Vec<String>) {
         (
             self.codex_command.clone(),
-            self.codex_args.split_whitespace().map(str::to_owned).collect(),
+            self.codex_args
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect(),
         )
     }
 }
-
 
 fn settings_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("settings.json"))

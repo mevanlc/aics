@@ -131,7 +131,7 @@ impl SummarySidecar {
                 }
                 "backend" => {
                     backend = Some(
-                        SummarizeBackend::from_str(v)
+                        SummarizeBackend::parse(v)
                             .ok_or_else(|| anyhow!("unknown backend `{v}`"))?,
                     );
                 }

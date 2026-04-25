@@ -180,7 +180,10 @@ mod tests {
     fn escape_sq_leaves_safe_strings_alone() {
         assert_eq!(escape_sq(""), "");
         assert_eq!(escape_sq("hello world"), "hello world");
-        assert_eq!(escape_sq("/tmp/path with spaces/x.jsonl"), "/tmp/path with spaces/x.jsonl");
+        assert_eq!(
+            escape_sq("/tmp/path with spaces/x.jsonl"),
+            "/tmp/path with spaces/x.jsonl"
+        );
         assert_eq!(escape_sq("$var\\n!*\"weird\""), "$var\\n!*\"weird\"");
     }
 

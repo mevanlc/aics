@@ -362,10 +362,7 @@ fn extract_message_blocks(
                             .and_then(Value::as_str)
                             .map(|s| s.trim().to_owned())
                             .filter(|s| !s.is_empty())
-                            .or_else(|| {
-                                item.get("content")
-                                    .map(|c| tool_format::format_tool_result(c))
-                            })
+                            .or_else(|| item.get("content").map(tool_format::format_tool_result))
                             .unwrap_or_default();
 
                         if !text.is_empty() {

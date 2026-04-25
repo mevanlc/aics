@@ -108,9 +108,7 @@ fn claude_away_summary_only_file_becomes_summary_session() -> Result<()> {
         .join(".claude/projects/-Users-testuser-projects-myapp/away-summary-only.jsonl");
     write_text_file(
         &path,
-        concat!(
-            "{\"parentUuid\":null,\"isSidechain\":false,\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"All 60 tests pass. Next: review the rendering.\",\"timestamp\":\"2026-04-15T13:25:59.006Z\",\"uuid\":\"uuid-1\",\"isMeta\":false,\"userType\":\"external\",\"entrypoint\":\"cli\",\"cwd\":\"/Users/testuser/projects/myapp\",\"sessionId\":\"away-summary-only\",\"version\":\"2.1.109\",\"gitBranch\":\"main\",\"slug\":\"away-only\"}\n"
-        ),
+        "{\"parentUuid\":null,\"isSidechain\":false,\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"All 60 tests pass. Next: review the rendering.\",\"timestamp\":\"2026-04-15T13:25:59.006Z\",\"uuid\":\"uuid-1\",\"isMeta\":false,\"userType\":\"external\",\"entrypoint\":\"cli\",\"cwd\":\"/Users/testuser/projects/myapp\",\"sessionId\":\"away-summary-only\",\"version\":\"2.1.109\",\"gitBranch\":\"main\",\"slug\":\"away-only\"}\n",
     )?;
 
     let session = parse_claude_session_file(&path)?.expect("expected summary-only session");

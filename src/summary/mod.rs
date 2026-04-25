@@ -53,18 +53,13 @@ pub enum SummaryPreview {
 }
 
 /// Which CLI the summarizer should invoke.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SummarizeBackend {
+    #[default]
     Claude,
     Codex,
     Custom,
-}
-
-impl Default for SummarizeBackend {
-    fn default() -> Self {
-        SummarizeBackend::Claude
-    }
 }
 
 impl SummarizeBackend {
@@ -76,7 +71,7 @@ impl SummarizeBackend {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "claude" => Some(SummarizeBackend::Claude),
             "codex" => Some(SummarizeBackend::Codex),
@@ -121,9 +116,9 @@ mod tests {
             SummarizeBackend::Codex,
             SummarizeBackend::Custom,
         ] {
-            assert_eq!(SummarizeBackend::from_str(b.as_str()), Some(b));
+            assert_eq!(SummarizeBackend::parse(b.as_str()), Some(b));
         }
-        assert_eq!(SummarizeBackend::from_str("nope"), None);
+        assert_eq!(SummarizeBackend::parse("nope"), None);
     }
 
     #[test]

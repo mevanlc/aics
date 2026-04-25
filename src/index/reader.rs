@@ -321,19 +321,14 @@ impl SearchEngine {
             offset += docs_len;
             for (_, address) in docs {
                 let document = searcher.doc::<TantivyDocument>(address)?;
-                let session =
-                    self.session_from_doc(address, &document, session_cache)?;
+                let session = self.session_from_doc(address, &document, session_cache)?;
                 let is_live = live_ids.contains(&session.session_id);
                 if !matches_request(request, &session, is_live) {
                     continue;
                 }
 
-                let snippet_html = build_snippet_html(
-                    snippet_generator.as_ref(),
-                    &document,
-                    &session,
-                    query_text,
-                );
+                let snippet_html =
+                    build_snippet_html(snippet_generator.as_ref(), &document, &session, query_text);
                 hits.push(SearchHit {
                     snippet_html,
                     score: session.modified_ts as f32,
@@ -359,6 +354,7 @@ impl SearchEngine {
         query_parser
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn collect_candidates(
         &self,
         searcher: &tantivy::Searcher,
@@ -377,12 +373,8 @@ impl SearchEngine {
                 continue;
             }
 
-            let snippet_html = build_snippet_html(
-                snippet_generator,
-                &document,
-                &session,
-                request.query.trim(),
-            );
+            let snippet_html =
+                build_snippet_html(snippet_generator, &document, &session, request.query.trim());
             hits.push(SearchCandidate {
                 score: score * recency_boost(session.modified_ts),
                 session,
