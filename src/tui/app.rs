@@ -1014,6 +1014,15 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {}
+            MouseEventKind::Down(MouseButton::Right) => {
+                self.pending_list_click = None;
+                if contains(areas.list, mouse.column, mouse.row) {
+                    if let Some(index) = self.list_index_at(areas.list, mouse.row) {
+                        self.select_absolute(index);
+                        self.open_actions_menu();
+                    }
+                }
+            }
             MouseEventKind::ScrollDown => {
                 self.pending_list_click = None;
                 if contains(areas.list, mouse.column, mouse.row) {
@@ -2978,6 +2987,28 @@ mod tests {
         .unwrap();
 
         assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+    }
+
+    #[test]
+    fn right_clicking_list_item_opens_actions_menu() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude), sample_hit(Agent::Codex)];
+        app.last_layout = Some(layout::AppLayout {
+            search: Rect::new(0, 0, 120, 3),
+            list: Rect::new(0, 3, 60, 20),
+            preview: Some(Rect::new(60, 3, 60, 20)),
+            status: Rect::new(0, 23, 120, 2),
+        });
+
+        let row = app.last_layout.as_ref().unwrap().list.y + 2;
+        app.handle_mouse(crossterm_mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            5,
+            row,
+        ))
+        .unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::Actions(_)));
     }
 
     #[test]
