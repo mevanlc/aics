@@ -538,7 +538,11 @@ pub(crate) fn render_message_body_document(
             .into_iter()
             .map(|heading| StickyLineMarker {
                 line_index: heading.line_index,
-                header: StickyHeader::new("", "", heading.text),
+                header: StickyHeader::new(
+                    "",
+                    "",
+                    truncate_chars(&heading.breadcrumb, RESULT_SUBJECT_MAX_CHARS),
+                ),
             })
             .collect(),
     }
@@ -1610,7 +1614,7 @@ fn add_summary_heading_markers(
     );
     for heading in rendered.headings {
         let mut header = base_header.clone();
-        header.subject = heading.text;
+        header.subject = truncate_chars(&heading.breadcrumb, RESULT_SUBJECT_MAX_CHARS);
         markers.push(StickyLineMarker {
             line_index: line_offset + 2 + heading.line_index,
             header,
@@ -2071,6 +2075,51 @@ mod tests {
         );
         assert_eq!(document.sticky_markers[1].line_index, 1);
         assert_eq!(document.sticky_markers[1].header.subject, "Topic");
+    }
+
+    #[test]
+    fn nested_assistant_headings_render_breadcrumb_in_sticky_subject() {
+        let theme = Theme::default();
+        let body = "# Top\n\n## Section\n\n### Detail\n\nlast";
+        let session = Session {
+            session_id: "session-bc".to_owned(),
+            agent: Agent::Claude,
+            project: "/tmp/demo".to_owned(),
+            branch: None,
+            cwd: Some("/tmp/demo".to_owned()),
+            created: None,
+            modified: None,
+            modified_ts: 0,
+            lines: 0,
+            file_path: PathBuf::from("/tmp/demo/session.jsonl"),
+            first_msg_role: None,
+            first_msg_content: String::new(),
+            last_msg_role: None,
+            last_msg_content: String::new(),
+            first_user_msg_content: String::new(),
+            derivation_type: DerivationType::Original,
+            is_sidechain: false,
+            custom_title: None,
+            messages: vec![SessionMessage {
+                role: MessageRole::Assistant,
+                content: body.to_owned(),
+                timestamp: Some(Utc.with_ymd_and_hms(2026, 4, 27, 9, 0, 0).unwrap()),
+                tool_name: None,
+            }],
+            content: body.to_owned(),
+            cells: Vec::new(),
+            session_info: None,
+        };
+
+        let doc = render_session_document(&session, &theme, None);
+        let subjects: Vec<&str> = doc
+            .sticky_markers
+            .iter()
+            .map(|m| m.header.subject.as_str())
+            .collect();
+        assert!(subjects.contains(&"Top"));
+        assert!(subjects.contains(&"Top \u{203a} Section"));
+        assert!(subjects.contains(&"Top \u{203a} Section \u{203a} Detail"));
     }
 
     #[test]

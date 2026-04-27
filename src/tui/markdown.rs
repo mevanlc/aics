@@ -36,7 +36,14 @@ pub struct MarkdownRender {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkdownHeading {
     pub line_index: usize,
+    /// 1..=6 — H1 through H6.
+    pub level: u8,
+    /// The heading's own text, without ancestors.
     pub text: String,
+    /// Full ancestor path joined by ` › ` (e.g. `Top › Section › Sub`). When
+    /// the heading has no ancestors it's identical to `text`. Sticky headers
+    /// use this to give scroll-context for the current section.
+    pub breadcrumb: String,
 }
 
 pub fn render_markdown_message_with_headings(
@@ -67,6 +74,13 @@ struct MarkdownRenderer<'a> {
     list_stack: Vec<ListState>,
     blockquote_depth: usize,
     code_block: Option<CodeBlockState>,
+    /// Ancestor path of (level, text) pairs used to build heading breadcrumbs.
+    /// On a new heading at level N, all entries with level >= N are popped
+    /// before the new one is pushed.
+    heading_path: Vec<(u8, String)>,
+    /// Track the current heading's level between `start_tag(Heading)` and
+    /// `end_tag(Heading)` since `TagEnd::Heading` doesn't carry the level.
+    current_heading_level: Option<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -93,6 +107,8 @@ impl<'a> MarkdownRenderer<'a> {
             list_stack: Vec::new(),
             blockquote_depth: 0,
             code_block: None,
+            heading_path: Vec::new(),
+            current_heading_level: None,
         }
     }
 
@@ -153,6 +169,7 @@ impl<'a> MarkdownRenderer<'a> {
             Tag::Heading { level, .. } => {
                 self.start_block();
                 self.inline_styles.push(self.heading_style(level));
+                self.current_heading_level = Some(heading_level_to_u8(level));
             }
             Tag::BlockQuote(_) => {
                 self.start_block();
@@ -189,12 +206,30 @@ impl<'a> MarkdownRenderer<'a> {
             TagEnd::Paragraph | TagEnd::HtmlBlock => self.finish_line(),
             TagEnd::Heading(_) => {
                 let subject = spans_text(&self.current_line).trim().to_owned();
+                let level = self.current_heading_level.take().unwrap_or(1);
                 self.pop_inline_style();
                 self.finish_line();
                 if !subject.is_empty() {
+                    // Drop any ancestors at this level or deeper, then push.
+                    while self
+                        .heading_path
+                        .last()
+                        .is_some_and(|(prev_level, _)| *prev_level >= level)
+                    {
+                        self.heading_path.pop();
+                    }
+                    self.heading_path.push((level, subject.clone()));
+                    let breadcrumb = self
+                        .heading_path
+                        .iter()
+                        .map(|(_, text)| text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" \u{203a} ");
                     self.headings.push(MarkdownHeading {
                         line_index: self.lines.len().saturating_sub(1),
+                        level,
                         text: subject,
+                        breadcrumb,
                     });
                 }
             }
@@ -436,6 +471,17 @@ fn create_highlighter(language: &str) -> Option<HighlightLines<'static>> {
     Some(HighlightLines::new(syntax, theme))
 }
 
+fn heading_level_to_u8(level: HeadingLevel) -> u8 {
+    match level {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
+    }
+}
+
 fn syntect_style_to_ratatui(style: syntect::highlighting::Style, base: Style) -> Style {
     let mut rendered = base.fg(to_ratatui_color(style.foreground));
     if style.font_style.contains(FontStyle::BOLD) {
@@ -557,6 +603,52 @@ mod tests {
         assert_eq!(rendered.headings.len(), 1);
         assert_eq!(rendered.headings[0].line_index, 2);
         assert_eq!(rendered.headings[0].text, "Plan");
+        assert_eq!(rendered.headings[0].level, 2);
+        assert_eq!(rendered.headings[0].breadcrumb, "Plan");
+    }
+
+    #[test]
+    fn nested_headings_build_full_breadcrumb_path() {
+        let theme = Theme::default();
+        let base = Style::default().fg(theme.text).bg(theme.bubble_user);
+        let src = "# Top\n\n## Section A\n\n### Sub 1\n\nbody\n\n### Sub 2\n\n## Section B\n\nbody";
+        let rendered = render_markdown_message_with_headings(src, &theme, base, None);
+
+        let crumbs: Vec<&str> = rendered
+            .headings
+            .iter()
+            .map(|h| h.breadcrumb.as_str())
+            .collect();
+        assert_eq!(
+            crumbs,
+            vec![
+                "Top",
+                "Top \u{203a} Section A",
+                "Top \u{203a} Section A \u{203a} Sub 1",
+                "Top \u{203a} Section A \u{203a} Sub 2",
+                "Top \u{203a} Section B",
+            ]
+        );
+    }
+
+    #[test]
+    fn skipping_a_heading_level_keeps_breadcrumb_consistent() {
+        let theme = Theme::default();
+        let base = Style::default().fg(theme.text).bg(theme.bubble_user);
+        // H1 -> H3 (skip H2). The H3 should still hang off H1.
+        let rendered =
+            render_markdown_message_with_headings("# Top\n\n### Deep\n\nbody", &theme, base, None);
+        assert_eq!(rendered.headings[1].breadcrumb, "Top \u{203a} Deep");
+    }
+
+    #[test]
+    fn dropping_back_to_higher_level_pops_intermediate_ancestors() {
+        let theme = Theme::default();
+        let base = Style::default().fg(theme.text).bg(theme.bubble_user);
+        let src = "# Top\n\n## Section\n\n### Detail\n\n# Top Two";
+        let rendered = render_markdown_message_with_headings(src, &theme, base, None);
+        // Last heading is a fresh H1 — its breadcrumb should be just itself.
+        assert_eq!(rendered.headings.last().unwrap().breadcrumb, "Top Two");
     }
 
     #[test]
