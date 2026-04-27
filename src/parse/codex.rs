@@ -13,7 +13,9 @@ use serde_json::{Map, Value};
 use super::session::{
     earliest_timestamp, fallback_session_id, first_message_fields, infer_derivation_type,
     last_message_fields, latest_timestamp, metadata_created, metadata_modified, modified_ts,
-    push_tool_message, push_unique_chunk, push_unique_message, Agent, MessageRole, Session,
+    push_tool_message, push_unique_chunk, push_unique_message, Agent, ExecStatus, MessageRole,
+    PatchFile, PatchOp, PlanItem, PlanItemStatus, RuntimeMetrics, Session, SessionCell,
+    SessionInfo, ToolStatus,
 };
 use super::tool_format;
 
@@ -32,6 +34,8 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
     let mut content_chunks = Vec::new();
     let mut resume_preview_first_user = None::<String>;
     let mut fallback_preview_first_user = None::<String>;
+    let mut session_info = SessionInfo::default();
+    let mut cell_builder = CodexCellBuilder::default();
 
     for line in reader.lines() {
         let line = match line {
@@ -79,10 +83,12 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
                 session_id = session_id.or_else(|| string_field(payload, "id"));
                 cwd = cwd.or_else(|| string_field(payload, "cwd"));
                 created = earliest_timestamp(created, extract_timestamp(payload.get("timestamp")));
+                update_session_info_from_meta(&mut session_info, payload);
             }
             Some("turn_context") => {
                 let payload = value.get("payload").unwrap_or(&Value::Null);
                 cwd = cwd.or_else(|| string_field(payload, "cwd"));
+                update_session_info_from_turn_context(&mut session_info, payload);
             }
             Some("response_item") => {
                 if let Some(payload) = value.get("payload") {
@@ -94,6 +100,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
                         &mut cwd,
                         &mut fallback_preview_first_user,
                     );
+                    cell_builder.handle_response_item(payload, top_level_timestamp);
                 }
             }
             Some("event_msg") => {
@@ -105,6 +112,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
                         &mut content_chunks,
                         &mut resume_preview_first_user,
                     );
+                    cell_builder.handle_event_msg(payload, top_level_timestamp);
                 }
             }
             Some("message")
@@ -121,6 +129,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
                     &mut cwd,
                     &mut fallback_preview_first_user,
                 );
+                cell_builder.handle_response_item(&value, top_level_timestamp);
             }
             Some(_) => {}
             None => {
@@ -146,6 +155,21 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
         .unwrap_or_default();
     let custom_title = find_codex_thread_name(path, &session_id);
 
+    if session_info.cwd.is_none() {
+        session_info.cwd = cwd.clone();
+    }
+    let session_info = if session_info.is_empty() {
+        None
+    } else {
+        Some(session_info)
+    };
+
+    let mut cells = Vec::with_capacity(cell_builder.cells.len() + 1);
+    if let Some(info) = session_info.clone() {
+        cells.push(SessionCell::SessionInfo(info));
+    }
+    cells.extend(cell_builder.finish());
+
     Ok(Some(Session {
         session_id,
         agent: Agent::Codex,
@@ -167,7 +191,66 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
         custom_title,
         content: content_chunks.join("\n\n"),
         messages,
+        cells,
+        session_info,
     }))
+}
+
+fn update_session_info_from_meta(info: &mut SessionInfo, payload: &Value) {
+    if info.cwd.is_none() {
+        info.cwd = string_field(payload, "cwd");
+    }
+    if info.cli_version.is_none() {
+        info.cli_version = string_field(payload, "cli_version");
+    }
+    if info.source.is_none() {
+        info.source = string_field(payload, "source");
+    }
+    if info.originator.is_none() {
+        info.originator = string_field(payload, "originator");
+    }
+    if info.model_provider.is_none() {
+        info.model_provider = string_field(payload, "model_provider");
+    }
+    if info.instructions.is_none() {
+        // Either `instructions` (older) or `base_instructions` (newer).
+        info.instructions = string_field(payload, "instructions")
+            .or_else(|| string_field(payload, "base_instructions"));
+    }
+}
+
+fn update_session_info_from_turn_context(info: &mut SessionInfo, payload: &Value) {
+    if info.cwd.is_none() {
+        info.cwd = string_field(payload, "cwd");
+    }
+    // `turn_context` may appear multiple times — the latest model/effort wins.
+    if let Some(model) = string_field(payload, "model") {
+        info.model = Some(model);
+    }
+    if let Some(effort) = string_field(payload, "effort") {
+        info.reasoning_effort = Some(effort);
+    }
+    if let Some(approval) = string_field(payload, "approval_policy") {
+        info.approval_policy = Some(approval);
+    }
+    if let Some(sandbox) = payload.get("sandbox_policy") {
+        if let Some(mode) = sandbox.get("mode").and_then(Value::as_str) {
+            info.sandbox_mode = Some(mode.to_owned());
+        }
+        if let Some(net) = sandbox.get("network_access").and_then(Value::as_bool) {
+            info.network_access = Some(net);
+        }
+        if let Some(roots) = sandbox.get("writable_roots").and_then(Value::as_array) {
+            let collected: Vec<String> = roots
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect();
+            if !collected.is_empty() {
+                info.writable_roots = collected;
+            }
+        }
+    }
 }
 
 fn handle_response_item(
@@ -434,6 +517,959 @@ fn compact_json_object(object: &Map<String, Value>) -> String {
     serde_json::to_string(object).unwrap_or_default()
 }
 
+/// Builds a typed `Vec<SessionCell>` from a Codex rollout, pairing tool calls
+/// with their outputs (and any later end-event enrichment) by `call_id`.
+///
+/// The pairing is single-pass: each pending call records the index in `cells`
+/// of its placeholder cell, which is mutated when the matching output arrives.
+/// Calls whose output never arrives are left in their pending state.
+#[derive(Debug, Default)]
+struct CodexCellBuilder {
+    cells: Vec<SessionCell>,
+    /// call_id -> cell index for `Exec` placeholders awaiting `function_call_output`
+    /// or `event_msg.exec_command_end`.
+    pending_exec: HashMap<String, usize>,
+    /// call_id -> cell index for `Patch` placeholders.
+    pending_patch: HashMap<String, usize>,
+    /// call_id -> cell index for `WebSearch` placeholders.
+    pending_search: HashMap<String, usize>,
+    /// call_id -> cell index for generic `ToolCall` placeholders, used to flip
+    /// status when the matching output arrives.
+    pending_tool: HashMap<String, usize>,
+    /// Latest non-null `info.total_token_usage` payload seen.
+    latest_token_info: Option<Value>,
+    /// Earliest event timestamp (used to compute wall time).
+    first_event_ts: Option<DateTime<Utc>>,
+    /// Latest event timestamp.
+    last_event_ts: Option<DateTime<Utc>>,
+}
+
+impl CodexCellBuilder {
+    fn finish(mut self) -> Vec<SessionCell> {
+        let metrics = self.compute_metrics();
+        if !metrics.is_empty() {
+            self.cells.push(SessionCell::Metrics(metrics));
+        }
+        self.cells
+    }
+
+    fn compute_metrics(&self) -> RuntimeMetrics {
+        let mut metrics = RuntimeMetrics::default();
+        if let Some(info) = self.latest_token_info.as_ref() {
+            if let Some(total) = info.get("total_token_usage") {
+                metrics.input_tokens = total
+                    .get("input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                metrics.cached_input_tokens = total
+                    .get("cached_input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                metrics.output_tokens = total
+                    .get("output_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                metrics.reasoning_output_tokens = total
+                    .get("reasoning_output_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                metrics.total_tokens = total
+                    .get("total_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+            }
+            metrics.model_context_window = info
+                .get("model_context_window")
+                .and_then(Value::as_u64);
+        }
+        for cell in &self.cells {
+            match cell {
+                SessionCell::ToolCall { status, .. } => {
+                    metrics.tool_call_count += 1;
+                    if matches!(status, ToolStatus::Failed) {
+                        metrics.tool_failure_count += 1;
+                    }
+                }
+                SessionCell::Exec { status, .. } => {
+                    metrics.exec_count += 1;
+                    metrics.tool_call_count += 1;
+                    if matches!(status, ExecStatus::Failed) {
+                        metrics.tool_failure_count += 1;
+                    }
+                }
+                SessionCell::Patch { success, .. } => {
+                    metrics.patch_count += 1;
+                    metrics.tool_call_count += 1;
+                    if !success {
+                        metrics.tool_failure_count += 1;
+                    }
+                }
+                SessionCell::WebSearch { .. } => {
+                    metrics.web_search_count += 1;
+                    metrics.tool_call_count += 1;
+                }
+                _ => {}
+            }
+        }
+        if let (Some(start), Some(end)) = (self.first_event_ts, self.last_event_ts) {
+            let delta = end.signed_duration_since(start).num_milliseconds();
+            if delta > 0 {
+                metrics.total_wall_ms = Some(delta as u64);
+            }
+        }
+        metrics
+    }
+
+    fn handle_response_item(&mut self, payload: &Value, timestamp: Option<DateTime<Utc>>) {
+        if let Some(ts) = timestamp {
+            self.first_event_ts = Some(self.first_event_ts.map_or(ts, |first| first.min(ts)));
+            self.last_event_ts = Some(self.last_event_ts.map_or(ts, |last| last.max(ts)));
+        }
+
+        let Some(item_type) = payload.get("type").and_then(Value::as_str) else {
+            return;
+        };
+
+        match item_type {
+            "message" => self.push_message_cell(payload, timestamp),
+            "reasoning" => self.push_reasoning_cell(payload, timestamp),
+            "function_call" => self.push_function_call_cell(payload, timestamp),
+            "function_call_output" => self.handle_function_call_output(payload, timestamp),
+            "custom_tool_call" => self.push_custom_tool_call_cell(payload, timestamp),
+            "custom_tool_call_output" => self.handle_custom_tool_call_output(payload, timestamp),
+            "web_search_call" => self.push_web_search_cell(payload, timestamp),
+            _ => {}
+        }
+    }
+
+    fn handle_event_msg(&mut self, payload: &Value, timestamp: Option<DateTime<Utc>>) {
+        if let Some(ts) = timestamp {
+            self.first_event_ts = Some(self.first_event_ts.map_or(ts, |first| first.min(ts)));
+            self.last_event_ts = Some(self.last_event_ts.map_or(ts, |last| last.max(ts)));
+        }
+
+        let Some(event_type) = payload.get("type").and_then(Value::as_str) else {
+            return;
+        };
+
+        match event_type {
+            "user_message" => {
+                let raw = payload
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if should_skip_display_message("user", raw) {
+                    return;
+                }
+                let normalized = normalize_codex_user_message(raw).unwrap_or_else(|| raw.to_owned());
+                self.push_unique_message_cell(MessageRole::User, normalized, timestamp);
+            }
+            "agent_message" => {
+                let message = payload
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if message.trim().is_empty() {
+                    return;
+                }
+                self.push_unique_message_cell(
+                    MessageRole::Assistant,
+                    message.to_owned(),
+                    timestamp,
+                );
+            }
+            "agent_reasoning" => {
+                if let Some(text) = payload.get("text").and_then(Value::as_str) {
+                    self.push_reasoning_text(text, timestamp);
+                }
+            }
+            "exec_command_end" => self.handle_exec_command_end(payload),
+            "patch_apply_end" => self.handle_patch_apply_end(payload),
+            "web_search_end" => self.handle_web_search_end(payload),
+            "token_count" => {
+                if let Some(info) = payload.get("info") {
+                    if !info.is_null() {
+                        self.latest_token_info = Some(info.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn push_message_cell(&mut self, payload: &Value, timestamp: Option<DateTime<Utc>>) {
+        let role = payload
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("assistant");
+        let Some(text) = extract_message_text(payload.get("content")) else {
+            return;
+        };
+        if should_skip_display_message(role, &text) {
+            return;
+        }
+        let Some(display_role) = map_display_role(role) else {
+            return;
+        };
+        self.push_unique_message_cell(display_role, text, timestamp);
+    }
+
+    fn push_unique_message_cell(
+        &mut self,
+        role: MessageRole,
+        content: String,
+        timestamp: Option<DateTime<Utc>>,
+    ) {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        // De-dup against last cell if it's the same role+content (a Codex rollout
+        // may carry the same user/agent message both as a `response_item.message`
+        // and as an `event_msg.user_message`/`agent_message`).
+        if let Some(SessionCell::Message {
+            role: prev_role,
+            content: prev_content,
+            ..
+        }) = self.cells.last()
+        {
+            if *prev_role == role && prev_content == trimmed {
+                return;
+            }
+        }
+        self.cells.push(SessionCell::Message {
+            role,
+            content: trimmed.to_owned(),
+            timestamp,
+        });
+    }
+
+    fn push_reasoning_cell(&mut self, payload: &Value, timestamp: Option<DateTime<Utc>>) {
+        // `summary[*].text` is the plaintext form. `encrypted_content` is opaque.
+        let Some(text) = extract_reasoning_summary(payload.get("summary")) else {
+            return;
+        };
+        self.push_reasoning_text(&text, timestamp);
+    }
+
+    fn push_reasoning_text(&mut self, raw: &str, timestamp: Option<DateTime<Utc>>) {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        // De-dup: response_item.reasoning and event_msg.agent_reasoning often
+        // carry the same text in the same turn.
+        if let Some(SessionCell::Reasoning { body, .. }) = self.cells.last() {
+            if body == trimmed {
+                return;
+            }
+        }
+        let (header, body) = split_reasoning_header_body(trimmed);
+        self.cells.push(SessionCell::Reasoning {
+            header,
+            body,
+            timestamp,
+        });
+    }
+
+    fn push_function_call_cell(&mut self, payload: &Value, timestamp: Option<DateTime<Utc>>) {
+        let raw_name = payload
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("function_call")
+            .to_owned();
+        let label = tool_format::tool_label(&raw_name).to_owned();
+        let call_id = string_field(payload, "call_id");
+        let args_value: Value = payload
+            .get("arguments")
+            .and_then(Value::as_str)
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(Value::Null);
+
+        if label == "bash" {
+            // Build an Exec placeholder.
+            let (command, exec_cwd, parsed_summary) = parse_exec_arguments(&raw_name, &args_value);
+            let cell = SessionCell::Exec {
+                command,
+                cwd: exec_cwd,
+                parsed_summary,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                duration_ms: None,
+                status: ExecStatus::Pending,
+                timestamp,
+            };
+            let index = self.cells.len();
+            self.cells.push(cell);
+            if let Some(id) = call_id {
+                self.pending_exec.insert(id, index);
+            }
+            return;
+        }
+
+        if raw_name == "update_plan" {
+            if let Some(items) = parse_plan_items(&args_value) {
+                self.cells.push(SessionCell::Plan { items, timestamp });
+                return;
+            }
+            // Fall through to generic ToolCall if the shape was unexpected.
+        }
+
+        // Generic tool call.
+        let summary = tool_format::format_tool_call(&raw_name, &args_value);
+        let index = self.cells.len();
+        self.cells.push(SessionCell::ToolCall {
+            tool: label,
+            raw_name,
+            summary,
+            input: args_value,
+            status: ToolStatus::Pending,
+            timestamp,
+        });
+        if let Some(id) = call_id {
+            self.pending_tool.insert(id, index);
+        }
+    }
+
+    fn handle_function_call_output(&mut self, payload: &Value, timestamp: Option<DateTime<Utc>>) {
+        let Some(output) = payload.get("output").and_then(Value::as_str) else {
+            return;
+        };
+        let call_id = string_field(payload, "call_id");
+
+        // 1. If this matches a pending Exec, finalize from the legacy text format.
+        if let Some(id) = call_id.as_ref() {
+            if let Some(&index) = self.pending_exec.get(id) {
+                self.update_exec_from_text_output(index, output);
+                // Stay registered so a later `exec_command_end` can enrich further.
+                return;
+            }
+        }
+
+        // 2. If this matches a pending generic ToolCall, finalize its status and
+        //    push a paired ToolResult cell.
+        let formatted_output = output.trim().to_owned();
+        let mut paired_tool: Option<String> = None;
+        if let Some(id) = call_id.as_ref() {
+            if let Some(&index) = self.pending_tool.get(id) {
+                if let Some(SessionCell::ToolCall { tool, status, .. }) = self.cells.get_mut(index)
+                {
+                    paired_tool = Some(tool.clone());
+                    *status = ToolStatus::Completed;
+                }
+                self.pending_tool.remove(id);
+            }
+        }
+
+        if !formatted_output.is_empty() {
+            self.cells.push(SessionCell::ToolResult {
+                tool: paired_tool,
+                output: formatted_output,
+                is_error: false,
+                timestamp,
+            });
+        }
+    }
+
+    fn push_custom_tool_call_cell(&mut self, payload: &Value, timestamp: Option<DateTime<Utc>>) {
+        let raw_name = payload
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("custom_tool_call")
+            .to_owned();
+        let label = tool_format::tool_label(&raw_name).to_owned();
+        let call_id = string_field(payload, "call_id");
+        let input_value = payload.get("input").cloned().unwrap_or(Value::Null);
+
+        if label == "patch" {
+            let files = input_value
+                .as_str()
+                .map(parse_v4a_patch)
+                .unwrap_or_default();
+            let cell = SessionCell::Patch {
+                files,
+                success: false,
+                stdout: String::new(),
+                stderr: String::new(),
+                timestamp,
+            };
+            let index = self.cells.len();
+            self.cells.push(cell);
+            if let Some(id) = call_id {
+                self.pending_patch.insert(id, index);
+            }
+            return;
+        }
+
+        let summary = tool_format::format_tool_call(&raw_name, &input_value);
+        let index = self.cells.len();
+        self.cells.push(SessionCell::ToolCall {
+            tool: label,
+            raw_name,
+            summary,
+            input: input_value,
+            status: ToolStatus::Pending,
+            timestamp,
+        });
+        if let Some(id) = call_id {
+            self.pending_tool.insert(id, index);
+        }
+    }
+
+    fn handle_custom_tool_call_output(
+        &mut self,
+        payload: &Value,
+        timestamp: Option<DateTime<Utc>>,
+    ) {
+        let Some(output) = payload.get("output").and_then(Value::as_str) else {
+            return;
+        };
+        let call_id = string_field(payload, "call_id");
+        let result_value: Value =
+            serde_json::from_str(output).unwrap_or_else(|_| Value::String(output.to_owned()));
+
+        // Patch path: look up the pending Patch cell.
+        if let Some(id) = call_id.as_ref() {
+            if let Some(&index) = self.pending_patch.get(id) {
+                if let Some(SessionCell::Patch {
+                    success,
+                    stdout,
+                    stderr,
+                    ..
+                }) = self.cells.get_mut(index)
+                {
+                    let exit_code = result_value
+                        .get("metadata")
+                        .and_then(|meta| meta.get("exit_code"))
+                        .and_then(Value::as_i64);
+                    *success = exit_code == Some(0);
+                    if let Some(text) = result_value.get("output").and_then(Value::as_str) {
+                        if !text.trim().is_empty() {
+                            *stdout = text.trim().to_owned();
+                        }
+                    }
+                    if let Some(text) = result_value.get("stderr").and_then(Value::as_str) {
+                        if !text.trim().is_empty() {
+                            *stderr = text.trim().to_owned();
+                        }
+                    }
+                }
+                // Don't drop pending — `event_msg.patch_apply_end` may enrich further.
+                return;
+            }
+        }
+
+        // Generic ToolResult fallback.
+        let formatted = tool_format::format_tool_result(&result_value);
+        if formatted.trim().is_empty() {
+            return;
+        }
+        let mut paired_tool: Option<String> = None;
+        if let Some(id) = call_id.as_ref() {
+            if let Some(&index) = self.pending_tool.get(id) {
+                if let Some(SessionCell::ToolCall { tool, status, .. }) = self.cells.get_mut(index)
+                {
+                    paired_tool = Some(tool.clone());
+                    *status = ToolStatus::Completed;
+                }
+                self.pending_tool.remove(id);
+            }
+        }
+        self.cells.push(SessionCell::ToolResult {
+            tool: paired_tool,
+            output: formatted,
+            is_error: false,
+            timestamp,
+        });
+    }
+
+    fn push_web_search_cell(&mut self, payload: &Value, timestamp: Option<DateTime<Utc>>) {
+        let query = payload
+            .get("action")
+            .and_then(|action| action.get("query"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let call_id = string_field(payload, "call_id");
+        let index = self.cells.len();
+        self.cells.push(SessionCell::WebSearch {
+            query,
+            queries: Vec::new(),
+            timestamp,
+        });
+        if let Some(id) = call_id {
+            self.pending_search.insert(id, index);
+        }
+    }
+
+    fn handle_exec_command_end(&mut self, payload: &Value) {
+        let Some(call_id) = string_field(payload, "call_id") else {
+            return;
+        };
+        let Some(&index) = self.pending_exec.get(&call_id) else {
+            return;
+        };
+
+        let stdout_text = payload
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let stderr_text = payload
+            .get("stderr")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let aggregated = payload
+            .get("aggregated_output")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let exit_code = payload
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .map(|n| n as i32);
+        let duration_ms = payload.get("duration").and_then(duration_to_ms);
+        let parsed_summary = payload
+            .get("parsed_cmd")
+            .and_then(Value::as_array)
+            .and_then(|arr| arr.first())
+            .and_then(|first| first.get("cmd"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let command = payload
+            .get("command")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if let Some(SessionCell::Exec {
+            command: cmd_field,
+            stdout,
+            stderr,
+            exit_code: exit_field,
+            duration_ms: dur_field,
+            parsed_summary: parsed_field,
+            status,
+            ..
+        }) = self.cells.get_mut(index)
+        {
+            if !command.is_empty() {
+                *cmd_field = command;
+            }
+            // Prefer dedicated stdout/stderr fields; fall back to aggregated_output.
+            if !stdout_text.is_empty() {
+                *stdout = stdout_text;
+            } else if stdout.is_empty() {
+                if let Some(agg) = aggregated.clone() {
+                    if !agg.is_empty() {
+                        *stdout = agg;
+                    }
+                }
+            }
+            if !stderr_text.is_empty() {
+                *stderr = stderr_text;
+            }
+            if exit_code.is_some() {
+                *exit_field = exit_code;
+            }
+            if duration_ms.is_some() {
+                *dur_field = duration_ms;
+            }
+            if parsed_summary.is_some() {
+                *parsed_field = parsed_summary;
+            }
+            *status = match exit_code {
+                Some(0) => ExecStatus::Completed,
+                Some(_) => ExecStatus::Failed,
+                None => *status,
+            };
+        }
+        self.pending_exec.remove(&call_id);
+    }
+
+    fn handle_patch_apply_end(&mut self, payload: &Value) {
+        let Some(call_id) = string_field(payload, "call_id") else {
+            return;
+        };
+        let Some(&index) = self.pending_patch.get(&call_id) else {
+            return;
+        };
+
+        let success = payload
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let stdout_text = payload
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let stderr_text = payload
+            .get("stderr")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let mut new_files: Vec<PatchFile> = Vec::new();
+        if let Some(changes) = payload.get("changes").and_then(Value::as_object) {
+            for (path, change) in changes {
+                let kind = change.get("type").and_then(Value::as_str).unwrap_or("");
+                let op = match kind {
+                    "add" => PatchOp::Add,
+                    "delete" => PatchOp::Delete,
+                    _ => PatchOp::Update,
+                };
+                let content = change
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                new_files.push(PatchFile {
+                    path: path.clone(),
+                    op,
+                    content,
+                    additions: 0,
+                    deletions: 0,
+                });
+            }
+        }
+
+        if let Some(SessionCell::Patch {
+            files,
+            success: success_field,
+            stdout,
+            stderr,
+            ..
+        }) = self.cells.get_mut(index)
+        {
+            if !new_files.is_empty() {
+                *files = new_files;
+            }
+            *success_field = success;
+            if !stdout_text.is_empty() {
+                *stdout = stdout_text;
+            }
+            if !stderr_text.is_empty() {
+                *stderr = stderr_text;
+            }
+        }
+        self.pending_patch.remove(&call_id);
+    }
+
+    fn handle_web_search_end(&mut self, payload: &Value) {
+        let Some(call_id) = string_field(payload, "call_id") else {
+            return;
+        };
+        let Some(&index) = self.pending_search.get(&call_id) else {
+            return;
+        };
+
+        let mut new_query = payload
+            .get("query")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let mut new_queries: Vec<String> = Vec::new();
+        if let Some(action) = payload.get("action") {
+            if new_query.is_none() {
+                new_query = action
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+            }
+            if let Some(arr) = action.get("queries").and_then(Value::as_array) {
+                new_queries = arr
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+        }
+
+        if let Some(SessionCell::WebSearch { query, queries, .. }) = self.cells.get_mut(index) {
+            if let Some(q) = new_query {
+                if !q.trim().is_empty() {
+                    *query = q;
+                }
+            }
+            if !new_queries.is_empty() {
+                *queries = new_queries;
+            }
+        }
+        self.pending_search.remove(&call_id);
+    }
+
+    /// Parse the legacy text-formatted exec output emitted by older Codex versions.
+    /// Recognized prefixes (in either order):
+    ///   "Command: <cmd>\n"
+    ///   "Wall time: <secs> seconds\n"
+    ///   "Process exited with code <N>\n"
+    ///   "Exit code: <N>\n"
+    ///   "Output:\n<stdout-rest>"
+    fn update_exec_from_text_output(&mut self, index: usize, raw: &str) {
+        let mut wall_ms: Option<u64> = None;
+        let mut exit_code: Option<i32> = None;
+        let mut output_body: Option<String> = None;
+        let mut iter = raw.lines().peekable();
+        while let Some(line) = iter.next() {
+            if let Some(rest) = line.strip_prefix("Wall time: ") {
+                let secs = rest.trim_end_matches(" seconds").trim();
+                if let Ok(secs_f) = secs.parse::<f64>() {
+                    wall_ms = Some((secs_f * 1000.0) as u64);
+                }
+            } else if let Some(rest) = line.strip_prefix("Exit code: ") {
+                if let Ok(n) = rest.trim().parse::<i32>() {
+                    exit_code = Some(n);
+                }
+            } else if let Some(rest) = line.strip_prefix("Process exited with code ") {
+                if let Ok(n) = rest.trim().parse::<i32>() {
+                    exit_code = Some(n);
+                }
+            } else if line.trim() == "Output:" {
+                let rest: Vec<&str> = iter.by_ref().collect();
+                output_body = Some(rest.join("\n"));
+                break;
+            }
+        }
+
+        if let Some(SessionCell::Exec {
+            stdout,
+            exit_code: exit_field,
+            duration_ms: dur_field,
+            status,
+            ..
+        }) = self.cells.get_mut(index)
+        {
+            if let Some(body) = output_body {
+                let trimmed = body.trim_end();
+                if !trimmed.is_empty() {
+                    *stdout = trimmed.to_owned();
+                }
+            } else if !raw.trim().is_empty() && stdout.is_empty() {
+                // No "Output:" prefix found — store whole payload as stdout.
+                *stdout = raw.trim().to_owned();
+            }
+            if exit_code.is_some() {
+                *exit_field = exit_code;
+            }
+            if wall_ms.is_some() {
+                *dur_field = wall_ms;
+            }
+            *status = match exit_code {
+                Some(0) => ExecStatus::Completed,
+                Some(_) => ExecStatus::Failed,
+                None => *status,
+            };
+        }
+    }
+}
+
+fn duration_to_ms(value: &Value) -> Option<u64> {
+    let secs = value.get("secs").and_then(Value::as_u64).unwrap_or(0);
+    let nanos = value.get("nanos").and_then(Value::as_u64).unwrap_or(0);
+    Some(secs.saturating_mul(1000).saturating_add(nanos / 1_000_000))
+}
+
+fn parse_exec_arguments(
+    raw_name: &str,
+    args: &Value,
+) -> (Vec<String>, Option<String>, Option<String>) {
+    let mut command_str: Option<String> = None;
+    let mut cwd: Option<String> = None;
+
+    if let Value::Object(map) = args {
+        for key in &["command", "cmd"] {
+            if let Some(Value::String(value)) = map.get(*key) {
+                if !value.trim().is_empty() {
+                    command_str = Some(value.clone());
+                    break;
+                }
+            }
+        }
+        for key in &["workdir", "cwd"] {
+            if let Some(Value::String(value)) = map.get(*key) {
+                if !value.trim().is_empty() {
+                    cwd = Some(value.clone());
+                    break;
+                }
+            }
+        }
+    } else if let Value::String(text) = args {
+        if !text.trim().is_empty() {
+            command_str = Some(text.clone());
+        }
+    }
+
+    let command = match command_str.as_deref() {
+        Some(text) => vec!["/bin/sh".to_owned(), "-c".to_owned(), text.to_owned()],
+        None => Vec::new(),
+    };
+    let parsed_summary = command_str.map(|s| s.lines().next().unwrap_or(&s).to_owned());
+
+    let _ = raw_name;
+    (command, cwd, parsed_summary)
+}
+
+fn parse_plan_items(args: &Value) -> Option<Vec<PlanItem>> {
+    let array = args.get("plan").and_then(Value::as_array)?;
+    let mut items = Vec::with_capacity(array.len());
+    for entry in array {
+        let step = entry.get("step").and_then(Value::as_str)?;
+        let status_text = entry
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("pending");
+        let status = match status_text {
+            "in_progress" => PlanItemStatus::InProgress,
+            "completed" => PlanItemStatus::Completed,
+            _ => PlanItemStatus::Pending,
+        };
+        items.push(PlanItem {
+            status,
+            step: step.to_owned(),
+        });
+    }
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
+fn split_reasoning_header_body(text: &str) -> (Option<String>, String) {
+    // Codex sometimes emits `**Header**\n\nbody...`; capture the header.
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("**") {
+        if let Some(end) = rest.find("**") {
+            let header = rest[..end].trim().to_owned();
+            let body_start = end + 2;
+            let body = rest[body_start..].trim_start_matches('\n').to_owned();
+            if !header.is_empty() {
+                return (Some(header), body);
+            }
+        }
+    }
+    (None, text.to_owned())
+}
+
+/// Parse a V4A patch text envelope into structured `PatchFile`s.
+///
+/// Recognized markers (one per file):
+///   `*** Add File: <path>`
+///   `*** Update File: <path>`
+///   `*** Delete File: <path>`
+/// We count `+`/`-` lines between markers as additions/deletions; for `Add`,
+/// the content body is captured.
+fn parse_v4a_patch(text: &str) -> Vec<PatchFile> {
+    let mut files: Vec<PatchFile> = Vec::new();
+    let mut cur_path: Option<String> = None;
+    let mut cur_op: Option<PatchOp> = None;
+    let mut cur_content: Vec<String> = Vec::new();
+    let mut cur_adds: usize = 0;
+    let mut cur_dels: usize = 0;
+
+    let flush = |files: &mut Vec<PatchFile>,
+                 path: &mut Option<String>,
+                 op: &mut Option<PatchOp>,
+                 content: &mut Vec<String>,
+                 adds: &mut usize,
+                 dels: &mut usize| {
+        if let (Some(p), Some(o)) = (path.take(), op.take()) {
+            let body = if matches!(o, PatchOp::Add) && !content.is_empty() {
+                Some(content.join("\n"))
+            } else {
+                None
+            };
+            files.push(PatchFile {
+                path: p,
+                op: o,
+                content: body,
+                additions: *adds,
+                deletions: *dels,
+            });
+        }
+        content.clear();
+        *adds = 0;
+        *dels = 0;
+    };
+
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        if let Some(rest) = trimmed.strip_prefix("*** Add File: ") {
+            flush(
+                &mut files,
+                &mut cur_path,
+                &mut cur_op,
+                &mut cur_content,
+                &mut cur_adds,
+                &mut cur_dels,
+            );
+            cur_path = Some(rest.trim().to_owned());
+            cur_op = Some(PatchOp::Add);
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("*** Update File: ") {
+            flush(
+                &mut files,
+                &mut cur_path,
+                &mut cur_op,
+                &mut cur_content,
+                &mut cur_adds,
+                &mut cur_dels,
+            );
+            cur_path = Some(rest.trim().to_owned());
+            cur_op = Some(PatchOp::Update);
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("*** Delete File: ") {
+            flush(
+                &mut files,
+                &mut cur_path,
+                &mut cur_op,
+                &mut cur_content,
+                &mut cur_adds,
+                &mut cur_dels,
+            );
+            cur_path = Some(rest.trim().to_owned());
+            cur_op = Some(PatchOp::Delete);
+            continue;
+        }
+        if trimmed == "*** End Patch" || trimmed == "*** Begin Patch" {
+            continue;
+        }
+        if cur_op.is_none() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('+') {
+            cur_adds += 1;
+            if matches!(cur_op, Some(PatchOp::Add)) {
+                cur_content.push(rest.to_owned());
+            }
+            continue;
+        }
+        if line.starts_with('-') {
+            cur_dels += 1;
+            continue;
+        }
+        if matches!(cur_op, Some(PatchOp::Add)) {
+            cur_content.push(line.to_owned());
+        }
+    }
+    flush(
+        &mut files,
+        &mut cur_path,
+        &mut cur_op,
+        &mut cur_content,
+        &mut cur_adds,
+        &mut cur_dels,
+    );
+
+    files
+}
+
 const USER_MESSAGE_BEGIN: &str = "## My request for Codex:";
 const SESSION_INDEX_FILE: &str = "session_index.jsonl";
 
@@ -571,4 +1607,210 @@ fn read_thread_names(index_path: &Path) -> Result<HashMap<String, String>> {
     }
 
     Ok(names)
+}
+
+#[cfg(test)]
+mod cell_tests {
+    use super::parse_codex_session_file;
+    use crate::parse::{PatchOp, SessionCell};
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> PathBuf {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        PathBuf::from(manifest)
+            .join("tests")
+            .join("fixtures")
+            .join("sessions")
+            .join("codex")
+            .join(name)
+    }
+
+    #[test]
+    fn parser_emits_at_least_one_cell_for_real_fixtures() {
+        for name in ["new_format.jsonl", "latest_format.jsonl"] {
+            let session = parse_codex_session_file(fixture(name))
+                .expect("parse")
+                .unwrap_or_else(|| panic!("{name}: parser returned None"));
+            assert!(!session.cells.is_empty(), "{name}: cells should not be empty");
+        }
+    }
+
+    #[test]
+    fn latest_format_produces_paired_exec_and_patch_cells() {
+        use crate::parse::ExecStatus;
+        let session = parse_codex_session_file(fixture("latest_format.jsonl"))
+            .expect("parse")
+            .expect("session");
+        let exec_cells: Vec<_> = session
+            .cells
+            .iter()
+            .filter_map(|c| match c {
+                SessionCell::Exec {
+                    parsed_summary,
+                    exit_code,
+                    duration_ms,
+                    status,
+                    ..
+                } => Some((parsed_summary.clone(), *exit_code, *duration_ms, *status)),
+                _ => None,
+            })
+            .collect();
+        assert!(!exec_cells.is_empty(), "expected at least one Exec cell");
+        // First exec in the fixture is `cat src/main.rs`, exit 0.
+        let first = &exec_cells[0];
+        assert_eq!(first.1, Some(0));
+        assert!(first.3 == ExecStatus::Completed);
+        assert!(first.0.as_deref().unwrap_or("").contains("cat"));
+
+        let patch_cells: Vec<_> = session
+            .cells
+            .iter()
+            .filter_map(|c| match c {
+                SessionCell::Patch { files, success, .. } => Some((files.clone(), *success)),
+                _ => None,
+            })
+            .collect();
+        assert!(!patch_cells.is_empty(), "expected at least one Patch cell");
+        let (files, success) = &patch_cells[0];
+        assert!(*success, "patch should be marked successful");
+        assert!(!files.is_empty(), "patch should list at least one file");
+        assert!(matches!(files[0].op, PatchOp::Update | PatchOp::Add));
+    }
+
+    #[test]
+    fn parser_emits_metrics_cell_with_token_totals() {
+        let session = parse_codex_session_file(fixture("latest_format.jsonl"))
+            .expect("parse")
+            .expect("session");
+        let metrics = session
+            .cells
+            .iter()
+            .find_map(|c| match c {
+                SessionCell::Metrics(m) => Some(m.clone()),
+                _ => None,
+            })
+            .expect("metrics cell present");
+        assert!(metrics.total_tokens > 0, "expected non-zero total_tokens");
+        assert!(metrics.tool_call_count >= 1, "expected at least one tool call");
+        assert!(metrics.exec_count >= 1, "expected at least one exec");
+        assert!(metrics.patch_count >= 1, "expected at least one patch");
+    }
+
+    /// Walks the user's actual `~/.codex/sessions` and parses each rollout.
+    /// Asserts no panic; counts cell types as evidence.
+    ///
+    /// Gated with `#[ignore]` so it doesn't run unless requested:
+    ///   `cargo test --lib smoke -- --ignored`
+    #[test]
+    #[ignore]
+    fn smoke_parse_real_codex_sessions_without_panic() {
+        let home = match std::env::var("HOME") {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let dir = PathBuf::from(home).join(".codex").join("sessions");
+        if !dir.is_dir() {
+            return;
+        }
+
+        let mut count = 0usize;
+        let mut errors = 0usize;
+        let mut none_returned = 0usize;
+        let mut total_cells = 0usize;
+        let mut by_kind: std::collections::HashMap<&'static str, usize> =
+            std::collections::HashMap::new();
+        walk_jsonl(&dir, &mut |path| {
+            count += 1;
+            match parse_codex_session_file(path) {
+                Ok(Some(session)) => {
+                    total_cells += session.cells.len();
+                    for cell in &session.cells {
+                        let kind = match cell {
+                            SessionCell::Message { .. } => "message",
+                            SessionCell::Reasoning { .. } => "reasoning",
+                            SessionCell::ToolCall { .. } => "tool_call",
+                            SessionCell::ToolResult { .. } => "tool_result",
+                            SessionCell::Exec { .. } => "exec",
+                            SessionCell::Patch { .. } => "patch",
+                            SessionCell::WebSearch { .. } => "web_search",
+                            SessionCell::Plan { .. } => "plan",
+                            SessionCell::SessionInfo(_) => "session_info",
+                            SessionCell::Metrics(_) => "metrics",
+                        };
+                        *by_kind.entry(kind).or_default() += 1;
+                    }
+                }
+                Ok(None) => none_returned += 1,
+                Err(_) => errors += 1,
+            }
+        });
+
+        assert!(count > 0, "no real rollouts found at expected path");
+        eprintln!(
+            "smoke: parsed {count} files, {errors} errors, {none_returned} None, {total_cells} total cells"
+        );
+        let mut kinds: Vec<_> = by_kind.iter().collect();
+        kinds.sort();
+        for (kind, n) in kinds {
+            eprintln!("  {kind}: {n}");
+        }
+        assert_eq!(errors, 0, "{errors} files failed to parse");
+    }
+
+    fn walk_jsonl(dir: &std::path::Path, on_file: &mut dyn FnMut(&std::path::Path)) {
+        let Ok(read_dir) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk_jsonl(&path, on_file);
+            } else if path.extension().is_some_and(|ext| ext == "jsonl") {
+                on_file(&path);
+            }
+        }
+    }
+
+    #[test]
+    fn patch_v4a_parser_recognises_add_and_update() {
+        use super::parse_v4a_patch;
+        let text = "*** Begin Patch\n\
+                    *** Add File: foo.rs\n\
+                    +pub fn foo() {}\n\
+                    *** Update File: bar.rs\n\
+                    @@\n\
+                    -let a = 1;\n\
+                    +let a = 2;\n\
+                    *** End Patch";
+        let files = parse_v4a_patch(text);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "foo.rs");
+        assert!(matches!(files[0].op, PatchOp::Add));
+        assert_eq!(files[0].additions, 1);
+        assert!(files[0].content.is_some());
+        assert_eq!(files[1].path, "bar.rs");
+        assert!(matches!(files[1].op, PatchOp::Update));
+        assert_eq!(files[1].additions, 1);
+        assert_eq!(files[1].deletions, 1);
+    }
+
+    #[test]
+    fn parser_populates_session_info_when_meta_present() {
+        let session = parse_codex_session_file(fixture("latest_format.jsonl"))
+            .expect("parse")
+            .expect("session");
+        let info = session.session_info.expect("session_info populated");
+        assert_eq!(info.cli_version.as_deref(), Some("0.116.0"));
+        assert_eq!(info.model_provider.as_deref(), Some("openai"));
+        assert_eq!(info.source.as_deref(), Some("cli"));
+        assert_eq!(info.originator.as_deref(), Some("codex_cli_rs"));
+        assert!(info.cwd.is_some(), "cwd should be set");
+        // Latest format also has turn_context with model + sandbox.
+        assert!(info.model.is_some(), "model should be populated from turn_context");
+        // First cell should be SessionInfo.
+        assert!(matches!(
+            session.cells.first(),
+            Some(SessionCell::SessionInfo(_))
+        ));
+    }
 }

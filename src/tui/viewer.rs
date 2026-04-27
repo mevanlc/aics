@@ -1243,6 +1243,8 @@ mod tests {
                 },
             ],
             content: "alpha beta gamma delta alpha\nomega alpha".to_owned(),
+            cells: Vec::new(),
+            session_info: None,
         }
     }
 
@@ -1273,6 +1275,8 @@ mod tests {
                 tool_name: None,
             }],
             content: "```rust\nfn alpha() {}\n```".to_owned(),
+            cells: Vec::new(),
+            session_info: None,
         }
     }
 
@@ -1349,6 +1353,8 @@ mod tests {
             content:
                 "first user\nfirst assistant\nrun tool\ntool output\nsecond user\nsecond assistant"
                     .to_owned(),
+            cells: Vec::new(),
+            session_info: None,
         }
     }
 
@@ -1387,6 +1393,8 @@ mod tests {
                 },
             ],
             content: "This line wraps hard in the preview and viewer.\nShort reply".to_owned(),
+            cells: Vec::new(),
+            session_info: None,
         }
     }
 }

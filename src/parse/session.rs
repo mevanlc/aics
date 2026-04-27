@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -120,7 +121,231 @@ pub struct SessionMessage {
     pub tool_name: Option<String>,
 }
 
+/// Status of a tool call — pending until paired with output, then completed/failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolStatus {
+    Pending,
+    Completed,
+    Failed,
+}
+
+/// Outcome of a structured exec invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecStatus {
+    Pending,
+    Completed,
+    Failed,
+}
+
+/// One change inside a structured patch result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatchOp {
+    Add,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchFile {
+    pub path: String,
+    pub op: PatchOp,
+    /// For `Add`/`Update`: the post-change content if available. For `Delete`: typically empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub additions: usize,
+    #[serde(default)]
+    pub deletions: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanItemStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanItem {
+    pub status: PlanItemStatus,
+    pub step: String,
+}
+
+/// Top-of-transcript context block: model, sandbox, instructions, etc.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub originator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_access: Option<bool>,
+}
+
+impl SessionInfo {
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none()
+            && self.model_provider.is_none()
+            && self.reasoning_effort.is_none()
+            && self.approval_policy.is_none()
+            && self.sandbox_mode.is_none()
+            && self.cwd.is_none()
+            && self.cli_version.is_none()
+            && self.source.is_none()
+            && self.originator.is_none()
+            && self.instructions.is_none()
+            && self.writable_roots.is_empty()
+            && self.network_access.is_none()
+    }
+}
+
+/// Aggregated runtime metrics across the rollout.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeMetrics {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub cached_input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub reasoning_output_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_context_window: Option<u64>,
+    #[serde(default)]
+    pub tool_call_count: u64,
+    #[serde(default)]
+    pub tool_failure_count: u64,
+    #[serde(default)]
+    pub exec_count: u64,
+    #[serde(default)]
+    pub patch_count: u64,
+    #[serde(default)]
+    pub web_search_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_wall_ms: Option<u64>,
+}
+
+impl RuntimeMetrics {
+    pub fn is_empty(&self) -> bool {
+        self.total_tokens == 0
+            && self.tool_call_count == 0
+            && self.exec_count == 0
+            && self.patch_count == 0
+            && self.web_search_count == 0
+            && self.total_wall_ms.is_none()
+    }
+}
+
+/// Typed transcript cell. The renderer dispatches on this; the parser builds
+/// these alongside (or, in later phases, instead of) `SessionMessage`s.
+///
+/// Cells are intentionally richer than `SessionMessage`: they preserve pairing
+/// between calls and outputs (`Exec`, `Patch`, `WebSearch`) and capture
+/// session-scoped context (`SessionInfo`, `Metrics`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionCell {
+    Message {
+        role: MessageRole,
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<DateTime<Utc>>,
+    },
+    Reasoning {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        header: Option<String>,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<DateTime<Utc>>,
+    },
+    ToolCall {
+        tool: String,
+        raw_name: String,
+        summary: String,
+        #[serde(default)]
+        input: Value,
+        status: ToolStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<DateTime<Utc>>,
+    },
+    ToolResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
+        output: String,
+        #[serde(default)]
+        is_error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<DateTime<Utc>>,
+    },
+    Exec {
+        command: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parsed_summary: Option<String>,
+        stdout: String,
+        stderr: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        status: ExecStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<DateTime<Utc>>,
+    },
+    Patch {
+        files: Vec<PatchFile>,
+        #[serde(default)]
+        success: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        stdout: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        stderr: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<DateTime<Utc>>,
+    },
+    WebSearch {
+        query: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        queries: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<DateTime<Utc>>,
+    },
+    Plan {
+        items: Vec<PlanItem>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<DateTime<Utc>>,
+    },
+    SessionInfo(SessionInfo),
+    Metrics(RuntimeMetrics),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub session_id: String,
     pub agent: Agent,
@@ -142,6 +367,14 @@ pub struct Session {
     pub custom_title: Option<String>,
     pub messages: Vec<SessionMessage>,
     pub content: String,
+    /// Typed transcript cells. Populated by parsers (Phase 0+); renderers
+    /// dispatch on these and fall back to `messages` when empty.
+    #[serde(default)]
+    pub cells: Vec<SessionCell>,
+    /// Session-scoped context (model, sandbox, instructions, etc.).
+    /// Rendered as a header block above the transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_info: Option<SessionInfo>,
 }
 
 impl Session {
@@ -275,6 +508,42 @@ fn normalize_android_app_data_path(path: &str) -> Option<String> {
     let package = components[..boundary].join(".");
     let suffix = &components[boundary..];
     Some(format!("/data/data/{package}/{}", suffix.join("/")))
+}
+
+/// Build a baseline `Vec<SessionCell>` from a flat message list.
+///
+/// This is the Phase 0 fallback path: each `SessionMessage` becomes one `SessionCell`
+/// of the corresponding kind. Phase 2+ may bypass this helper and emit richer cells
+/// directly (paired exec/patch/web-search) — when they do, the parser can build
+/// `cells` inline and skip the message-to-cell mapping entirely.
+pub fn cells_from_messages(messages: &[SessionMessage]) -> Vec<SessionCell> {
+    messages
+        .iter()
+        .map(|message| match message.role {
+            MessageRole::ToolCall => SessionCell::ToolCall {
+                tool: message.tool_name.clone().unwrap_or_default(),
+                raw_name: message.tool_name.clone().unwrap_or_default(),
+                summary: message.content.clone(),
+                input: Value::Null,
+                status: ToolStatus::Completed,
+                timestamp: message.timestamp,
+            },
+            MessageRole::ToolResult => SessionCell::ToolResult {
+                tool: message.tool_name.clone(),
+                output: message.content.clone(),
+                is_error: false,
+                timestamp: message.timestamp,
+            },
+            MessageRole::User
+            | MessageRole::Assistant
+            | MessageRole::System
+            | MessageRole::Summary => SessionCell::Message {
+                role: message.role,
+                content: message.content.clone(),
+                timestamp: message.timestamp,
+            },
+        })
+        .collect()
 }
 
 pub fn first_message_fields(messages: &[SessionMessage]) -> (Option<MessageRole>, String) {

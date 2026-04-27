@@ -187,6 +187,12 @@ fn render_item(
     if hit.is_live {
         meta_suffix.push_str(" · live");
     }
+    if let Some(info) = hit.session.session_info.as_ref() {
+        if let Some(model) = info.model.as_deref().filter(|s| !s.is_empty()) {
+            meta_suffix.push_str(" · ");
+            meta_suffix.push_str(model);
+        }
+    }
     let meta_width =
         UnicodeWidthStr::width(meta_prefix.as_str()) + UnicodeWidthStr::width(meta_suffix.as_str());
 
@@ -603,6 +609,7 @@ mod tests {
                 derivation_type: DerivationType::Original,
                 is_sidechain: false,
                 custom_title: Some("commit /commit --all".to_owned()),
+                session_info: None,
             },
             snippet_html: String::new(),
             score: 0.0,
@@ -649,6 +656,7 @@ mod tests {
                 derivation_type: DerivationType::Original,
                 is_sidechain: false,
                 custom_title: Some("commit /commit --all".to_owned()),
+                session_info: None,
             },
             snippet_html: String::new(),
             score: 0.0,

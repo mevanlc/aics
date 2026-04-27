@@ -16,7 +16,7 @@ use tantivy::{Index, TantivyDocument, TantivyError, Term};
 use crate::index::reader::SearchEngine;
 use crate::index::schema::IndexSchema;
 use crate::live::LiveSessionTracker;
-use crate::parse::{parse_session_file, Agent, DerivationType, MessageRole, Session};
+use crate::parse::{parse_session_file, Agent, DerivationType, MessageRole, Session, SessionInfo};
 use crate::scan::{
     default_session_roots, scan_session_files_with_progress, ResolvedPaths, SessionFile,
     SessionRoots,
@@ -40,6 +40,10 @@ pub struct StoredSession {
     pub derivation_type: DerivationType,
     pub is_sidechain: bool,
     pub custom_title: Option<String>,
+    /// Subset of SessionInfo promoted to the index for cheap list rendering.
+    /// Older indexes deserialize this as `None` via `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_info: Option<SessionInfo>,
 }
 
 impl StoredSession {
@@ -67,6 +71,7 @@ impl From<&Session> for StoredSession {
             derivation_type: session.derivation_type,
             is_sidechain: session.is_sidechain,
             custom_title: session.custom_title.clone(),
+            session_info: session.session_info.clone(),
         }
     }
 }
@@ -320,7 +325,10 @@ impl IndexManager {
             let mut scan_progress = ScanToSyncProgress { progress };
             scan_session_files_with_progress(roots, &mut scan_progress)?
         };
-        let mut next_state = IndexState::default();
+        let mut next_state = IndexState {
+            format_version: INDEX_FORMAT_VERSION,
+            files: BTreeMap::new(),
+        };
         let mut stats = SyncStats {
             scanned: scanned_files.len(),
             ..SyncStats::default()
@@ -479,8 +487,14 @@ fn searchable_content(session: &Session) -> String {
     chunks.join("\n\n")
 }
 
+/// Bump when fields stored in `session_json` (StoredSession) change shape so old
+/// state files are discarded and the index is rebuilt against fresh data.
+const INDEX_FORMAT_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {
+    #[serde(default)]
+    format_version: u32,
     files: BTreeMap<String, IndexedFileState>,
 }
 
@@ -543,7 +557,16 @@ fn load_state(path: &Path) -> Result<IndexState> {
 
     let raw =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+    let state: IndexState = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    if state.format_version != INDEX_FORMAT_VERSION {
+        info!(
+            "index format version mismatch ({} != {INDEX_FORMAT_VERSION}); rebuilding",
+            state.format_version
+        );
+        return Ok(IndexState::default());
+    }
+    Ok(state)
 }
 
 fn save_state(path: &Path, state: &IndexState) -> Result<()> {

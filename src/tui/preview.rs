@@ -4,7 +4,10 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders};
 use ratatui::Frame;
 
-use crate::parse::{Agent, MessageRole, Session};
+use crate::parse::{
+    Agent, ExecStatus, MessageRole, PatchFile, PatchOp, PlanItemStatus, RuntimeMetrics, Session,
+    SessionCell, SessionInfo, ToolStatus,
+};
 use crate::summary::{
     AicsSummaryPreview, ClaudeAutosummaryPreview, SummaryPreview, SummarySources,
 };
@@ -97,50 +100,64 @@ pub fn render_session_document(
     let _profile = profile::scope("preview.render_session_text");
     let mut lines = Vec::new();
     let mut sticky_markers = Vec::new();
-    for message in &session.messages {
-        let (label_color, _) = message_colors(session.agent, message.role, theme);
-        let label = session_message_label(message);
-        let header_line = lines.len();
-        let base_header = sticky_header_for_message(session.agent, message);
-        sticky_markers.push(StickyLineMarker {
-            line_index: header_line,
-            header: base_header.clone(),
-        });
-        lines.push(Line::from(vec![
-            Span::styled(
-                label,
-                Style::default()
-                    .fg(label_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" ", Style::default()),
-            Span::styled(
-                message
-                    .timestamp
-                    .map(|timestamp| timestamp.format("%Y-%m-%d %H:%M:%S").to_string())
-                    .unwrap_or_default(),
-                Style::default().fg(theme.muted),
-            ),
-        ]));
 
-        let rendered = render_message_body_document(
-            session.agent,
-            message.role,
-            message.content.as_str(),
-            theme,
-            highlight_query,
-        );
-        let body_start = lines.len();
-        for heading in rendered.sticky_markers {
-            let mut header = base_header.clone();
-            header.subject = heading.header.subject;
+    if let Some(info) = session.session_info.as_ref() {
+        let info_lines = render_session_info_block(info, theme, highlight_query);
+        if !info_lines.is_empty() {
             sticky_markers.push(StickyLineMarker {
-                line_index: body_start + heading.line_index,
-                header,
+                line_index: lines.len(),
+                header: StickyHeader::new("Session", String::new(), "Context"),
             });
+            lines.extend(info_lines);
+            lines.push(Line::default());
         }
-        lines.extend(rendered.text.lines);
-        lines.push(Line::default());
+    }
+
+    if session.cells.is_empty() {
+        // Backwards compatibility: if no cells were emitted, fall back to messages.
+        for message in &session.messages {
+            render_message_into(
+                &mut lines,
+                &mut sticky_markers,
+                session.agent,
+                message,
+                theme,
+                highlight_query,
+            );
+        }
+    } else {
+        for cell in &session.cells {
+            // SessionInfo is rendered separately above.
+            if matches!(cell, SessionCell::SessionInfo(_)) {
+                continue;
+            }
+            // Metrics are rendered as a footer (Phase 6); skip in main flow.
+            if matches!(cell, SessionCell::Metrics(_)) {
+                continue;
+            }
+            render_cell_into(
+                &mut lines,
+                &mut sticky_markers,
+                session.agent,
+                cell,
+                theme,
+                highlight_query,
+            );
+        }
+
+        if let Some(metrics) = session.cells.iter().rev().find_map(|cell| match cell {
+            SessionCell::Metrics(metrics) => Some(metrics),
+            _ => None,
+        }) {
+            let metrics_lines = render_metrics_footer(metrics, theme);
+            if !metrics_lines.is_empty() {
+                sticky_markers.push(StickyLineMarker {
+                    line_index: lines.len(),
+                    header: StickyHeader::new("Metrics", String::new(), "Totals"),
+                });
+                lines.extend(metrics_lines);
+            }
+        }
     }
     DisplayDocument {
         text: Text::from(lines),
@@ -527,6 +544,837 @@ pub(crate) fn render_message_body_document(
     }
 }
 
+/// Render the top-of-transcript Session context block.
+///
+/// Returns a list of lines (no trailing blank). Caller is responsible for
+/// adding any spacing after the block.
+fn render_session_info_block(
+    info: &SessionInfo,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) -> Vec<Line<'static>> {
+    let mut rows: Vec<(&'static str, String)> = Vec::new();
+
+    if let Some(model) = &info.model {
+        let mut value = model.clone();
+        if let Some(effort) = &info.reasoning_effort {
+            value.push_str(" · ");
+            value.push_str(effort);
+        }
+        if let Some(provider) = &info.model_provider {
+            value.push_str(" (");
+            value.push_str(provider);
+            value.push(')');
+        }
+        rows.push(("model", value));
+    } else if let Some(provider) = &info.model_provider {
+        rows.push(("provider", provider.clone()));
+    }
+
+    if let Some(approval) = &info.approval_policy {
+        let mut value = approval.clone();
+        if let Some(sandbox) = &info.sandbox_mode {
+            value.push_str(" · sandbox=");
+            value.push_str(sandbox);
+        }
+        if let Some(false) = info.network_access {
+            value.push_str(" · no-net");
+        }
+        rows.push(("policy", value));
+    } else if let Some(sandbox) = &info.sandbox_mode {
+        rows.push(("sandbox", sandbox.clone()));
+    }
+
+    if let Some(cwd) = &info.cwd {
+        rows.push(("cwd", cwd.clone()));
+    }
+
+    let mut originator_bits: Vec<String> = Vec::new();
+    if let Some(originator) = &info.originator {
+        originator_bits.push(originator.clone());
+    }
+    if let Some(version) = &info.cli_version {
+        originator_bits.push(format!("v{version}"));
+    }
+    if let Some(source) = &info.source {
+        originator_bits.push(format!("via {source}"));
+    }
+    if !originator_bits.is_empty() {
+        rows.push(("client", originator_bits.join(" ")));
+    }
+
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
+    let label_width = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+
+    let mut lines = Vec::with_capacity(rows.len() + 1);
+    lines.push(Line::from(Span::styled(
+        "── Session ──",
+        Style::default()
+            .fg(theme.muted)
+            .add_modifier(Modifier::BOLD),
+    )));
+    for (label, value) in rows {
+        let mut spans = Vec::new();
+        spans.push(Span::styled(
+            format!("  {label:<width$}  ", width = label_width),
+            Style::default().fg(theme.muted),
+        ));
+        spans.extend(highlight_into_spans(
+            &value,
+            highlight_query,
+            Style::default().fg(theme.text),
+            theme,
+        ));
+        lines.push(Line::from(spans));
+    }
+
+    lines
+}
+
+fn highlight_into_spans(
+    text: &str,
+    highlight_query: Option<&str>,
+    base: Style,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let Some(query) = highlight_query.filter(|q| !q.is_empty()) else {
+        return vec![Span::styled(text.to_owned(), base)];
+    };
+
+    let lower_text = text.to_lowercase();
+    let lower_query = query.to_lowercase();
+    let qlen = lower_query.len();
+    if qlen == 0 {
+        return vec![Span::styled(text.to_owned(), base)];
+    }
+
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(found) = lower_text[cursor..].find(&lower_query) {
+        let start = cursor + found;
+        let end = start + qlen;
+        if start > cursor {
+            spans.push(Span::styled(text[cursor..start].to_owned(), base));
+        }
+        spans.push(Span::styled(
+            text[start..end].to_owned(),
+            base.bg(theme.search_match_bg).fg(theme.text),
+        ));
+        cursor = end;
+    }
+    if cursor < text.len() {
+        spans.push(Span::styled(text[cursor..].to_owned(), base));
+    }
+    spans
+}
+
+/// Render a `SessionMessage` into the rolling lines/sticky list. Used as the
+/// fallback path when cells are empty (legacy / Claude until cell-parity ships).
+fn render_message_into(
+    lines: &mut Vec<Line<'static>>,
+    sticky_markers: &mut Vec<StickyLineMarker>,
+    agent: Agent,
+    message: &crate::parse::SessionMessage,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) {
+    let (label_color, _) = message_colors(agent, message.role, theme);
+    let label = session_message_label(message);
+    let header_line = lines.len();
+    let base_header = sticky_header_for_message(agent, message);
+    sticky_markers.push(StickyLineMarker {
+        line_index: header_line,
+        header: base_header.clone(),
+    });
+    lines.push(Line::from(vec![
+        Span::styled(
+            label,
+            Style::default()
+                .fg(label_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ", Style::default()),
+        Span::styled(
+            message
+                .timestamp
+                .map(|timestamp| timestamp.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_default(),
+            Style::default().fg(theme.muted),
+        ),
+    ]));
+
+    let rendered = render_message_body_document(
+        agent,
+        message.role,
+        message.content.as_str(),
+        theme,
+        highlight_query,
+    );
+    let body_start = lines.len();
+    for heading in rendered.sticky_markers {
+        let mut header = base_header.clone();
+        header.subject = heading.header.subject;
+        sticky_markers.push(StickyLineMarker {
+            line_index: body_start + heading.line_index,
+            header,
+        });
+    }
+    lines.extend(rendered.text.lines);
+    lines.push(Line::default());
+}
+
+/// Render a single cell into the rolling lines/sticky list.
+fn render_cell_into(
+    lines: &mut Vec<Line<'static>>,
+    sticky_markers: &mut Vec<StickyLineMarker>,
+    agent: Agent,
+    cell: &SessionCell,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) {
+    match cell {
+        SessionCell::Message {
+            role,
+            content,
+            timestamp,
+        } => {
+            let synthetic = crate::parse::SessionMessage {
+                role: *role,
+                content: content.clone(),
+                timestamp: *timestamp,
+                tool_name: None,
+            };
+            render_message_into(lines, sticky_markers, agent, &synthetic, theme, highlight_query);
+        }
+        SessionCell::Reasoning {
+            header,
+            body,
+            timestamp,
+        } => {
+            render_reasoning_into(lines, sticky_markers, header.as_deref(), body, *timestamp, theme, highlight_query);
+        }
+        SessionCell::ToolCall {
+            tool,
+            summary,
+            status,
+            timestamp,
+            ..
+        } => {
+            render_tool_call_into(
+                lines,
+                sticky_markers,
+                tool,
+                summary,
+                *status,
+                *timestamp,
+                theme,
+                highlight_query,
+            );
+        }
+        SessionCell::ToolResult {
+            tool,
+            output,
+            is_error,
+            timestamp,
+        } => {
+            render_tool_result_into(
+                lines,
+                sticky_markers,
+                tool.as_deref(),
+                output,
+                *is_error,
+                *timestamp,
+                theme,
+                highlight_query,
+            );
+        }
+        SessionCell::Exec {
+            command,
+            parsed_summary,
+            stdout,
+            stderr,
+            exit_code,
+            duration_ms,
+            status,
+            timestamp,
+            ..
+        } => {
+            render_exec_into(
+                lines,
+                sticky_markers,
+                command,
+                parsed_summary.as_deref(),
+                stdout,
+                stderr,
+                *exit_code,
+                *duration_ms,
+                *status,
+                *timestamp,
+                theme,
+                highlight_query,
+            );
+        }
+        SessionCell::Patch {
+            files,
+            success,
+            stdout,
+            stderr,
+            timestamp,
+        } => {
+            render_patch_into(
+                lines,
+                sticky_markers,
+                files,
+                *success,
+                stdout,
+                stderr,
+                *timestamp,
+                theme,
+                highlight_query,
+            );
+        }
+        SessionCell::WebSearch {
+            query,
+            queries,
+            timestamp,
+        } => {
+            render_web_search_into(
+                lines,
+                sticky_markers,
+                query,
+                queries,
+                *timestamp,
+                theme,
+                highlight_query,
+            );
+        }
+        SessionCell::Plan { items, timestamp } => {
+            render_plan_into(lines, sticky_markers, items, *timestamp, theme, highlight_query);
+        }
+        SessionCell::SessionInfo(_) | SessionCell::Metrics(_) => {
+            // Handled outside the main loop.
+        }
+    }
+}
+
+fn header_timestamp_string(timestamp: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    timestamp
+        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_cell_header(
+    lines: &mut Vec<Line<'static>>,
+    sticky_markers: &mut Vec<StickyLineMarker>,
+    label: String,
+    label_color: ratatui::style::Color,
+    suffix: Option<String>,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    sticky: StickyHeader,
+    theme: &Theme,
+) {
+    sticky_markers.push(StickyLineMarker {
+        line_index: lines.len(),
+        header: sticky,
+    });
+    let mut spans = vec![Span::styled(
+        label,
+        Style::default()
+            .fg(label_color)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if let Some(suffix) = suffix {
+        spans.push(Span::styled(
+            format!(" {suffix}"),
+            Style::default().fg(theme.muted),
+        ));
+    }
+    let ts = header_timestamp_string(timestamp);
+    if !ts.is_empty() {
+        spans.push(Span::styled(
+            format!("  {ts}"),
+            Style::default().fg(theme.muted),
+        ));
+    }
+    lines.push(Line::from(spans));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_reasoning_into(
+    lines: &mut Vec<Line<'static>>,
+    sticky_markers: &mut Vec<StickyLineMarker>,
+    header: Option<&str>,
+    body: &str,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) {
+    let label = match header {
+        Some(h) if !h.is_empty() => format!("\u{21b3} thinking · {h}"),
+        _ => "\u{21b3} thinking".to_owned(),
+    };
+    push_cell_header(
+        lines,
+        sticky_markers,
+        label.clone(),
+        theme.muted,
+        None,
+        timestamp,
+        StickyHeader::new("Reasoning", header_timestamp_string(timestamp), header.unwrap_or("")),
+        theme,
+    );
+    let italic = Style::default()
+        .fg(theme.muted)
+        .add_modifier(Modifier::ITALIC);
+    for line in body.lines() {
+        let mut spans = Vec::new();
+        spans.push(Span::styled("  ", italic));
+        spans.extend(highlight_into_spans(line, highlight_query, italic, theme));
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::default());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_tool_call_into(
+    lines: &mut Vec<Line<'static>>,
+    sticky_markers: &mut Vec<StickyLineMarker>,
+    tool: &str,
+    summary: &str,
+    status: ToolStatus,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) {
+    let label = format!("\u{203a} {tool}");
+    let suffix = match status {
+        ToolStatus::Pending => Some("(pending)".to_owned()),
+        ToolStatus::Failed => Some("(failed)".to_owned()),
+        ToolStatus::Completed => None,
+    };
+    push_cell_header(
+        lines,
+        sticky_markers,
+        label,
+        theme.tool,
+        suffix,
+        timestamp,
+        StickyHeader::new("Tool", header_timestamp_string(timestamp), tool),
+        theme,
+    );
+    if !summary.is_empty() {
+        let base = Style::default().fg(theme.text);
+        for line in summary.lines() {
+            let mut spans = vec![Span::styled("  ", Style::default())];
+            spans.extend(highlight_into_spans(line, highlight_query, base, theme));
+            lines.push(Line::from(spans));
+        }
+    }
+    lines.push(Line::default());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_tool_result_into(
+    lines: &mut Vec<Line<'static>>,
+    sticky_markers: &mut Vec<StickyLineMarker>,
+    tool: Option<&str>,
+    output: &str,
+    is_error: bool,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) {
+    let label = match tool {
+        Some(t) if !t.is_empty() => format!("\u{2039} {t}"),
+        _ => "\u{2039} result".to_owned(),
+    };
+    let suffix = if is_error { Some("(error)".to_owned()) } else { None };
+    push_cell_header(
+        lines,
+        sticky_markers,
+        label,
+        theme.tool,
+        suffix,
+        timestamp,
+        StickyHeader::new(
+            "Result",
+            header_timestamp_string(timestamp),
+            tool.unwrap_or(""),
+        ),
+        theme,
+    );
+    let base = if is_error {
+        Style::default().fg(ratatui::style::Color::Red)
+    } else {
+        Style::default().fg(theme.muted)
+    };
+    for line in output.lines() {
+        let mut spans = vec![Span::styled("  ", Style::default())];
+        spans.extend(highlight_into_spans(line, highlight_query, base, theme));
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::default());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_exec_into(
+    lines: &mut Vec<Line<'static>>,
+    sticky_markers: &mut Vec<StickyLineMarker>,
+    command: &[String],
+    parsed_summary: Option<&str>,
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
+    status: ExecStatus,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) {
+    let display = parsed_summary
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| flatten_command(command));
+
+    let mut suffix_bits: Vec<String> = Vec::new();
+    if let Some(ms) = duration_ms {
+        suffix_bits.push(format_duration(ms));
+    }
+    match exit_code {
+        Some(0) => suffix_bits.push("exit 0".to_owned()),
+        Some(n) => suffix_bits.push(format!("exit {n}")),
+        None => {}
+    }
+    if matches!(status, ExecStatus::Pending) {
+        suffix_bits.push("(running)".to_owned());
+    }
+    let suffix = if suffix_bits.is_empty() {
+        None
+    } else {
+        Some(format!("({})", suffix_bits.join(", ")))
+    };
+
+    let label_color = match status {
+        ExecStatus::Failed => ratatui::style::Color::Red,
+        _ => theme.tool,
+    };
+    push_cell_header(
+        lines,
+        sticky_markers,
+        format!("$ {display}"),
+        label_color,
+        suffix,
+        timestamp,
+        StickyHeader::new("Exec", header_timestamp_string(timestamp), &display),
+        theme,
+    );
+
+    let stdout_style = Style::default().fg(theme.muted);
+    for line in stdout.lines() {
+        let mut spans = vec![Span::styled("  ", Style::default())];
+        spans.extend(highlight_into_spans(line, highlight_query, stdout_style, theme));
+        lines.push(Line::from(spans));
+    }
+    if !stderr.is_empty() {
+        let stderr_style = Style::default().fg(ratatui::style::Color::Red);
+        for line in stderr.lines() {
+            let mut spans = vec![Span::styled("! ", stderr_style)];
+            spans.extend(highlight_into_spans(line, highlight_query, stderr_style, theme));
+            lines.push(Line::from(spans));
+        }
+    }
+    lines.push(Line::default());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_patch_into(
+    lines: &mut Vec<Line<'static>>,
+    sticky_markers: &mut Vec<StickyLineMarker>,
+    files: &[PatchFile],
+    success: bool,
+    stdout: &str,
+    stderr: &str,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) {
+    let total_adds: usize = files.iter().map(|f| f.additions).sum();
+    let total_dels: usize = files.iter().map(|f| f.deletions).sum();
+    let header_summary = if files.is_empty() {
+        "patch".to_owned()
+    } else {
+        format!("patch · {} file(s)", files.len())
+    };
+    let mut suffix_bits = Vec::new();
+    if total_adds > 0 || total_dels > 0 {
+        suffix_bits.push(format!("+{total_adds} -{total_dels}"));
+    }
+    if !success {
+        suffix_bits.push("(failed)".to_owned());
+    }
+    let suffix = if suffix_bits.is_empty() {
+        None
+    } else {
+        Some(suffix_bits.join(" "))
+    };
+
+    let label_color = if success {
+        theme.tool
+    } else {
+        ratatui::style::Color::Red
+    };
+    push_cell_header(
+        lines,
+        sticky_markers,
+        format!("\u{25c6} {header_summary}"),
+        label_color,
+        suffix,
+        timestamp,
+        StickyHeader::new("Patch", header_timestamp_string(timestamp), &header_summary),
+        theme,
+    );
+
+    for file in files {
+        let marker = match file.op {
+            PatchOp::Add => "A",
+            PatchOp::Update => "M",
+            PatchOp::Delete => "D",
+        };
+        let marker_color = match file.op {
+            PatchOp::Add => ratatui::style::Color::Green,
+            PatchOp::Update => theme.accent,
+            PatchOp::Delete => ratatui::style::Color::Red,
+        };
+        let mut spans = vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                format!("{marker} "),
+                Style::default()
+                    .fg(marker_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        spans.extend(highlight_into_spans(
+            &file.path,
+            highlight_query,
+            Style::default().fg(theme.text),
+            theme,
+        ));
+        if file.additions > 0 || file.deletions > 0 {
+            spans.push(Span::styled(
+                format!(" (+{} -{})", file.additions, file.deletions),
+                Style::default().fg(theme.muted),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    if !stdout.is_empty() {
+        let dim = Style::default().fg(theme.muted);
+        for line in stdout.lines() {
+            let mut spans = vec![Span::styled("  ", Style::default())];
+            spans.extend(highlight_into_spans(line, highlight_query, dim, theme));
+            lines.push(Line::from(spans));
+        }
+    }
+    if !stderr.is_empty() {
+        let red = Style::default().fg(ratatui::style::Color::Red);
+        for line in stderr.lines() {
+            let mut spans = vec![Span::styled("! ", red)];
+            spans.extend(highlight_into_spans(line, highlight_query, red, theme));
+            lines.push(Line::from(spans));
+        }
+    }
+    lines.push(Line::default());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_web_search_into(
+    lines: &mut Vec<Line<'static>>,
+    sticky_markers: &mut Vec<StickyLineMarker>,
+    query: &str,
+    queries: &[String],
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) {
+    push_cell_header(
+        lines,
+        sticky_markers,
+        "\u{1f50e} web search".to_owned(),
+        theme.tool,
+        None,
+        timestamp,
+        StickyHeader::new("Web search", header_timestamp_string(timestamp), query),
+        theme,
+    );
+    let primary = if !query.is_empty() { Some(query) } else { None };
+    let body_style = Style::default().fg(theme.text);
+    if let Some(q) = primary {
+        let mut spans = vec![Span::styled("  \u{25b8} ", Style::default().fg(theme.muted))];
+        spans.extend(highlight_into_spans(q, highlight_query, body_style, theme));
+        lines.push(Line::from(spans));
+    }
+    for q in queries {
+        if Some(q.as_str()) == primary {
+            continue;
+        }
+        let mut spans = vec![Span::styled("  \u{25b8} ", Style::default().fg(theme.muted))];
+        spans.extend(highlight_into_spans(q, highlight_query, body_style, theme));
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::default());
+}
+
+fn render_plan_into(
+    lines: &mut Vec<Line<'static>>,
+    sticky_markers: &mut Vec<StickyLineMarker>,
+    items: &[crate::parse::PlanItem],
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) {
+    push_cell_header(
+        lines,
+        sticky_markers,
+        "\u{2261} plan".to_owned(),
+        theme.tool,
+        None,
+        timestamp,
+        StickyHeader::new("Plan", header_timestamp_string(timestamp), ""),
+        theme,
+    );
+    let body_style = Style::default().fg(theme.text);
+    for item in items {
+        let (marker, color) = match item.status {
+            PlanItemStatus::Completed => ("[x]", theme.tool),
+            PlanItemStatus::InProgress => ("[-]", theme.accent),
+            PlanItemStatus::Pending => ("[ ]", theme.muted),
+        };
+        let mut spans = vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                format!("{marker} "),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+        ];
+        spans.extend(highlight_into_spans(&item.step, highlight_query, body_style, theme));
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::default());
+}
+
+fn render_metrics_footer(metrics: &RuntimeMetrics, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    let mut bits: Vec<String> = Vec::new();
+    if metrics.total_tokens > 0 {
+        let mut tokens = format!("{} tok total", format_int(metrics.total_tokens));
+        if metrics.cached_input_tokens > 0 {
+            tokens.push_str(&format!(
+                " ({} cached)",
+                format_int(metrics.cached_input_tokens)
+            ));
+        }
+        bits.push(tokens);
+    }
+    if metrics.input_tokens > 0 || metrics.output_tokens > 0 {
+        bits.push(format!(
+            "in={} out={}",
+            format_int(metrics.input_tokens),
+            format_int(metrics.output_tokens),
+        ));
+    }
+    if metrics.reasoning_output_tokens > 0 {
+        bits.push(format!("reasoning={}", format_int(metrics.reasoning_output_tokens)));
+    }
+    if let Some(window) = metrics.model_context_window {
+        bits.push(format!("ctx={}", format_int(window)));
+    }
+    if metrics.tool_call_count > 0 {
+        let mut tools = format!("{} tool call(s)", metrics.tool_call_count);
+        if metrics.tool_failure_count > 0 {
+            tools.push_str(&format!(" — {} failed", metrics.tool_failure_count));
+        }
+        bits.push(tools);
+    }
+    if metrics.exec_count > 0 || metrics.patch_count > 0 || metrics.web_search_count > 0 {
+        let mut by_kind = Vec::new();
+        if metrics.exec_count > 0 {
+            by_kind.push(format!("exec×{}", metrics.exec_count));
+        }
+        if metrics.patch_count > 0 {
+            by_kind.push(format!("patch×{}", metrics.patch_count));
+        }
+        if metrics.web_search_count > 0 {
+            by_kind.push(format!("search×{}", metrics.web_search_count));
+        }
+        bits.push(by_kind.join(" "));
+    }
+    if let Some(ms) = metrics.total_wall_ms {
+        bits.push(format!("wall {}", format_duration(ms)));
+    }
+
+    if bits.is_empty() {
+        return lines;
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "── Totals ──",
+        Style::default()
+            .fg(theme.muted)
+            .add_modifier(Modifier::BOLD),
+    )));
+    let label_style = Style::default().fg(theme.muted);
+    for bit in bits {
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(bit, label_style),
+        ]));
+    }
+    lines
+}
+
+fn format_int(n: u64) -> String {
+    // Insert thousands separators.
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.insert(0, ',');
+        }
+        out.insert(0, c);
+    }
+    out
+}
+
+fn flatten_command(argv: &[String]) -> String {
+    if argv.is_empty() {
+        return "(no command)".to_owned();
+    }
+    // Strip a leading shell wrapper if present (`/bin/sh -c ...`, `/bin/zsh -lc ...`).
+    if argv.len() >= 3 && argv[0].ends_with("sh") && argv[1].starts_with('-') {
+        return argv[2].clone();
+    }
+    argv.join(" ")
+}
+
+fn format_duration(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        let secs = ms / 1000;
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
+}
+
 fn message_colors(
     agent: Agent,
     role: MessageRole,
@@ -634,7 +1482,166 @@ mod tests {
         normalize_highlight_query, render_composite_text, render_session_document,
         render_session_text, render_summary_missing, render_summary_text,
     };
+    use crate::parse::{
+        ExecStatus, PatchFile, PatchOp, PlanItem, PlanItemStatus, RuntimeMetrics, SessionCell,
+        SessionInfo,
+    };
     use crate::tui::theme::Theme;
+
+    fn empty_session(agent: Agent, cells: Vec<SessionCell>) -> Session {
+        Session {
+            session_id: "session-cells".to_owned(),
+            agent,
+            project: "/tmp/demo".to_owned(),
+            branch: None,
+            cwd: Some("/tmp/demo".to_owned()),
+            created: None,
+            modified: None,
+            modified_ts: 0,
+            lines: 0,
+            file_path: PathBuf::from("/tmp/demo/session.jsonl"),
+            first_msg_role: None,
+            first_msg_content: String::new(),
+            last_msg_role: None,
+            last_msg_content: String::new(),
+            first_user_msg_content: String::new(),
+            derivation_type: DerivationType::Original,
+            is_sidechain: false,
+            custom_title: None,
+            messages: Vec::new(),
+            content: String::new(),
+            cells,
+            session_info: None,
+        }
+    }
+
+    fn rendered_lines(text: &ratatui::text::Text<'_>) -> Vec<String> {
+        text.lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn render_cells_emits_exec_patch_plan_websearch_markers() {
+        let theme = Theme::default();
+        let cells = vec![
+            SessionCell::Exec {
+                command: vec!["/bin/zsh".to_owned(), "-lc".to_owned(), "ls".to_owned()],
+                cwd: None,
+                parsed_summary: Some("ls".to_owned()),
+                stdout: "alpha\nbeta".to_owned(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                duration_ms: Some(120),
+                status: ExecStatus::Completed,
+                timestamp: None,
+            },
+            SessionCell::Patch {
+                files: vec![PatchFile {
+                    path: "src/lib.rs".to_owned(),
+                    op: PatchOp::Update,
+                    content: None,
+                    additions: 3,
+                    deletions: 1,
+                }],
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+                timestamp: None,
+            },
+            SessionCell::Plan {
+                items: vec![
+                    PlanItem {
+                        status: PlanItemStatus::Completed,
+                        step: "design".to_owned(),
+                    },
+                    PlanItem {
+                        status: PlanItemStatus::InProgress,
+                        step: "build".to_owned(),
+                    },
+                    PlanItem {
+                        status: PlanItemStatus::Pending,
+                        step: "ship".to_owned(),
+                    },
+                ],
+                timestamp: None,
+            },
+            SessionCell::WebSearch {
+                query: "rust serde tagged enum".to_owned(),
+                queries: vec![
+                    "rust serde tagged enum".to_owned(),
+                    "serde untagged".to_owned(),
+                ],
+                timestamp: None,
+            },
+            SessionCell::Metrics(RuntimeMetrics {
+                input_tokens: 1000,
+                output_tokens: 250,
+                total_tokens: 1250,
+                tool_call_count: 4,
+                exec_count: 1,
+                patch_count: 1,
+                web_search_count: 1,
+                ..RuntimeMetrics::default()
+            }),
+        ];
+        let session = empty_session(Agent::Codex, cells);
+        let doc = render_session_document(&session, &theme, None);
+        let lines = rendered_lines(&doc.text);
+        let joined = lines.join("\n");
+
+        assert!(joined.contains("$ ls"), "exec header missing: {joined}");
+        assert!(joined.contains("exit 0"), "exec exit suffix missing");
+        assert!(joined.contains("alpha"), "exec stdout missing");
+        assert!(joined.contains("\u{25c6} patch"), "patch header missing");
+        assert!(joined.contains("M src/lib.rs"), "patch file row missing");
+        assert!(joined.contains("(+3 -1)"), "patch +/- counts missing");
+        assert!(joined.contains("\u{2261} plan"), "plan header missing");
+        assert!(joined.contains("[x] design"), "completed plan item missing");
+        assert!(joined.contains("[-] build"), "in-progress plan item missing");
+        assert!(joined.contains("[ ] ship"), "pending plan item missing");
+        assert!(joined.contains("web search"), "web search header missing");
+        assert!(joined.contains("rust serde tagged enum"), "search query missing");
+        assert!(joined.contains("Totals"), "metrics footer missing");
+        assert!(joined.contains("1,250"), "total_tokens not formatted");
+        assert!(joined.contains("4 tool call(s)"), "tool count missing");
+    }
+
+    #[test]
+    fn render_cells_emits_session_info_block() {
+        let theme = Theme::default();
+        let mut session = empty_session(
+            Agent::Codex,
+            vec![SessionCell::Message {
+                role: MessageRole::User,
+                content: "hi".to_owned(),
+                timestamp: None,
+            }],
+        );
+        session.session_info = Some(SessionInfo {
+            model: Some("gpt-5-codex".to_owned()),
+            reasoning_effort: Some("medium".to_owned()),
+            sandbox_mode: Some("workspace-write".to_owned()),
+            approval_policy: Some("on-request".to_owned()),
+            cwd: Some("/tmp/demo".to_owned()),
+            cli_version: Some("0.116.0".to_owned()),
+            ..SessionInfo::default()
+        });
+        let doc = render_session_document(&session, &theme, None);
+        let joined = rendered_lines(&doc.text).join("\n");
+        assert!(joined.contains("Session"), "session block header missing");
+        assert!(joined.contains("gpt-5-codex"), "model missing");
+        assert!(joined.contains("medium"), "reasoning effort missing");
+        assert!(joined.contains("workspace-write"), "sandbox mode missing");
+        assert!(joined.contains("on-request"), "approval policy missing");
+        assert!(joined.contains("v0.116.0"), "cli version missing");
+    }
 
     #[test]
     fn render_session_text_renders_markdown_body_with_search_highlighting() {
@@ -665,6 +1672,8 @@ mod tests {
                 tool_name: None,
             }],
             content: "**alpha**\n\n- beta".to_owned(),
+            cells: Vec::new(),
+            session_info: None,
         };
 
         let text = render_session_text(&session, &theme, Some("alpha"));
@@ -725,6 +1734,8 @@ mod tests {
                 tool_name: None,
             }],
             content: "# Topic\n\nBody".to_owned(),
+            cells: Vec::new(),
+            session_info: None,
         };
 
         let document = render_session_document(&session, &theme, None);
@@ -860,6 +1871,8 @@ mod tests {
                 tool_name: None,
             }],
             content: "alpha".to_owned(),
+            cells: Vec::new(),
+            session_info: None,
         };
         let text = render_composite_text(
             Some(&session),

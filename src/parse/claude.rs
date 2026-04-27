@@ -8,10 +8,10 @@ use log::warn;
 use serde_json::Value;
 
 use super::session::{
-    earliest_timestamp, fallback_session_id, first_message_fields, first_user_message,
-    infer_derivation_type, last_message_fields, latest_timestamp, metadata_created,
-    metadata_modified, modified_ts, nonempty_trimmed, push_tool_message, push_unique_chunk,
-    push_unique_message, Agent, MessageRole, Session,
+    cells_from_messages, earliest_timestamp, fallback_session_id, first_message_fields,
+    first_user_message, infer_derivation_type, last_message_fields, latest_timestamp,
+    metadata_created, metadata_modified, modified_ts, nonempty_trimmed, push_tool_message,
+    push_unique_chunk, push_unique_message, Agent, MessageRole, Session,
 };
 use super::tool_format;
 
@@ -187,6 +187,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
     let derivation_type = infer_derivation_type(path, is_sidechain);
     let (first_msg_role, first_msg_content) = first_message_fields(&messages);
     let (last_msg_role, last_msg_content) = last_message_fields(&messages);
+    let cells = cells_from_messages(&messages);
 
     Ok(Some(Session {
         session_id,
@@ -209,6 +210,8 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
         custom_title,
         content: content_chunks.join("\n\n"),
         messages,
+        cells,
+        session_info: None,
     }))
 }
 

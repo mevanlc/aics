@@ -3520,6 +3520,7 @@ mod tests {
                 derivation_type: DerivationType::Original,
                 is_sidechain: false,
                 custom_title: None,
+                session_info: None,
             },
             snippet_html: String::new(),
             score: 0.0,
@@ -3549,6 +3550,8 @@ mod tests {
             custom_title: Some(stem.to_owned()),
             messages: Vec::new(),
             content: String::new(),
+            cells: Vec::new(),
+            session_info: None,
         }
     }
 
@@ -3613,6 +3616,8 @@ mod tests {
             content:
                 "first user\nfirst assistant\nrun tool\ntool output\nsecond user\nsecond assistant"
                     .to_owned(),
+            cells: Vec::new(),
+            session_info: None,
         }
     }
 

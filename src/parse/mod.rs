@@ -7,7 +7,9 @@ pub use claude::parse_claude_session_file;
 pub use codex::parse_codex_session_file;
 pub use session::{
     decode_claude_project_dir, decode_claude_project_from_path, default_project_for_cwd,
-    normalize_session_path, Agent, DerivationType, MessageRole, Session, SessionMessage,
+    normalize_session_path, Agent, DerivationType, ExecStatus, MessageRole, PatchFile, PatchOp,
+    PlanItem, PlanItemStatus, RuntimeMetrics, Session, SessionCell, SessionInfo, SessionMessage,
+    ToolStatus,
 };
 
 use anyhow::Result;

@@ -772,6 +772,7 @@ mod tests {
             derivation_type: DerivationType::Original,
             is_sidechain: false,
             custom_title: None,
+            session_info: None,
         }
     }
 
