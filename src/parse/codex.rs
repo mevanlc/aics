@@ -578,9 +578,7 @@ impl CodexCellBuilder {
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
             }
-            metrics.model_context_window = info
-                .get("model_context_window")
-                .and_then(Value::as_u64);
+            metrics.model_context_window = info.get("model_context_window").and_then(Value::as_u64);
         }
         for cell in &self.cells {
             match cell {
@@ -661,7 +659,8 @@ impl CodexCellBuilder {
                 if should_skip_display_message("user", raw) {
                     return;
                 }
-                let normalized = normalize_codex_user_message(raw).unwrap_or_else(|| raw.to_owned());
+                let normalized =
+                    normalize_codex_user_message(raw).unwrap_or_else(|| raw.to_owned());
                 self.push_unique_message_cell(MessageRole::User, normalized, timestamp);
             }
             "agent_message" => {
@@ -1631,7 +1630,10 @@ mod cell_tests {
             let session = parse_codex_session_file(fixture(name))
                 .expect("parse")
                 .unwrap_or_else(|| panic!("{name}: parser returned None"));
-            assert!(!session.cells.is_empty(), "{name}: cells should not be empty");
+            assert!(
+                !session.cells.is_empty(),
+                "{name}: cells should not be empty"
+            );
         }
     }
 
@@ -1691,7 +1693,10 @@ mod cell_tests {
             })
             .expect("metrics cell present");
         assert!(metrics.total_tokens > 0, "expected non-zero total_tokens");
-        assert!(metrics.tool_call_count >= 1, "expected at least one tool call");
+        assert!(
+            metrics.tool_call_count >= 1,
+            "expected at least one tool call"
+        );
         assert!(metrics.exec_count >= 1, "expected at least one exec");
         assert!(metrics.patch_count >= 1, "expected at least one patch");
     }
@@ -1806,7 +1811,10 @@ mod cell_tests {
         assert_eq!(info.originator.as_deref(), Some("codex_cli_rs"));
         assert!(info.cwd.is_some(), "cwd should be set");
         // Latest format also has turn_context with model + sandbox.
-        assert!(info.model.is_some(), "model should be populated from turn_context");
+        assert!(
+            info.model.is_some(),
+            "model should be populated from turn_context"
+        );
         // First cell should be SessionInfo.
         assert!(matches!(
             session.cells.first(),

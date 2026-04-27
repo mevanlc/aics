@@ -747,14 +747,29 @@ fn render_cell_into(
                 timestamp: *timestamp,
                 tool_name: None,
             };
-            render_message_into(lines, sticky_markers, agent, &synthetic, theme, highlight_query);
+            render_message_into(
+                lines,
+                sticky_markers,
+                agent,
+                &synthetic,
+                theme,
+                highlight_query,
+            );
         }
         SessionCell::Reasoning {
             header,
             body,
             timestamp,
         } => {
-            render_reasoning_into(lines, sticky_markers, header.as_deref(), body, *timestamp, theme, highlight_query);
+            render_reasoning_into(
+                lines,
+                sticky_markers,
+                header.as_deref(),
+                body,
+                *timestamp,
+                theme,
+                highlight_query,
+            );
         }
         SessionCell::ToolCall {
             tool,
@@ -852,7 +867,14 @@ fn render_cell_into(
             );
         }
         SessionCell::Plan { items, timestamp } => {
-            render_plan_into(lines, sticky_markers, items, *timestamp, theme, highlight_query);
+            render_plan_into(
+                lines,
+                sticky_markers,
+                items,
+                *timestamp,
+                theme,
+                highlight_query,
+            );
         }
         SessionCell::SessionInfo(_) | SessionCell::Metrics(_) => {
             // Handled outside the main loop.
@@ -924,7 +946,11 @@ fn render_reasoning_into(
         theme.muted,
         None,
         timestamp,
-        StickyHeader::new("Reasoning", header_timestamp_string(timestamp), header.unwrap_or("")),
+        StickyHeader::new(
+            "Reasoning",
+            header_timestamp_string(timestamp),
+            header.unwrap_or(""),
+        ),
         theme,
     );
     let italic = Style::default()
@@ -992,7 +1018,11 @@ fn render_tool_result_into(
         Some(t) if !t.is_empty() => format!("\u{2039} {t}"),
         _ => "\u{2039} result".to_owned(),
     };
-    let suffix = if is_error { Some("(error)".to_owned()) } else { None };
+    let suffix = if is_error {
+        Some("(error)".to_owned())
+    } else {
+        None
+    };
     push_cell_header(
         lines,
         sticky_markers,
@@ -1076,14 +1106,24 @@ fn render_exec_into(
     let stdout_style = Style::default().fg(theme.muted);
     for line in stdout.lines() {
         let mut spans = vec![Span::styled("  ", Style::default())];
-        spans.extend(highlight_into_spans(line, highlight_query, stdout_style, theme));
+        spans.extend(highlight_into_spans(
+            line,
+            highlight_query,
+            stdout_style,
+            theme,
+        ));
         lines.push(Line::from(spans));
     }
     if !stderr.is_empty() {
         let stderr_style = Style::default().fg(ratatui::style::Color::Red);
         for line in stderr.lines() {
             let mut spans = vec![Span::styled("! ", stderr_style)];
-            spans.extend(highlight_into_spans(line, highlight_query, stderr_style, theme));
+            spans.extend(highlight_into_spans(
+                line,
+                highlight_query,
+                stderr_style,
+                theme,
+            ));
             lines.push(Line::from(spans));
         }
     }
@@ -1215,7 +1255,10 @@ fn render_web_search_into(
     let primary = if !query.is_empty() { Some(query) } else { None };
     let body_style = Style::default().fg(theme.text);
     if let Some(q) = primary {
-        let mut spans = vec![Span::styled("  \u{25b8} ", Style::default().fg(theme.muted))];
+        let mut spans = vec![Span::styled(
+            "  \u{25b8} ",
+            Style::default().fg(theme.muted),
+        )];
         spans.extend(highlight_into_spans(q, highlight_query, body_style, theme));
         lines.push(Line::from(spans));
     }
@@ -1223,7 +1266,10 @@ fn render_web_search_into(
         if Some(q.as_str()) == primary {
             continue;
         }
-        let mut spans = vec![Span::styled("  \u{25b8} ", Style::default().fg(theme.muted))];
+        let mut spans = vec![Span::styled(
+            "  \u{25b8} ",
+            Style::default().fg(theme.muted),
+        )];
         spans.extend(highlight_into_spans(q, highlight_query, body_style, theme));
         lines.push(Line::from(spans));
     }
@@ -1262,7 +1308,12 @@ fn render_plan_into(
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
         ];
-        spans.extend(highlight_into_spans(&item.step, highlight_query, body_style, theme));
+        spans.extend(highlight_into_spans(
+            &item.step,
+            highlight_query,
+            body_style,
+            theme,
+        ));
         lines.push(Line::from(spans));
     }
     lines.push(Line::default());
@@ -1290,7 +1341,10 @@ fn render_metrics_footer(metrics: &RuntimeMetrics, theme: &Theme) -> Vec<Line<'s
         ));
     }
     if metrics.reasoning_output_tokens > 0 {
-        bits.push(format!("reasoning={}", format_int(metrics.reasoning_output_tokens)));
+        bits.push(format!(
+            "reasoning={}",
+            format_int(metrics.reasoning_output_tokens)
+        ));
     }
     if let Some(window) = metrics.model_context_window {
         bits.push(format!("ctx={}", format_int(window)));
@@ -1604,10 +1658,16 @@ mod tests {
         assert!(joined.contains("(+3 -1)"), "patch +/- counts missing");
         assert!(joined.contains("\u{2261} plan"), "plan header missing");
         assert!(joined.contains("[x] design"), "completed plan item missing");
-        assert!(joined.contains("[-] build"), "in-progress plan item missing");
+        assert!(
+            joined.contains("[-] build"),
+            "in-progress plan item missing"
+        );
         assert!(joined.contains("[ ] ship"), "pending plan item missing");
         assert!(joined.contains("web search"), "web search header missing");
-        assert!(joined.contains("rust serde tagged enum"), "search query missing");
+        assert!(
+            joined.contains("rust serde tagged enum"),
+            "search query missing"
+        );
         assert!(joined.contains("Totals"), "metrics footer missing");
         assert!(joined.contains("1,250"), "total_tokens not formatted");
         assert!(joined.contains("4 tool call(s)"), "tool count missing");
