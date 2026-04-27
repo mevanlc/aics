@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -536,6 +536,13 @@ struct CodexCellBuilder {
     /// call_id -> cell index for generic `ToolCall` placeholders, used to flip
     /// status when the matching output arrives.
     pending_tool: HashMap<String, usize>,
+    /// call_ids whose exec has been finalized via `event_msg.exec_command_end`.
+    /// Codex emits a trailing `function_call_output` for the same call_id
+    /// carrying a Codex-formatted text wrapper of the same stdout that
+    /// `exec_command_end.aggregated_output` already gave us. We track those
+    /// finalized call_ids here so the `function_call_output` handler can
+    /// suppress the redundant cell instead of double-rendering.
+    completed_exec: HashSet<String>,
     /// Latest non-null `info.total_token_usage` payload seen.
     latest_token_info: Option<Value>,
     /// Earliest event timestamp (used to compute wall time).
@@ -846,15 +853,33 @@ impl CodexCellBuilder {
             }
         }
 
-        // 2. If this matches a pending generic ToolCall, finalize its status and
-        //    push a paired ToolResult cell.
+        // 2. If the matching exec was already finalized via
+        //    `exec_command_end`, this `function_call_output` is the redundant
+        //    text-wrapped duplicate. Drop it.
+        if let Some(id) = call_id.as_ref() {
+            if self.completed_exec.remove(id) {
+                return;
+            }
+        }
+
+        // 3. Otherwise, if this matches a pending generic ToolCall, finalize
+        //    its status and push a paired ToolResult cell.
         let formatted_output = output.trim().to_owned();
         let mut paired_tool: Option<String> = None;
+        let mut call_summary: Option<String> = None;
         if let Some(id) = call_id.as_ref() {
             if let Some(&index) = self.pending_tool.get(id) {
-                if let Some(SessionCell::ToolCall { tool, status, .. }) = self.cells.get_mut(index)
+                if let Some(SessionCell::ToolCall {
+                    tool,
+                    summary,
+                    status,
+                    ..
+                }) = self.cells.get_mut(index)
                 {
                     paired_tool = Some(tool.clone());
+                    if !summary.is_empty() {
+                        call_summary = Some(summary.clone());
+                    }
                     *status = ToolStatus::Completed;
                 }
                 self.pending_tool.remove(id);
@@ -866,6 +891,7 @@ impl CodexCellBuilder {
                 tool: paired_tool,
                 output: formatted_output,
                 is_error: false,
+                call_summary,
                 timestamp,
             });
         }
@@ -959,17 +985,36 @@ impl CodexCellBuilder {
             }
         }
 
-        // Generic ToolResult fallback.
-        let formatted = tool_format::format_tool_result(&result_value);
+        // Generic ToolResult fallback. When the value didn't carry a known
+        // text field (`stdout` / `output` / `text` / `content`), prefer storing
+        // pretty-printed full JSON so the viewer can syntect-highlight it
+        // rather than landing on a truncated single-line blob.
+        let human = tool_format::format_tool_result(&result_value);
+        let formatted = if matches!(&result_value, Value::Object(_) | Value::Array(_))
+            && (human.starts_with('{') || human.starts_with('['))
+        {
+            serde_json::to_string_pretty(&result_value).unwrap_or(human)
+        } else {
+            human
+        };
         if formatted.trim().is_empty() {
             return;
         }
         let mut paired_tool: Option<String> = None;
+        let mut call_summary: Option<String> = None;
         if let Some(id) = call_id.as_ref() {
             if let Some(&index) = self.pending_tool.get(id) {
-                if let Some(SessionCell::ToolCall { tool, status, .. }) = self.cells.get_mut(index)
+                if let Some(SessionCell::ToolCall {
+                    tool,
+                    summary,
+                    status,
+                    ..
+                }) = self.cells.get_mut(index)
                 {
                     paired_tool = Some(tool.clone());
+                    if !summary.is_empty() {
+                        call_summary = Some(summary.clone());
+                    }
                     *status = ToolStatus::Completed;
                 }
                 self.pending_tool.remove(id);
@@ -979,6 +1024,7 @@ impl CodexCellBuilder {
             tool: paired_tool,
             output: formatted,
             is_error: false,
+            call_summary,
             timestamp,
         });
     }
@@ -1089,6 +1135,11 @@ impl CodexCellBuilder {
                 None => *status,
             };
         }
+        // Mark this call_id as finalized. Codex always emits a trailing
+        // `function_call_output` carrying a text-wrapped duplicate of the
+        // stdout we just absorbed; that handler will see this set and skip
+        // pushing a redundant cell.
+        self.completed_exec.insert(call_id.clone());
         self.pending_exec.remove(&call_id);
     }
 
@@ -1797,6 +1848,81 @@ mod cell_tests {
         assert!(matches!(files[1].op, PatchOp::Update));
         assert_eq!(files[1].additions, 1);
         assert_eq!(files[1].deletions, 1);
+    }
+
+    #[test]
+    fn parser_pairs_tool_result_with_call_summary_for_generic_tool() {
+        // function_call (unknown tool name) -> function_call_output should
+        // produce a ToolResult cell whose `call_summary` echoes the formatted
+        // call args (since the tool isn't bash/read/etc., the generic-fallback
+        // path runs and stores key/value pairs as the summary).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let body = concat!(
+            "{\"timestamp\":\"2026-04-26T18:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"timestamp\":\"2026-04-26T18:00:00Z\",\"cwd\":\"/tmp\"}}\n",
+            "{\"timestamp\":\"2026-04-26T18:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"my_mcp_tool\",\"call_id\":\"c1\",\"arguments\":\"{\\\"endpoint\\\":\\\"/v1/x\\\",\\\"verb\\\":\\\"GET\\\"}\"}}\n",
+            "{\"timestamp\":\"2026-04-26T18:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"c1\",\"output\":\"hello body\"}}\n",
+        );
+        std::fs::write(&path, body).expect("write fixture");
+
+        let session = parse_codex_session_file(&path)
+            .expect("parse")
+            .expect("session");
+        let result = session
+            .cells
+            .iter()
+            .find_map(|c| match c {
+                SessionCell::ToolResult {
+                    call_summary, tool, ..
+                } => Some((call_summary.clone(), tool.clone())),
+                _ => None,
+            })
+            .expect("ToolResult cell missing");
+        let (summary, tool) = result;
+        assert_eq!(tool.as_deref(), Some("my_mcp_tool"));
+        let summary = summary.expect("call_summary should be populated");
+        assert!(
+            summary.contains("endpoint") && summary.contains("/v1/x"),
+            "call_summary should echo the call args: {summary}"
+        );
+    }
+
+    #[test]
+    fn parser_suppresses_redundant_function_call_output_after_exec_command_end() {
+        // exec_command function_call -> exec_command_end (finalizes the Exec
+        // cell) -> trailing function_call_output. The trailing output is just
+        // a text-wrapped duplicate of stdout the Exec already absorbed, so the
+        // parser should drop it instead of pushing a duplicate ToolResult.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let body = concat!(
+            "{\"timestamp\":\"2026-04-26T18:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"timestamp\":\"2026-04-26T18:00:00Z\",\"cwd\":\"/tmp\"}}\n",
+            "{\"timestamp\":\"2026-04-26T18:02:36Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"call_id\":\"call_x\",\"arguments\":\"{\\\"cmd\\\":\\\"git log --oneline\\\"}\"}}\n",
+            "{\"timestamp\":\"2026-04-26T18:02:36Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"exec_command_end\",\"call_id\":\"call_x\",\"command\":[\"/bin/zsh\",\"-lc\",\"git log --oneline\"],\"stdout\":\"abc Commit\",\"stderr\":\"\",\"exit_code\":0,\"duration\":{\"secs\":0,\"nanos\":12000000},\"parsed_cmd\":[{\"cmd\":\"git log --oneline\"}]}}\n",
+            "{\"timestamp\":\"2026-04-26T18:02:36Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_x\",\"output\":\"Chunk ID: abc\\nWall time: 0.0000 seconds\\nProcess exited with code 0\\nOriginal token count: 7\\nOutput:\\nabc Commit\\n\"}}\n",
+        );
+        std::fs::write(&path, body).expect("write fixture");
+
+        let session = parse_codex_session_file(&path)
+            .expect("parse")
+            .expect("session");
+
+        let exec_count = session
+            .cells
+            .iter()
+            .filter(|c| matches!(c, SessionCell::Exec { .. }))
+            .count();
+        assert_eq!(exec_count, 1, "expected exactly one Exec cell");
+
+        let result_count = session
+            .cells
+            .iter()
+            .filter(|c| matches!(c, SessionCell::ToolResult { .. }))
+            .count();
+        assert_eq!(
+            result_count, 0,
+            "trailing function_call_output for finalized exec should be suppressed, not rendered as a ToolResult"
+        );
     }
 
     #[test]

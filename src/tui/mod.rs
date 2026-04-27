@@ -3,6 +3,7 @@ pub mod app;
 pub mod color_ext;
 pub mod filter;
 pub mod help;
+pub mod json_highlight;
 pub mod keymap_hint;
 pub mod layout;
 pub mod list;

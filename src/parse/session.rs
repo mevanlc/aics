@@ -299,6 +299,12 @@ pub enum SessionCell {
         output: String,
         #[serde(default)]
         is_error: bool,
+        /// Pre-formatted summary of the originating tool call (e.g. the bash
+        /// command, file path, or args blurb). Used so the sticky header on
+        /// long results still tells the user *what* was invoked. Populated by
+        /// the parser via call_id pairing (codex) or message adjacency (claude).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<DateTime<Utc>>,
     },
@@ -517,33 +523,49 @@ fn normalize_android_app_data_path(path: &str) -> Option<String> {
 /// directly (paired exec/patch/web-search) — when they do, the parser can build
 /// `cells` inline and skip the message-to-cell mapping entirely.
 pub fn cells_from_messages(messages: &[SessionMessage]) -> Vec<SessionCell> {
-    messages
-        .iter()
-        .map(|message| match message.role {
-            MessageRole::ToolCall => SessionCell::ToolCall {
-                tool: message.tool_name.clone().unwrap_or_default(),
-                raw_name: message.tool_name.clone().unwrap_or_default(),
-                summary: message.content.clone(),
-                input: Value::Null,
-                status: ToolStatus::Completed,
-                timestamp: message.timestamp,
-            },
-            MessageRole::ToolResult => SessionCell::ToolResult {
-                tool: message.tool_name.clone(),
-                output: message.content.clone(),
-                is_error: false,
-                timestamp: message.timestamp,
-            },
+    let mut cells = Vec::with_capacity(messages.len());
+    // Track the most recent ToolCall's pre-formatted content so the next
+    // ToolResult can echo it as its `call_summary`. Reset when an unrelated
+    // role lands between the pair.
+    let mut last_tool_call_summary: Option<String> = None;
+    for message in messages {
+        match message.role {
+            MessageRole::ToolCall => {
+                let summary = message.content.clone();
+                last_tool_call_summary = Some(summary.clone());
+                cells.push(SessionCell::ToolCall {
+                    tool: message.tool_name.clone().unwrap_or_default(),
+                    raw_name: message.tool_name.clone().unwrap_or_default(),
+                    summary,
+                    input: Value::Null,
+                    status: ToolStatus::Completed,
+                    timestamp: message.timestamp,
+                });
+            }
+            MessageRole::ToolResult => {
+                let call_summary = last_tool_call_summary.take();
+                cells.push(SessionCell::ToolResult {
+                    tool: message.tool_name.clone(),
+                    output: message.content.clone(),
+                    is_error: false,
+                    call_summary,
+                    timestamp: message.timestamp,
+                });
+            }
             MessageRole::User
             | MessageRole::Assistant
             | MessageRole::System
-            | MessageRole::Summary => SessionCell::Message {
-                role: message.role,
-                content: message.content.clone(),
-                timestamp: message.timestamp,
-            },
-        })
-        .collect()
+            | MessageRole::Summary => {
+                last_tool_call_summary = None;
+                cells.push(SessionCell::Message {
+                    role: message.role,
+                    content: message.content.clone(),
+                    timestamp: message.timestamp,
+                });
+            }
+        }
+    }
+    cells
 }
 
 pub fn first_message_fields(messages: &[SessionMessage]) -> (Option<MessageRole>, String) {

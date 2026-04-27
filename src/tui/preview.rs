@@ -773,16 +773,19 @@ fn render_cell_into(
         }
         SessionCell::ToolCall {
             tool,
+            raw_name,
             summary,
+            input,
             status,
             timestamp,
-            ..
         } => {
             render_tool_call_into(
                 lines,
                 sticky_markers,
                 tool,
+                raw_name,
                 summary,
+                input,
                 *status,
                 *timestamp,
                 theme,
@@ -793,6 +796,7 @@ fn render_cell_into(
             tool,
             output,
             is_error,
+            call_summary,
             timestamp,
         } => {
             render_tool_result_into(
@@ -801,6 +805,7 @@ fn render_cell_into(
                 tool.as_deref(),
                 output,
                 *is_error,
+                call_summary.as_deref(),
                 *timestamp,
                 theme,
                 highlight_query,
@@ -970,7 +975,9 @@ fn render_tool_call_into(
     lines: &mut Vec<Line<'static>>,
     sticky_markers: &mut Vec<StickyLineMarker>,
     tool: &str,
+    raw_name: &str,
     summary: &str,
+    input: &serde_json::Value,
     status: ToolStatus,
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
     theme: &Theme,
@@ -992,13 +999,19 @@ fn render_tool_call_into(
         StickyHeader::new("Tool", header_timestamp_string(timestamp), tool),
         theme,
     );
-    if !summary.is_empty() {
-        let base = Style::default().fg(theme.text);
-        for line in summary.lines() {
-            let mut spans = vec![Span::styled("  ", Style::default())];
-            spans.extend(highlight_into_spans(line, highlight_query, base, theme));
-            lines.push(Line::from(spans));
-        }
+
+    let base = Style::default().fg(theme.text);
+    if is_generic_tool(raw_name)
+        && matches!(
+            input,
+            serde_json::Value::Object(_) | serde_json::Value::Array(_)
+        )
+    {
+        // Unknown / generic tool — pretty-print the raw arguments via syntect
+        // instead of the compacted `summary` blurb.
+        push_json_value_lines(lines, input, base, theme, highlight_query);
+    } else if !summary.is_empty() {
+        push_summary_or_json_lines(lines, summary, base, theme, highlight_query);
     }
     lines.push(Line::default());
 }
@@ -1010,6 +1023,7 @@ fn render_tool_result_into(
     tool: Option<&str>,
     output: &str,
     is_error: bool,
+    call_summary: Option<&str>,
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
     theme: &Theme,
     highlight_query: Option<&str>,
@@ -1023,6 +1037,7 @@ fn render_tool_result_into(
     } else {
         None
     };
+    let subject = result_sticky_subject(tool, call_summary);
     push_cell_header(
         lines,
         sticky_markers,
@@ -1030,11 +1045,7 @@ fn render_tool_result_into(
         theme.tool,
         suffix,
         timestamp,
-        StickyHeader::new(
-            "Result",
-            header_timestamp_string(timestamp),
-            tool.unwrap_or(""),
-        ),
+        StickyHeader::new("Result", header_timestamp_string(timestamp), subject),
         theme,
     );
     let base = if is_error {
@@ -1042,12 +1053,99 @@ fn render_tool_result_into(
     } else {
         Style::default().fg(theme.muted)
     };
-    for line in output.lines() {
+    push_summary_or_json_lines(lines, output, base, theme, highlight_query);
+    lines.push(Line::default());
+}
+
+/// Maximum width (in chars) of a result cell's sticky-header subject. Chosen
+/// to comfortably fit beside the from/datetime fields without overflowing the
+/// header at typical terminal widths; longer values are truncated with an
+/// ellipsis so the user still sees the head of the call.
+const RESULT_SUBJECT_MAX_CHARS: usize = 120;
+
+/// Build the sticky-header subject for a ToolResult. When the parser was able
+/// to pair the result with its originating call, we echo the call's summary
+/// (with the tool name as a prefix when both are present) so users scrolling
+/// through long results still see *what* was invoked.
+fn result_sticky_subject(tool: Option<&str>, call_summary: Option<&str>) -> String {
+    let tool_clean = tool.map(str::trim).filter(|s| !s.is_empty());
+    let summary_clean = call_summary.map(str::trim).filter(|s| !s.is_empty());
+    let combined = match (tool_clean, summary_clean) {
+        (Some(t), Some(s)) => format!("{t}: {s}"),
+        (None, Some(s)) => s.to_owned(),
+        (Some(t), None) => t.to_owned(),
+        (None, None) => String::new(),
+    };
+    truncate_chars(&combined, RESULT_SUBJECT_MAX_CHARS)
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let head: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{head}\u{2026}")
+}
+
+/// True when `raw_name` is a tool we don't know how to format specially —
+/// `tool_label` returns the raw name unchanged for unknowns.
+fn is_generic_tool(raw_name: &str) -> bool {
+    let label = crate::parse::tool_format::tool_label(raw_name);
+    label == raw_name.trim()
+}
+
+/// Push body lines for a tool summary/output. If the text parses as a JSON
+/// object/array, pretty-print and syntect-highlight; otherwise render as
+/// indented plain spans (existing behavior).
+fn push_summary_or_json_lines(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    base: Style,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) {
+    if crate::tui::json_highlight::looks_like_json_object_or_array(text) {
+        let terms = highlight_query
+            .map(crate::search_query::extract_highlight_terms)
+            .unwrap_or_default();
+        let highlighted =
+            crate::tui::json_highlight::highlight_json_string(text, base, theme, &terms);
+        for line in highlighted {
+            let mut spans = vec![Span::styled("  ", Style::default())];
+            spans.extend(line.spans);
+            let mut combined = Line::from(spans);
+            combined.style = line.style;
+            lines.push(combined);
+        }
+        return;
+    }
+    for line in text.lines() {
         let mut spans = vec![Span::styled("  ", Style::default())];
         spans.extend(highlight_into_spans(line, highlight_query, base, theme));
         lines.push(Line::from(spans));
     }
-    lines.push(Line::default());
+}
+
+/// Push body lines for a structured `Value` that we already know is an
+/// object/array — used when rendering a generic ToolCall's raw arguments.
+fn push_json_value_lines(
+    lines: &mut Vec<Line<'static>>,
+    value: &serde_json::Value,
+    base: Style,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) {
+    let terms = highlight_query
+        .map(crate::search_query::extract_highlight_terms)
+        .unwrap_or_default();
+    let highlighted = crate::tui::json_highlight::highlight_json_value(value, base, theme, &terms);
+    for line in highlighted {
+        let mut spans = vec![Span::styled("  ", Style::default())];
+        spans.extend(line.spans);
+        let mut combined = Line::from(spans);
+        combined.style = line.style;
+        lines.push(combined);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1534,7 +1632,8 @@ mod tests {
 
     use super::{
         normalize_highlight_query, render_composite_text, render_session_document,
-        render_session_text, render_summary_missing, render_summary_text,
+        render_session_text, render_summary_missing, render_summary_text, result_sticky_subject,
+        RESULT_SUBJECT_MAX_CHARS,
     };
     use crate::parse::{
         ExecStatus, PatchFile, PatchOp, PlanItem, PlanItemStatus, RuntimeMetrics, SessionCell,
@@ -1701,6 +1800,170 @@ mod tests {
         assert!(joined.contains("workspace-write"), "sandbox mode missing");
         assert!(joined.contains("on-request"), "approval policy missing");
         assert!(joined.contains("v0.116.0"), "cli version missing");
+    }
+
+    #[test]
+    fn render_tool_call_with_unknown_tool_pretty_prints_json_input() {
+        use crate::parse::ToolStatus;
+
+        let theme = Theme::default();
+        let cells = vec![SessionCell::ToolCall {
+            tool: "weather_lookup".to_owned(),
+            raw_name: "weather_lookup".to_owned(),
+            summary: "city: Seattle, units: c".to_owned(),
+            input: serde_json::json!({"city": "Seattle", "units": "c"}),
+            status: ToolStatus::Completed,
+            timestamp: None,
+        }];
+        let session = empty_session(Agent::Codex, cells);
+        let doc = render_session_document(&session, &theme, None);
+        let lines = rendered_lines(&doc.text);
+        let joined = lines.join("\n");
+
+        assert!(
+            joined.contains("\"city\": \"Seattle\""),
+            "expected pretty-printed key/value, got:\n{joined}"
+        );
+        assert!(
+            joined.contains("\"units\": \"c\""),
+            "expected pretty-printed second key/value, got:\n{joined}"
+        );
+
+        let any_colored = doc.text.lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| matches!(s.style.fg, Some(ratatui::style::Color::Rgb(..))))
+        });
+        assert!(
+            any_colored,
+            "expected syntect to assign at least one Rgb foreground color"
+        );
+    }
+
+    #[test]
+    fn render_tool_call_with_known_tool_keeps_summary_plain() {
+        use crate::parse::ToolStatus;
+
+        let theme = Theme::default();
+        let cells = vec![SessionCell::ToolCall {
+            tool: "bash".to_owned(),
+            raw_name: "Bash".to_owned(),
+            summary: "ls -la".to_owned(),
+            input: serde_json::json!({"command": "ls -la"}),
+            status: ToolStatus::Completed,
+            timestamp: None,
+        }];
+        let session = empty_session(Agent::Claude, cells);
+        let doc = render_session_document(&session, &theme, None);
+        let joined = rendered_lines(&doc.text).join("\n");
+
+        assert!(joined.contains("ls -la"), "expected raw command summary");
+        assert!(
+            !joined.contains("\"command\""),
+            "should not pretty-print JSON for known tool: {joined}"
+        );
+    }
+
+    #[test]
+    fn render_tool_result_highlights_json_object_output() {
+        let theme = Theme::default();
+        let cells = vec![SessionCell::ToolResult {
+            tool: Some("mcp_thing".to_owned()),
+            output: "{\n  \"status\": \"ok\",\n  \"count\": 7\n}".to_owned(),
+            is_error: false,
+            call_summary: None,
+            timestamp: None,
+        }];
+        let session = empty_session(Agent::Codex, cells);
+        let doc = render_session_document(&session, &theme, None);
+        let joined = rendered_lines(&doc.text).join("\n");
+
+        assert!(joined.contains("\"status\": \"ok\""));
+        assert!(joined.contains("\"count\": 7"));
+
+        let has_colored_token = doc.text.lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| matches!(s.style.fg, Some(ratatui::style::Color::Rgb(..))))
+        });
+        assert!(has_colored_token, "expected syntect colors on JSON tokens");
+    }
+
+    #[test]
+    fn render_tool_result_with_plain_text_output_unchanged() {
+        let theme = Theme::default();
+        let cells = vec![SessionCell::ToolResult {
+            tool: None,
+            output: "hello world\nsecond line".to_owned(),
+            is_error: false,
+            call_summary: None,
+            timestamp: None,
+        }];
+        let session = empty_session(Agent::Codex, cells);
+        let doc = render_session_document(&session, &theme, None);
+        let joined = rendered_lines(&doc.text).join("\n");
+        assert!(joined.contains("hello world"));
+        assert!(joined.contains("second line"));
+    }
+
+    #[test]
+    fn render_tool_result_sticky_header_inherits_call_summary() {
+        let theme = Theme::default();
+        let cells = vec![SessionCell::ToolResult {
+            tool: Some("bash".to_owned()),
+            output: "alpha\nbeta".to_owned(),
+            is_error: false,
+            call_summary: Some(
+                "git log --oneline origin/main..HEAD -- some/path/file.rs".to_owned(),
+            ),
+            timestamp: None,
+        }];
+        let session = empty_session(Agent::Codex, cells);
+        let doc = render_session_document(&session, &theme, None);
+        let result_marker = doc
+            .sticky_markers
+            .iter()
+            .find(|m| m.header.from == "Result")
+            .expect("expected a Result sticky marker");
+        assert!(
+            result_marker.header.subject.contains("git log --oneline"),
+            "subject should echo the call's summary, got: {:?}",
+            result_marker.header.subject
+        );
+        assert!(
+            result_marker.header.subject.starts_with("bash:"),
+            "subject should be tool-prefixed, got: {:?}",
+            result_marker.header.subject
+        );
+    }
+
+    #[test]
+    fn render_tool_result_sticky_header_falls_back_to_tool_only() {
+        let theme = Theme::default();
+        let cells = vec![SessionCell::ToolResult {
+            tool: Some("mcp_thing".to_owned()),
+            output: "ok".to_owned(),
+            is_error: false,
+            call_summary: None,
+            timestamp: None,
+        }];
+        let session = empty_session(Agent::Codex, cells);
+        let doc = render_session_document(&session, &theme, None);
+        let marker = doc
+            .sticky_markers
+            .iter()
+            .find(|m| m.header.from == "Result")
+            .expect("expected a Result sticky marker");
+        assert_eq!(marker.header.subject, "mcp_thing");
+    }
+
+    #[test]
+    fn result_sticky_subject_truncates_long_call_summary() {
+        let long = "x".repeat(500);
+        let subject = result_sticky_subject(Some("bash"), Some(&long));
+        assert!(subject.chars().count() <= RESULT_SUBJECT_MAX_CHARS);
+        assert!(subject.ends_with('\u{2026}'));
+        assert!(subject.starts_with("bash: "));
     }
 
     #[test]
