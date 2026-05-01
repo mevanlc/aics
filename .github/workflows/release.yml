@@ -86,7 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Stamp Cargo.toml version
+      - name: Stamp Cargo package version
         shell: bash
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
@@ -110,8 +110,23 @@ jobs:
                   "Expected exactly one placeholder version entry in Cargo.toml"
               )
           cargo_toml.write_text(updated)
+
+          cargo_lock = Path("Cargo.lock")
+          original = cargo_lock.read_text()
+          updated, count = re.subn(
+              r'(?ms)(\[\[package\]\]\nname = "aics"\nversion = ")0\.0\.0(")',
+              rf"\g<1>{release_version}\2",
+              original,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit(
+                  "Expected exactly one placeholder version entry for aics in Cargo.lock"
+              )
+          cargo_lock.write_text(updated)
           PY
           grep '^version' Cargo.toml
+          grep -A2 '^name = "aics"$' Cargo.lock
 
       - name: Install Rust
         run: |
