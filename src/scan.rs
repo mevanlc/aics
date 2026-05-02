@@ -8,19 +8,29 @@ use directories::BaseDirs;
 use log::warn;
 
 use crate::parse::session::{system_time_or_epoch, Agent};
+use crate::trash::{TrashPaths, TrashStore};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRoots {
     pub claude_projects: PathBuf,
     pub codex_sessions: PathBuf,
+    pub trash: Option<TrashPaths>,
 }
 
 impl SessionRoots {
     pub fn profile_hash_input(&self) -> String {
         format!(
-            "claude_projects={}\ncodex_sessions={}\n",
+            "claude_projects={}\ncodex_sessions={}\ntrash_dir={}\ntrash_metadata={}\n",
             self.claude_projects.display(),
-            self.codex_sessions.display()
+            self.codex_sessions.display(),
+            self.trash
+                .as_ref()
+                .map(|paths| paths.trash_dir.display().to_string())
+                .unwrap_or_default(),
+            self.trash
+                .as_ref()
+                .map(|paths| paths.metadata_file.display().to_string())
+                .unwrap_or_default()
         )
     }
 }
@@ -94,6 +104,7 @@ impl ResolvedPaths {
             roots: SessionRoots {
                 claude_projects,
                 codex_sessions,
+                trash: Some(TrashPaths::discover()?),
             },
             claude_sessions,
         })
@@ -106,6 +117,8 @@ pub struct SessionFile {
     pub agent: Agent,
     pub modified: SystemTime,
     pub size: u64,
+    pub trashed: bool,
+    pub original_path: Option<PathBuf>,
 }
 
 pub(crate) trait ScanProgressObserver {
@@ -157,6 +170,9 @@ pub(crate) fn scan_session_files_with_progress<P: ScanProgressObserver>(
     let mut files = Vec::new();
     scan_agent_root(&roots.claude_projects, Agent::Claude, &mut files, progress)?;
     scan_agent_root(&roots.codex_sessions, Agent::Codex, &mut files, progress)?;
+    if let Some(trash) = roots.trash.as_ref() {
+        scan_trash_root(trash, &mut files, progress)?;
+    }
     files.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(files)
 }
@@ -242,6 +258,51 @@ fn scan_directory<P: ScanProgressObserver>(
             agent,
             modified: system_time_or_epoch(metadata.modified().ok()),
             size: metadata.len(),
+            trashed: false,
+            original_path: None,
+        });
+        progress.on_discovered(output.len());
+    }
+
+    Ok(())
+}
+
+fn scan_trash_root<P: ScanProgressObserver>(
+    paths: &TrashPaths,
+    output: &mut Vec<SessionFile>,
+    progress: &mut P,
+) -> Result<()> {
+    let store = TrashStore::new(paths.clone());
+    let entries = store.sync()?;
+
+    for entry in entries {
+        let Some(agent) = entry.agent() else {
+            continue;
+        };
+        let path = entry.trash_path(store.paths());
+        if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                warn!(
+                    "skipping trashed session with unreadable metadata {}: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        output.push(SessionFile {
+            path,
+            agent,
+            modified: system_time_or_epoch(metadata.modified().ok()),
+            size: metadata.len(),
+            trashed: true,
+            original_path: entry.original_path(),
         });
         progress.on_discovered(output.len());
     }

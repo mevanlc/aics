@@ -167,6 +167,7 @@ fn fixture_roots(temp: &TempDir) -> Result<SessionRoots> {
     Ok(SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        trash: None,
     })
 }
 

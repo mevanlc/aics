@@ -44,6 +44,10 @@ pub struct StoredSession {
     /// Older indexes deserialize this as `None` via `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_info: Option<SessionInfo>,
+    #[serde(default)]
+    pub trashed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_path: Option<PathBuf>,
 }
 
 impl StoredSession {
@@ -72,7 +76,18 @@ impl From<&Session> for StoredSession {
             is_sidechain: session.is_sidechain,
             custom_title: session.custom_title.clone(),
             session_info: session.session_info.clone(),
+            trashed: false,
+            original_path: None,
         }
+    }
+}
+
+impl StoredSession {
+    fn from_session_file(session: &Session, file: &SessionFile) -> Self {
+        let mut stored = Self::from(session);
+        stored.trashed = file.trashed;
+        stored.original_path = file.original_path.clone();
+        stored
     }
 }
 
@@ -372,7 +387,7 @@ impl IndexManager {
 
             let indexed = match parse_session_file(file.agent, &file.path) {
                 Ok(Some(session)) => {
-                    add_session_document(&mut writer, &fields, &session)?;
+                    add_session_document(&mut writer, &fields, &session, file)?;
                     stats.updated += 1;
                     true
                 }
@@ -457,9 +472,10 @@ fn add_session_document(
     writer: &mut tantivy::IndexWriter,
     fields: &IndexSchema,
     session: &Session,
+    file: &SessionFile,
 ) -> Result<()> {
     let mut document = TantivyDocument::default();
-    let stored = StoredSession::from(session);
+    let stored = StoredSession::from_session_file(session, file);
     let stored_json = serde_json::to_string(&stored).context("failed to serialize session")?;
 
     document.add_text(fields.file_path, normalize_path_key(&session.file_path));
@@ -489,7 +505,7 @@ fn searchable_content(session: &Session) -> String {
 
 /// Bump when fields stored in `session_json` (StoredSession) change shape so old
 /// state files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 2;
+const INDEX_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {
@@ -503,6 +519,8 @@ struct IndexedFileState {
     modified_secs: u64,
     size: u64,
     agent: Agent,
+    trashed: bool,
+    original_path: Option<PathBuf>,
     indexed: bool,
 }
 
@@ -516,6 +534,8 @@ impl IndexedFileState {
                 .as_secs(),
             size: file.size,
             agent: file.agent,
+            trashed: file.trashed,
+            original_path: file.original_path.clone(),
             indexed,
         }
     }
@@ -525,15 +545,19 @@ impl IndexedFileState {
             modified_secs: self.modified_secs,
             size: self.size,
             agent: self.agent,
+            trashed: self.trashed,
+            original_path: self.original_path.clone(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FileFingerprint {
     modified_secs: u64,
     size: u64,
     agent: Agent,
+    trashed: bool,
+    original_path: Option<PathBuf>,
 }
 
 impl From<&SessionFile> for FileFingerprint {
@@ -546,6 +570,8 @@ impl From<&SessionFile> for FileFingerprint {
                 .as_secs(),
             size: file.size,
             agent: file.agent,
+            trashed: file.trashed,
+            original_path: file.original_path.clone(),
         }
     }
 }

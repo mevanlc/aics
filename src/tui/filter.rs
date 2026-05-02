@@ -9,7 +9,7 @@ use ratatui::Frame;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
-use crate::index::{Scope, SearchFilters, SortMode};
+use crate::index::{Scope, SearchFilters, SortMode, TrashFilter};
 use crate::parse::Agent;
 use crate::ring_cursor::RingCursor;
 use crate::tui::keymap_hint::{self, KeymapHint};
@@ -17,7 +17,7 @@ use crate::tui::layout;
 use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
 
-const FIELD_ORDER: [FilterField; 12] = [
+const FIELD_ORDER: [FilterField; 13] = [
     FilterField::Scope,
     FilterField::Agent,
     FilterField::Branch,
@@ -29,6 +29,7 @@ const FIELD_ORDER: [FilterField; 12] = [
     FilterField::Continued,
     FilterField::SubAgents,
     FilterField::LiveOnly,
+    FilterField::Trashed,
     FilterField::Sort,
 ];
 
@@ -45,6 +46,7 @@ pub enum FilterField {
     Continued,
     SubAgents,
     LiveOnly,
+    Trashed,
     Sort,
 }
 
@@ -62,6 +64,7 @@ pub struct FilterModalState {
     include_continued: bool,
     include_sub_agents: bool,
     live_only: bool,
+    trashed: TrashFilter,
     sort: SortMode,
 }
 
@@ -99,6 +102,7 @@ impl FilterModalState {
             include_continued: filters.include_continued,
             include_sub_agents: filters.include_sub_agents,
             live_only: filters.live_only,
+            trashed: filters.trashed,
             sort,
         }
     }
@@ -267,6 +271,7 @@ impl FilterModalState {
                 include_continued: self.include_continued,
                 include_sub_agents: self.include_sub_agents,
                 live_only: self.live_only,
+                trashed: self.trashed,
             },
         })
     }
@@ -299,6 +304,16 @@ impl FilterModalState {
             FilterField::Continued => self.include_continued = !self.include_continued,
             FilterField::SubAgents => self.include_sub_agents = !self.include_sub_agents,
             FilterField::LiveOnly => self.live_only = !self.live_only,
+            FilterField::Trashed => {
+                self.trashed = match (self.trashed, forward) {
+                    (TrashFilter::No, true) => TrashFilter::Yes,
+                    (TrashFilter::Yes, true) => TrashFilter::Both,
+                    (TrashFilter::Both, true) => TrashFilter::No,
+                    (TrashFilter::No, false) => TrashFilter::Both,
+                    (TrashFilter::Both, false) => TrashFilter::Yes,
+                    (TrashFilter::Yes, false) => TrashFilter::No,
+                };
+            }
             FilterField::Sort => {
                 self.sort = match self.sort {
                     SortMode::Relevance => SortMode::Time,
@@ -352,6 +367,7 @@ impl FilterField {
             FilterField::Continued => "Continued",
             FilterField::SubAgents => "Sub-agents",
             FilterField::LiveOnly => "Live only",
+            FilterField::Trashed => "Trashed",
             FilterField::Sort => "Sort",
         }
     }
@@ -369,6 +385,7 @@ impl FilterField {
             FilterField::Continued => "Include continued sessions (also called rollover sessions), which are continuations from a previous session.",
             FilterField::SubAgents => "Include sub-agent sessions (child sessions spawned by the agent tool).",
             FilterField::LiveOnly => "Only show sessions that are currently live (have an active agent process).",
+            FilterField::Trashed => "Choose whether to search normal sessions, trashed sessions, or both.",
             FilterField::Sort => "Sort results by relevance to the search query or by modification time.",
         }
     }
@@ -395,6 +412,7 @@ impl FilterField {
             FilterField::Continued => on_off(state.include_continued),
             FilterField::SubAgents => on_off(state.include_sub_agents),
             FilterField::LiveOnly => on_off(state.live_only),
+            FilterField::Trashed => state.trashed.label().to_owned(),
             FilterField::Sort => match state.sort {
                 SortMode::Relevance => "relevance".to_owned(),
                 SortMode::Time => "time".to_owned(),

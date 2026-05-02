@@ -6,48 +6,62 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListSt
 use ratatui::Frame;
 
 use crate::ring_cursor::RingCursor;
-use crate::tui::keymap_hint;
-use crate::tui::layout;
 use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
+use crate::tui::{keymap_hint, layout};
 
-const ACTIONS: [ActionItem; 9] = [
+const REGULAR_ACTIONS: [ActionItem; 10] = [
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
     ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
     ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
     ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
     ActionItem::new(SessionAction::CopyDir, 'o', "Copy session directory"),
-    ActionItem::new(SessionAction::Delete, 'd', "Delete session file"),
+    ActionItem::new(SessionAction::Delete, 'd', "Move session to Trash"),
+    ActionItem::new(
+        SessionAction::DeleteImmediately,
+        'D',
+        "Delete session immediately",
+    ),
     ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
     ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
 ];
 
-/// Footer hints shown while the `^X` action-letter prefix is armed.
-/// Shared between the session list and the viewer.
-pub const ACTION_LETTER_HINTS: [keymap_hint::KeymapHint; 11] = [
-    keymap_hint::KeymapHint::new("Esc", "cancel ^x"),
-    keymap_hint::KeymapHint::new("v", "view"),
-    keymap_hint::KeymapHint::new("s", "summarize"),
-    keymap_hint::KeymapHint::new("e", "export"),
-    keymap_hint::KeymapHint::new("i", "copy id"),
-    keymap_hint::KeymapHint::new("p", "copy path"),
-    keymap_hint::KeymapHint::new("o", "copy dir"),
-    keymap_hint::KeymapHint::new("d", "delete session"),
-    keymap_hint::KeymapHint::new("r", "resume"),
-    keymap_hint::KeymapHint::new("f", "fork"),
-    keymap_hint::KeymapHint::new("?", "help"),
+const TRASHED_ACTIONS: [ActionItem; 11] = [
+    ActionItem::new(SessionAction::View, 'v', "View full conversation"),
+    ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
+    ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
+    ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
+    ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
+    ActionItem::new(SessionAction::CopyDir, 'o', "Copy session directory"),
+    ActionItem::new(SessionAction::UndoTrash, 'u', "Undo trash"),
+    ActionItem::new(SessionAction::Delete, 'd', "Delete from Trash"),
+    ActionItem::new(
+        SessionAction::DeleteImmediately,
+        'D',
+        "Delete session immediately",
+    ),
+    ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
+    ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
 ];
 
-pub fn action_for_key(ch: char) -> Option<SessionAction> {
-    ACTIONS
+fn actions(trashed: bool) -> &'static [ActionItem] {
+    if trashed {
+        &TRASHED_ACTIONS
+    } else {
+        &REGULAR_ACTIONS
+    }
+}
+
+pub fn action_for_key(ch: char, trashed: bool) -> Option<SessionAction> {
+    actions(trashed)
         .iter()
         .find(|item| item.key == ch)
         .map(|item| item.action)
 }
 
-pub fn action_at(index: usize) -> Option<SessionAction> {
-    ACTIONS.get(index).map(|item| item.action)
+pub fn action_at(index: usize, trashed: bool) -> Option<SessionAction> {
+    actions(trashed).get(index).map(|item| item.action)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +72,9 @@ pub enum SessionAction {
     CopyId,
     CopyPath,
     CopyDir,
+    UndoTrash,
     Delete,
+    DeleteImmediately,
     Resume,
     Fork,
 }
@@ -66,6 +82,7 @@ pub enum SessionAction {
 #[derive(Debug, Clone)]
 pub struct ActionMenuState {
     pub selected: RingCursor<SessionAction>,
+    trashed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -77,14 +94,15 @@ pub enum ActionOutcome {
 
 impl Default for ActionMenuState {
     fn default() -> Self {
-        Self::new()
+        Self::new(false)
     }
 }
 
 impl ActionMenuState {
-    pub fn new() -> Self {
+    pub fn new(trashed: bool) -> Self {
         Self {
-            selected: RingCursor::new(ACTIONS.iter().map(|item| item.action).collect()),
+            selected: RingCursor::new(actions(trashed).iter().map(|item| item.action).collect()),
+            trashed,
         }
     }
 
@@ -100,7 +118,7 @@ impl ActionMenuState {
                 self.selected.move_next();
                 ActionOutcome::Stay
             }
-            KeyCode::Char(ch) => action_for_key(ch)
+            KeyCode::Char(ch) => action_for_key(ch, self.trashed)
                 .map(ActionOutcome::Run)
                 .unwrap_or(ActionOutcome::Stay),
             _ => ActionOutcome::Stay,
@@ -130,7 +148,7 @@ impl ActionMenuState {
         .split(inner);
 
         // List (no block — border lives on the outer block above)
-        let items = ACTIONS
+        let items = actions(self.trashed)
             .iter()
             .map(|item| {
                 ListItem::new(Line::from(vec![
@@ -182,9 +200,13 @@ impl ActionMenuState {
     }
 
     pub fn select_index(&mut self, index: usize) {
-        if let Some(action) = action_at(index) {
+        if let Some(action) = action_at(index, self.trashed) {
             self.selected.set(&action);
         }
+    }
+
+    pub fn trashed(&self) -> bool {
+        self.trashed
     }
 }
 
@@ -218,13 +240,13 @@ pub fn list_area(area: Rect) -> Rect {
     chunks[0]
 }
 
-pub fn index_at_row(area: Rect, row: u16) -> Option<usize> {
+pub fn index_at_row(area: Rect, row: u16, trashed: bool) -> Option<usize> {
     let list = list_area(area);
     if row < list.y || row >= list.bottom() {
         return None;
     }
     let index = (row - list.y) as usize;
-    (index < ACTIONS.len()).then_some(index)
+    (index < actions(trashed).len()).then_some(index)
 }
 
 #[cfg(test)]
@@ -235,7 +257,7 @@ mod tests {
 
     #[test]
     fn up_wraps_to_last_action() {
-        let mut state = ActionMenuState::new();
+        let mut state = ActionMenuState::new(false);
 
         let outcome = state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
 
@@ -245,12 +267,39 @@ mod tests {
 
     #[test]
     fn down_wraps_from_last_action_to_first() {
-        let mut state = ActionMenuState::new();
+        let mut state = ActionMenuState::new(false);
         assert!(state.selected.set(&SessionAction::Fork));
 
         let outcome = state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
 
         assert!(matches!(outcome, ActionOutcome::Stay));
         assert!(state.selected == SessionAction::View);
+    }
+
+    #[test]
+    fn capital_d_runs_delete_immediately() {
+        let mut state = ActionMenuState::new(false);
+
+        let outcome = state.handle_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+
+        assert!(matches!(
+            outcome,
+            ActionOutcome::Run(SessionAction::DeleteImmediately)
+        ));
+    }
+
+    #[test]
+    fn undo_trash_only_appears_for_trashed_sessions() {
+        let mut regular = ActionMenuState::new(false);
+        let mut trashed = ActionMenuState::new(true);
+
+        assert!(matches!(
+            regular.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)),
+            ActionOutcome::Stay
+        ));
+        assert!(matches!(
+            trashed.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)),
+            ActionOutcome::Run(SessionAction::UndoTrash)
+        ));
     }
 }

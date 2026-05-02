@@ -3,10 +3,12 @@ use std::path::{Path, PathBuf};
 
 use aics::index::{
     IndexManager, IndexPaths, Scope, SearchEngine, SearchFilters, SearchRequest, SortMode,
+    TrashFilter,
 };
 use aics::live::LiveSessionTracker;
 use aics::parse::{Agent, DerivationType};
 use aics::scan::SessionRoots;
+use aics::trash::TrashPaths;
 use anyhow::Result;
 use tempfile::TempDir;
 
@@ -82,6 +84,7 @@ fn sub_agent_sessions_are_hidden_unless_requested() -> Result<()> {
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        trash: None,
     };
     let cache_root = temp.path().join("cache");
     let manager = IndexManager::with_paths(IndexPaths::from_root(&cache_root));
@@ -162,6 +165,78 @@ fn live_only_filter_uses_live_session_markers() -> Result<()> {
 }
 
 #[test]
+fn trashed_filter_defaults_to_normal_sessions_and_can_include_trash() -> Result<()> {
+    let temp = TempDir::new()?;
+    let trash_paths = TrashPaths::from_data_root(temp.path().join("data"));
+    fs::create_dir_all(&trash_paths.trash_dir)?;
+    let trashed = copy_fixture(
+        &temp,
+        "tests/fixtures/sessions/claude/basic_session.jsonl",
+        "data/trash/basic_session.jsonl",
+    )?;
+    fs::write(
+        &trash_paths.metadata_file,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "ts": "2026-05-01T00:00:00Z",
+                "nm": "basic_session.jsonl",
+                "op": "/tmp/original/basic_session.jsonl",
+                "tn": "claude",
+            })
+        ),
+    )?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        trash: Some(trash_paths),
+    };
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+
+    let default_hits = engine.search(&SearchRequest {
+        query: String::new(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Time,
+        filters: SearchFilters::default(),
+    })?;
+    assert!(default_hits.is_empty());
+
+    let trashed_hits = engine.search(&SearchRequest {
+        query: String::new(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Time,
+        filters: SearchFilters {
+            trashed: TrashFilter::Yes,
+            ..SearchFilters::default()
+        },
+    })?;
+    assert_eq!(trashed_hits.len(), 1);
+    assert_eq!(trashed_hits[0].session.file_path, trashed);
+    assert!(trashed_hits[0].session.trashed);
+    assert_eq!(
+        trashed_hits[0].session.original_path.as_deref(),
+        Some(Path::new("/tmp/original/basic_session.jsonl"))
+    );
+
+    let both_hits = engine.search(&SearchRequest {
+        query: String::new(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Time,
+        filters: SearchFilters {
+            trashed: TrashFilter::Both,
+            ..SearchFilters::default()
+        },
+    })?;
+    assert_eq!(both_hits.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn time_sort_keeps_query_results_in_modified_order() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
@@ -205,6 +280,7 @@ fn fixture_roots(temp: &TempDir) -> Result<SessionRoots> {
     Ok(SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        trash: None,
     })
 }
 

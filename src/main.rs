@@ -12,6 +12,7 @@ use ratatui::style::Color;
 
 use aics::index::{
     IndexManager, Scope, SearchFilters, SearchRequest, SortMode, SyncOutcome, SyncProgress,
+    TrashFilter,
 };
 use aics::live::LiveSessionTracker;
 use aics::parse::Agent;
@@ -99,6 +100,13 @@ struct Cli {
     )]
     live: bool,
     #[arg(
+        long = "trashed",
+        value_enum,
+        default_value_t = CliTrashFilter::No,
+        help = "Search trashed sessions: no, yes, or both"
+    )]
+    trashed: CliTrashFilter,
+    #[arg(
         long = "json",
         help = "Print JSONL hits to stdout instead of launching the interactive TUI"
     )]
@@ -148,11 +156,28 @@ enum CliProgress {
     Out,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliTrashFilter {
+    No,
+    Yes,
+    Both,
+}
+
 impl From<CliSort> for SortMode {
     fn from(value: CliSort) -> Self {
         match value {
             CliSort::Time => SortMode::Time,
             CliSort::Relevance => SortMode::Relevance,
+        }
+    }
+}
+
+impl From<CliTrashFilter> for TrashFilter {
+    fn from(value: CliTrashFilter) -> Self {
+        match value {
+            CliTrashFilter::No => TrashFilter::No,
+            CliTrashFilter::Yes => TrashFilter::Yes,
+            CliTrashFilter::Both => TrashFilter::Both,
         }
     }
 }
@@ -231,6 +256,7 @@ fn main() -> Result<()> {
         request,
         settings,
         resolved_paths.homes,
+        resolved_paths.roots,
     )
 }
 
@@ -320,6 +346,7 @@ fn build_request(cli: &Cli) -> Result<SearchRequest> {
             include_continued: !cli.no_rollover,
             include_sub_agents: cli.sub_agent,
             live_only: cli.live,
+            trashed: cli.trashed.into(),
         },
     })
 }

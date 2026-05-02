@@ -144,11 +144,16 @@ pub fn parse_highlighted_html(html: &str, base: Style, highlight: Style) -> Line
 }
 
 pub fn list_title(hit: &SearchHit) -> String {
-    abbreviate_home_path(&session_display_title(
+    let title = abbreviate_home_path(&session_display_title(
         hit.session.agent,
         &hit.session.project,
         hit.session.custom_title.as_deref(),
-    ))
+    ));
+    if hit.session.trashed {
+        format!("trashed · {title}")
+    } else {
+        title
+    }
 }
 
 pub fn session_display_title(agent: Agent, project: &str, custom_title: Option<&str>) -> String {
@@ -502,7 +507,7 @@ fn discover_home_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use ratatui::backend::TestBackend;
     use ratatui::style::{Color, Style};
@@ -515,10 +520,12 @@ mod tests {
 
     use super::{
         abbreviate_home_path_with, block_title, highlight_spans, highlight_styled_spans,
-        parse_highlighted_html, session_display_title, sticky_header_for_scroll,
+        list_title, parse_highlighted_html, session_display_title, sticky_header_for_scroll,
         sticky_rows_from_line_markers, truncate_plain, wrapped_text_height,
         FullLineBackgroundParagraph, StickyHeader, StickyLineMarker,
     };
+    use crate::index::{SearchHit, StoredSession};
+    use crate::parse::{Agent, DerivationType};
 
     #[test]
     fn highlight_parser_handles_literal_angle_brackets() {
@@ -756,6 +763,40 @@ mod tests {
         );
 
         assert_eq!(title, "hand-written-title");
+    }
+
+    #[test]
+    fn list_title_prefixes_trashed_sessions() {
+        let mut hit = SearchHit {
+            session: StoredSession {
+                session_id: "session-123".to_owned(),
+                agent: Agent::Claude,
+                project: "/tmp/demo".to_owned(),
+                branch: None,
+                cwd: Some("/tmp/demo".to_owned()),
+                modified_ts: 0,
+                lines: 1,
+                file_path: PathBuf::from("/tmp/demo/session.jsonl"),
+                first_msg_role: None,
+                first_msg_content: String::new(),
+                last_msg_role: None,
+                last_msg_content: String::new(),
+                first_user_msg_content: String::new(),
+                derivation_type: DerivationType::Original,
+                is_sidechain: false,
+                custom_title: None,
+                session_info: None,
+                trashed: false,
+                original_path: None,
+            },
+            snippet_html: String::new(),
+            score: 0.0,
+            is_live: false,
+        };
+
+        assert_eq!(list_title(&hit), "/tmp/demo");
+        hit.session.trashed = true;
+        assert_eq!(list_title(&hit), "trashed · /tmp/demo");
     }
 
     #[test]

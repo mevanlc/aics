@@ -27,7 +27,7 @@ const RIGHT_PANEL_MIN_CONTENT_WIDTH: u16 = 12;
 const RIGHT_PANEL_HORIZONTAL_CHROME: u16 = 3;
 const RIGHT_PANEL_MIN_WIDTH: u16 = RIGHT_PANEL_MIN_CONTENT_WIDTH + RIGHT_PANEL_HORIZONTAL_CHROME;
 
-const SESSION_LIST_ITEMS: [HelpItem; 20] = [
+const SESSION_LIST_ITEMS: [HelpItem; 19] = [
     HelpItem::new(
         "Type",
         "filter sessions",
@@ -123,14 +123,9 @@ const SESSION_LIST_ITEMS: [HelpItem; 20] = [
         "scroll preview",
         "Scroll over the preview pane to move through the preview content while leaving the selected session unchanged.",
     ),
-    HelpItem::new(
-        "^X + letter",
-        "run menu action",
-        "Press Ctrl+X followed by a main-menu letter such as v, d, e, r, or f to run that action immediately for the selected session. Once ^X mode is armed, matching action letters take priority even if Ctrl is still held.",
-    ),
 ];
 
-const VIEWER_ITEMS: [HelpItem; 17] = [
+const VIEWER_ITEMS: [HelpItem; 16] = [
     HelpItem::new(
         "?",
         "open this help",
@@ -145,11 +140,6 @@ const VIEWER_ITEMS: [HelpItem; 17] = [
         "Enter",
         "open actions menu",
         "Open the session actions menu for the session currently shown in the dedicated viewer. Cancelling that menu returns you to the same viewer state.",
-    ),
-    HelpItem::new(
-        "^X + letter",
-        "run menu action",
-        "Press Ctrl+X followed by a main-menu letter such as v, d, e, r, or f to run that action for the session currently shown in the viewer.",
     ),
     HelpItem::new(
         "Type",

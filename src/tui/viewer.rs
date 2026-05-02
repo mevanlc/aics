@@ -15,7 +15,6 @@ use crate::parse::Session;
 use crate::search_query::extract_highlight_terms;
 use crate::settings::ThemeName;
 use crate::summary::SummarySidecar;
-use crate::tui::actions::ACTION_LETTER_HINTS;
 use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::markdown::render_markdown_message;
 use crate::tui::preview::{
@@ -236,10 +235,10 @@ impl ViewerState {
         frame: &mut Frame,
         area: Rect,
         session: &Session,
+        trashed: bool,
         summary: Option<&SummarySidecar>,
         theme: &Theme,
         theme_name: ThemeName,
-        menu_armed: bool,
     ) {
         let _profile = profile::scope("viewer.render");
         frame.render_widget(Clear, area);
@@ -269,7 +268,12 @@ impl ViewerState {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(theme.border_style(false))
-            .title(block_title(viewer_title(session, theme, scroll_percent)));
+            .title(block_title(viewer_title(
+                session,
+                trashed,
+                theme,
+                scroll_percent,
+            )));
         let inner = block.inner(body_area);
         frame.render_widget(block, body_area);
         let (header_area, body_content_area) = split_sticky_body(inner);
@@ -305,12 +309,7 @@ impl ViewerState {
         );
         frame.render_widget(search_bar, footer_chunks[0]);
 
-        let hints: &[KeymapHint] = if menu_armed {
-            &ACTION_LETTER_HINTS[..]
-        } else {
-            &Self::HINTS[..]
-        };
-        keymap_hint::render(frame, footer_chunks[1], hints, theme, "");
+        keymap_hint::render(frame, footer_chunks[1], &Self::HINTS, theme, "");
 
         let cursor_x = footer_chunks[0]
             .x
@@ -514,13 +513,21 @@ fn summary_stamp(summary: &SummarySidecar) -> (i64, usize, usize) {
     )
 }
 
-fn viewer_title(session: &Session, theme: &Theme, scroll_percent: usize) -> Line<'static> {
+fn viewer_title(
+    session: &Session,
+    trashed: bool,
+    theme: &Theme,
+    scroll_percent: usize,
+) -> Line<'static> {
     let (badge, badge_color) = agent_badge(session.agent, theme);
-    let title = abbreviate_home_path(&session_display_title(
+    let mut title = abbreviate_home_path(&session_display_title(
         session.agent,
         &session.project,
         session.custom_title.as_deref(),
     ));
+    if trashed {
+        title = format!("trashed · {title}");
+    }
     let time = relative_time(session.modified_ts);
     let line_count = format_line_count(session.lines);
 
@@ -1000,7 +1007,7 @@ mod tests {
     #[test]
     fn viewer_title_matches_card_style_with_scroll_suffix() {
         let session = sample_session();
-        let title = viewer_title(&session, &Theme::default(), 9);
+        let title = viewer_title(&session, false, &Theme::default(), 9);
         let rendered = title
             .spans
             .iter()
@@ -1010,6 +1017,22 @@ mod tests {
         assert_eq!(
             rendered,
             "{C} · /tmp/demo · 1969-12-31 · 6 lines · 9% scrolled"
+        );
+    }
+
+    #[test]
+    fn viewer_title_prefixes_trashed_sessions() {
+        let session = sample_session();
+        let title = viewer_title(&session, true, &Theme::default(), 9);
+        let rendered = title
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(
+            rendered,
+            "{C} · trashed · /tmp/demo · 1969-12-31 · 6 lines · 9% scrolled"
         );
     }
 

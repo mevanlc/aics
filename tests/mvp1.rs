@@ -395,6 +395,7 @@ fn scanner_discovers_both_session_roots_recursively() -> Result<()> {
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        trash: None,
     };
     let files = scan_session_files(&roots)?;
 

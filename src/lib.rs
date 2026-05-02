@@ -8,4 +8,5 @@ pub mod scan;
 pub mod search_query;
 pub mod settings;
 pub mod summary;
+pub mod trash;
 pub mod tui;

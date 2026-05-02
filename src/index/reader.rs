@@ -38,6 +38,23 @@ pub enum SortMode {
     Time,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrashFilter {
+    No,
+    Yes,
+    Both,
+}
+
+impl TrashFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::No => "No",
+            Self::Yes => "Yes",
+            Self::Both => "Both",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchFilters {
     pub agent: Option<Agent>,
@@ -50,6 +67,7 @@ pub struct SearchFilters {
     pub include_continued: bool,
     pub include_sub_agents: bool,
     pub live_only: bool,
+    pub trashed: TrashFilter,
 }
 
 impl Default for SearchFilters {
@@ -65,6 +83,7 @@ impl Default for SearchFilters {
             include_continued: true,
             include_sub_agents: false,
             live_only: false,
+            trashed: TrashFilter::No,
         }
     }
 }
@@ -81,6 +100,7 @@ impl SearchFilters {
             + usize::from(!self.include_continued)
             + usize::from(self.include_sub_agents)
             + usize::from(self.live_only)
+            + usize::from(self.trashed != TrashFilter::No)
     }
 
     fn allows_derivation(&self, derivation: DerivationType) -> bool {
@@ -582,6 +602,12 @@ fn matches_filters(filters: &SearchFilters, session: &StoredSession, is_live: bo
         return false;
     }
 
+    match filters.trashed {
+        TrashFilter::No if session.trashed => return false,
+        TrashFilter::Yes if !session.trashed => return false,
+        TrashFilter::No | TrashFilter::Yes | TrashFilter::Both => {}
+    }
+
     true
 }
 
@@ -773,6 +799,8 @@ mod tests {
             is_sidechain: false,
             custom_title: None,
             session_info: None,
+            trashed: false,
+            original_path: None,
         }
     }
 

@@ -39,7 +39,7 @@ use crate::index::{
 };
 use crate::parse::claude::read_claude_autosummaries;
 use crate::parse::{parse_session_file, Agent, MessageRole, Session};
-use crate::scan::AgentHomes;
+use crate::scan::{AgentHomes, SessionRoots};
 use crate::settings::{Settings, ThemeName};
 use crate::summary::sidecar::sidecar_path;
 use crate::summary::staleness::fingerprint as compute_fingerprint;
@@ -47,6 +47,7 @@ use crate::summary::{
     AicsSummaryPreview, ClaudeAutosummaryPreview, SummaryCommand, SummaryEvent, SummarySidecar,
     SummarySources, SummaryWorker,
 };
+use crate::trash::TrashStore;
 use crate::tui::actions::{self, ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::filter::{FilterModalState, FilterOutcome};
 use crate::tui::help::{HelpModalState, HelpOutcome, HelpTab};
@@ -96,8 +97,28 @@ enum Overlay {
     Actions(ActionMenuState),
     Viewer(ViewerState),
     Settings(SettingsModalState),
-    ConfirmDelete,
+    ConfirmDelete(DeleteMode),
+    ConfirmRestore(RestorePrompt),
+    RestoreBlocked(RestoreBlockedDialog),
     ConfirmExit,
+}
+
+#[derive(Debug, Clone)]
+struct RestorePrompt {
+    hit: SearchHit,
+    target: PathBuf,
+    kind: RestorePromptKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestorePromptKind {
+    CreateParent,
+    OverwriteFile,
+}
+
+#[derive(Debug, Clone)]
+struct RestoreBlockedDialog {
+    target: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +161,12 @@ enum SnippetMode {
     BuiltinSummary,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeleteMode {
+    Trash,
+    Immediate,
+}
+
 impl SnippetMode {
     fn label(self) -> &'static str {
         match self {
@@ -164,6 +191,7 @@ pub fn run_app(
     initial_request: SearchRequest,
     settings: Settings,
     homes: AgentHomes,
+    roots: SessionRoots,
 ) -> Result<()> {
     let worker = SearchWorker::spawn(search_engine)?;
     let summary_worker = SummaryWorker::spawn()?;
@@ -174,6 +202,7 @@ pub fn run_app(
         initial_request,
         settings,
         homes,
+        roots,
     );
     match app.run()? {
         AppExit::Normal => Ok(()),
@@ -255,7 +284,7 @@ pub struct App {
     settings: Settings,
     theme: Theme,
     homes: AgentHomes,
-    pending_main_menu_action: bool,
+    roots: SessionRoots,
     pending_list_click: Option<PendingListClick>,
     pending_action_menu_click: Option<PendingListClick>,
     viewer_before_actions: Option<ViewerState>,
@@ -283,6 +312,7 @@ impl App {
         initial_request: SearchRequest,
         settings: Settings,
         homes: AgentHomes,
+        roots: SessionRoots,
     ) -> Self {
         let local_scope = match &initial_request.scope {
             Scope::CurrentDir(path, canonical) => {
@@ -335,7 +365,7 @@ impl App {
             theme: Theme::from_name(settings.theme),
             settings,
             homes,
-            pending_main_menu_action: false,
+            roots,
             pending_list_click: None,
             pending_action_menu_click: None,
             viewer_before_actions: None,
@@ -647,12 +677,7 @@ impl App {
             preview::render(frame, self, preview_area, &theme);
         }
 
-        let hints = if self.pending_main_menu_action {
-            &actions::ACTION_LETTER_HINTS[..]
-        } else {
-            &Self::MAIN_HINTS[..]
-        };
-        keymap_hint::render(frame, areas.status, hints, &theme, "");
+        keymap_hint::render(frame, areas.status, &Self::MAIN_HINTS, &theme, "");
 
         let local_scope_label = self.local_scope_label();
         let viewer_theme_name = self.current_frame_theme_name();
@@ -663,7 +688,6 @@ impl App {
             .map(|hit| (hit.session.agent, hit.session.file_path.clone()));
         let viewer_summary = viewer_summary_target
             .and_then(|(agent, path)| self.summary_sidecar_for_path(agent, &path));
-        let menu_armed = self.pending_main_menu_action;
         let results = &self.results;
         let preview_cache = &self.preview_cache;
         let viewer_before_actions = &mut self.viewer_before_actions;
@@ -674,8 +698,8 @@ impl App {
             }
             Overlay::Actions(action_menu) => {
                 if let Some(viewer_state) = viewer_before_actions.as_mut() {
-                    let session = results
-                        .get(selected)
+                    let hit = results.get(selected);
+                    let session = hit
                         .and_then(|hit| preview_cache.get(&hit.session.file_path))
                         .and_then(|session| session.as_ref());
                     if let Some(session) = session {
@@ -683,18 +707,18 @@ impl App {
                             frame,
                             frame.area(),
                             session,
+                            hit.is_some_and(|hit| hit.session.trashed),
                             viewer_summary.as_ref(),
                             &theme,
                             viewer_theme_name,
-                            menu_armed,
                         );
                     }
                 }
                 action_menu.render(frame, frame.area(), &theme);
             }
             Overlay::Viewer(viewer_state) => {
-                let session = results
-                    .get(selected)
+                let hit = results.get(selected);
+                let session = hit
                     .and_then(|hit| preview_cache.get(&hit.session.file_path))
                     .and_then(|session| session.as_ref());
                 if let Some(session) = session {
@@ -702,15 +726,27 @@ impl App {
                         frame,
                         frame.area(),
                         session,
+                        hit.is_some_and(|hit| hit.session.trashed),
                         viewer_summary.as_ref(),
                         &theme,
                         viewer_theme_name,
-                        menu_armed,
                     );
                 }
             }
             Overlay::Settings(settings_state) => settings_state.render(frame, frame.area(), &theme),
-            Overlay::ConfirmDelete => self.render_delete_confirm(frame, frame.area(), &theme),
+            Overlay::ConfirmDelete(mode) => Self::render_delete_confirm(
+                frame,
+                frame.area(),
+                &theme,
+                results.get(selected),
+                *mode,
+            ),
+            Overlay::ConfirmRestore(prompt) => {
+                Self::render_restore_confirm(frame, frame.area(), &theme, prompt)
+            }
+            Overlay::RestoreBlocked(dialog) => {
+                Self::render_restore_blocked(frame, frame.area(), &theme, dialog)
+            }
             Overlay::ConfirmExit => self.render_exit_confirm(frame, frame.area(), &theme),
         }
         if let Some(help_state) = &mut self.help {
@@ -732,17 +768,13 @@ impl App {
             return self.handle_overlay_key(key);
         }
 
-        if self.handle_pending_main_menu_key(key)? {
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('d') {
+            self.delete_selected_session(DeleteMode::Trash)?;
             return Ok(());
         }
 
         if is_help_key(key) {
             self.open_help(HelpTab::SessionList);
-            return Ok(());
-        }
-
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('x') {
-            self.pending_main_menu_action = self.selected_index().is_some();
             return Ok(());
         }
 
@@ -835,7 +867,8 @@ impl App {
             }
             KeyCode::Enter => {
                 if self.selected_index().is_some() {
-                    self.overlay = Overlay::Actions(ActionMenuState::new());
+                    self.overlay =
+                        Overlay::Actions(ActionMenuState::new(self.selected_is_trashed()));
                 }
             }
             KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
@@ -880,15 +913,12 @@ impl App {
             return Ok(());
         }
 
-        if matches!(self.overlay, Overlay::Viewer(_)) && self.handle_pending_main_menu_key(key)? {
-            return Ok(());
-        }
-
         if matches!(self.overlay, Overlay::Viewer(_))
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-            && key.code == KeyCode::Char('x')
+            && key.modifiers == KeyModifiers::CONTROL
+            && key.code == KeyCode::Char('d')
         {
-            self.pending_main_menu_action = self.selected_index().is_some();
+            self.overlay = Overlay::None;
+            self.delete_selected_session(DeleteMode::Trash)?;
             return Ok(());
         }
 
@@ -959,14 +989,30 @@ impl App {
                     self.overlay = Overlay::None;
                 }
             },
-            Overlay::ConfirmDelete => match key.code {
+            Overlay::ConfirmDelete(mode) => match key.code {
                 KeyCode::Esc | KeyCode::Char('n') => self.overlay = Overlay::None,
                 KeyCode::Char('y') | KeyCode::Enter => {
+                    let mode = *mode;
                     self.overlay = Overlay::None;
-                    if let Err(error) = self.delete_selected_session() {
+                    if let Err(error) = self.delete_selected_session(mode) {
                         self.statusline = Some(statusline::Entry::failed(format!("{error:#}")));
                     }
                 }
+                _ => {}
+            },
+            Overlay::ConfirmRestore(prompt) => match key.code {
+                KeyCode::Esc => self.overlay = Overlay::None,
+                KeyCode::Enter => {
+                    let prompt = prompt.clone();
+                    self.overlay = Overlay::None;
+                    if let Err(error) = self.restore_trashed_session(prompt) {
+                        self.statusline = Some(statusline::Entry::failed(format!("{error:#}")));
+                    }
+                }
+                _ => {}
+            },
+            Overlay::RestoreBlocked(_) => match key.code {
+                KeyCode::Esc | KeyCode::Enter => self.overlay = Overlay::None,
                 _ => {}
             },
             Overlay::ConfirmExit => match key.code {
@@ -1085,7 +1131,9 @@ impl App {
                 MouseEventKind::Down(MouseButton::Left) => {
                     let mut action_to_run = None;
                     let mut close_overlay = false;
-                    if let Some(index) = actions::index_at_row(self.last_frame_area, mouse.row) {
+                    if let Some(index) =
+                        actions::index_at_row(self.last_frame_area, mouse.row, state.trashed())
+                    {
                         state.select_index(index);
                         let now = Instant::now();
                         let double_click = self.pending_action_menu_click.is_some_and(|click| {
@@ -1095,7 +1143,7 @@ impl App {
                         if double_click {
                             self.pending_action_menu_click = None;
                             close_overlay = true;
-                            action_to_run = actions::action_at(index);
+                            action_to_run = actions::action_at(index, state.trashed());
                         } else {
                             self.pending_action_menu_click =
                                 Some(PendingListClick { index, at: now });
@@ -1527,7 +1575,6 @@ impl App {
     fn open_viewer(&mut self) {
         if self.selected_index().is_some() {
             let _ = self.selected_preview();
-            self.pending_main_menu_action = false;
             self.pending_list_click = None;
             self.pending_action_menu_click = None;
             self.viewer_before_actions = None;
@@ -1540,8 +1587,8 @@ impl App {
             return;
         }
 
-        self.pending_main_menu_action = false;
         self.pending_action_menu_click = None;
+        let trashed = self.selected_is_trashed();
 
         let previous_overlay = std::mem::replace(&mut self.overlay, Overlay::None);
         self.viewer_before_actions = match previous_overlay {
@@ -1551,7 +1598,7 @@ impl App {
                 None
             }
         };
-        self.overlay = Overlay::Actions(ActionMenuState::new());
+        self.overlay = Overlay::Actions(ActionMenuState::new(trashed));
     }
 
     fn close_actions_overlay(&mut self) {
@@ -1570,51 +1617,6 @@ impl App {
 
         self.close_actions_overlay();
         self.run_session_action(action)
-    }
-
-    fn handle_pending_main_menu_key(&mut self, key: KeyEvent) -> Result<bool> {
-        if !self.pending_main_menu_action {
-            return Ok(false);
-        }
-
-        let from_viewer = matches!(self.overlay, Overlay::Viewer(_));
-        let help_tab = if from_viewer {
-            HelpTab::Viewer
-        } else {
-            HelpTab::SessionList
-        };
-
-        match key.code {
-            KeyCode::Esc => {
-                self.pending_main_menu_action = false;
-                Ok(true)
-            }
-            KeyCode::Char('?') if key.modifiers.is_empty() => {
-                self.pending_main_menu_action = false;
-                self.open_help(help_tab);
-                Ok(true)
-            }
-            KeyCode::Char(ch)
-                if key.modifiers.is_empty()
-                    || (key.modifiers.contains(KeyModifiers::CONTROL)
-                        && key.modifiers.difference(KeyModifiers::CONTROL).is_empty()) =>
-            {
-                if let Some(action) = actions::action_for_key(ch) {
-                    self.pending_main_menu_action = false;
-                    if from_viewer && matches!(action, SessionAction::View) {
-                        return Ok(true);
-                    }
-                    self.run_session_action(action)?;
-                    return Ok(true);
-                }
-                self.pending_main_menu_action = false;
-                Ok(false)
-            }
-            _ => {
-                self.pending_main_menu_action = false;
-                Ok(false)
-            }
-        }
     }
 
     fn open_help(&mut self, tab: HelpTab) {
@@ -1807,6 +1809,12 @@ impl App {
         self.results.get(self.selected).cloned()
     }
 
+    fn selected_is_trashed(&self) -> bool {
+        self.results
+            .get(self.selected)
+            .is_some_and(|hit| hit.session.trashed)
+    }
+
     fn local_scope_label(&self) -> String {
         match &self.local_scope {
             Scope::Global => "Global".to_owned(),
@@ -1855,7 +1863,11 @@ impl App {
                     .unwrap_or_else(|| hit.session.file_path.display().to_string());
                 self.copy_to_clipboard(&value, "session directory")?;
             }
-            SessionAction::Delete => self.overlay = Overlay::ConfirmDelete,
+            SessionAction::UndoTrash => self.undo_trash_selected_session()?,
+            SessionAction::Delete => self.delete_selected_session(DeleteMode::Trash)?,
+            SessionAction::DeleteImmediately => {
+                self.overlay = Overlay::ConfirmDelete(DeleteMode::Immediate)
+            }
             SessionAction::Resume => {
                 let Some(hit) = self.selected_hit() else {
                     return Ok(());
@@ -1874,6 +1886,121 @@ impl App {
         Ok(())
     }
 
+    fn undo_trash_selected_session(&mut self) -> Result<()> {
+        let Some(hit) = self.selected_hit() else {
+            return Ok(());
+        };
+        if !hit.session.trashed {
+            return Ok(());
+        }
+        let Some(target) = hit.session.original_path.clone() else {
+            self.statusline = Some(statusline::Entry::failed(
+                "cannot restore trash item: original path is unknown",
+            ));
+            return Ok(());
+        };
+        let Some(parent) = target.parent().map(Path::to_path_buf) else {
+            self.statusline = Some(statusline::Entry::failed(
+                "cannot restore trash item: original path has no parent directory",
+            ));
+            return Ok(());
+        };
+
+        if !parent.exists() {
+            self.overlay = Overlay::ConfirmRestore(RestorePrompt {
+                hit,
+                target,
+                kind: RestorePromptKind::CreateParent,
+            });
+            return Ok(());
+        }
+        if target.is_dir() {
+            self.overlay = Overlay::RestoreBlocked(RestoreBlockedDialog { target });
+            return Ok(());
+        }
+        if target.is_file() {
+            self.overlay = Overlay::ConfirmRestore(RestorePrompt {
+                hit,
+                target,
+                kind: RestorePromptKind::OverwriteFile,
+            });
+            return Ok(());
+        }
+
+        self.restore_trashed_session(RestorePrompt {
+            hit,
+            target,
+            kind: RestorePromptKind::OverwriteFile,
+        })
+    }
+
+    fn restore_trashed_session(&mut self, prompt: RestorePrompt) -> Result<()> {
+        let source = prompt.hit.session.file_path.clone();
+        let target = prompt.target;
+        let parent = target.parent().with_context(|| {
+            format!(
+                "restore target {} has no parent directory",
+                target.display()
+            )
+        })?;
+
+        match prompt.kind {
+            RestorePromptKind::CreateParent => fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?,
+            RestorePromptKind::OverwriteFile => {}
+        }
+
+        if target.is_dir() {
+            bail!("cannot restore over directory {}", target.display());
+        }
+        if target.exists() && !target.is_file() {
+            bail!("cannot restore over non-file {}", target.display());
+        }
+
+        fs::copy(&source, &target).with_context(|| {
+            format!(
+                "failed to restore {} to {}",
+                source.display(),
+                target.display()
+            )
+        })?;
+        fs::remove_file(&source).with_context(|| {
+            format!("failed to remove restored trash item {}", source.display())
+        })?;
+
+        self.results
+            .retain(|result| result.session.file_path != source);
+        if self.selected >= self.results.len() {
+            self.selected = self.results.len().saturating_sub(1);
+        }
+        self.preview_scroll = 0;
+        self.preview_cache.remove(&source);
+        self.hidden_deleted_paths.insert(source.clone());
+        self.preview_render_cache = None;
+        self.cancel_pending_searches();
+
+        match self
+            .manager
+            .sync_with_roots_best_effort(&self.roots, false)?
+        {
+            SyncOutcome::Completed(_) => {
+                self.statusline = Some(statusline::Entry::completed(format!(
+                    "restored {}",
+                    file_label(&target)
+                )));
+                self.trigger_search_now()?;
+            }
+            SyncOutcome::Busy => {
+                self.statusline = Some(statusline::Entry::completed(format!(
+                    "restored {} · index refresh deferred",
+                    file_label(&target)
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     fn export_selected_session(&mut self) -> Result<()> {
         let Some(session) = self.selected_preview().cloned() else {
             bail!("no session selected");
@@ -1887,17 +2014,18 @@ impl App {
         Ok(())
     }
 
-    fn delete_selected_session(&mut self) -> Result<()> {
+    fn delete_selected_session(&mut self, mode: DeleteMode) -> Result<()> {
         let Some(hit) = self.selected_hit() else {
             return Ok(());
         };
         debug!(
-            "delete_selected_session selected={} results_before={} path={}",
+            "delete_selected_session selected={} results_before={} mode={:?} path={}",
             self.selected,
             self.results.len(),
+            mode,
             hit.session.file_path.display()
         );
-        let file_already_missing = match fs::remove_file(&hit.session.file_path) {
+        let file_already_missing = match self.delete_file_for_mode(&hit, mode) {
             Ok(()) => false,
             Err(error) if error.kind() == io::ErrorKind::NotFound => true,
             Err(error) => {
@@ -1924,7 +2052,10 @@ impl App {
             self.results.len(),
             self.hidden_deleted_paths.len()
         );
-        match self.manager.sync_best_effort(false)? {
+        match self
+            .manager
+            .sync_with_roots_best_effort(&self.roots, false)?
+        {
             SyncOutcome::Completed(_) => {
                 debug!(
                     "delete_selected_session sync_completed path={}",
@@ -1936,7 +2067,7 @@ impl App {
                         file_label(&hit.session.file_path)
                     )
                 } else {
-                    format!("deleted {}", file_label(&hit.session.file_path))
+                    delete_status_label(mode, &hit.session.file_path, false, hit.session.trashed)
                 }));
             }
             SyncOutcome::Busy => {
@@ -1951,13 +2082,32 @@ impl App {
                     )
                 } else {
                     format!(
-                        "deleted {} · index refresh deferred",
-                        file_label(&hit.session.file_path)
+                        "{} · index refresh deferred",
+                        delete_status_label(
+                            mode,
+                            &hit.session.file_path,
+                            false,
+                            hit.session.trashed
+                        )
                     )
                 }));
             }
         }
         Ok(())
+    }
+
+    fn delete_file_for_mode(&self, hit: &SearchHit, mode: DeleteMode) -> io::Result<()> {
+        if matches!(mode, DeleteMode::Trash) && !hit.session.trashed {
+            let Some(paths) = self.roots.trash.clone() else {
+                return fs::remove_file(&hit.session.file_path);
+            };
+            return TrashStore::new(paths)
+                .trash_file(&hit.session.file_path, hit.session.agent)
+                .map(|_| ())
+                .map_err(io::Error::other);
+        }
+
+        fs::remove_file(&hit.session.file_path)
     }
 
     fn copy_to_clipboard(&mut self, value: &str, label: &str) -> Result<()> {
@@ -1966,12 +2116,16 @@ impl App {
         Ok(())
     }
 
-    fn render_delete_confirm(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    fn render_delete_confirm(
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        hit: Option<&SearchHit>,
+        mode: DeleteMode,
+    ) {
         let popup = layout::centered_rect(area, 44, 20);
         frame.render_widget(Clear, popup);
-        let hit = self.selected_hit();
         let title = hit
-            .as_ref()
             .map(|hit| {
                 session_display_title(
                     hit.session.agent,
@@ -1982,11 +2136,11 @@ impl App {
             .unwrap_or_else(|| "selected session".to_owned());
         let paragraph = Paragraph::new(vec![
             Line::from(Span::styled(
-                format!("Delete {title}?"),
+                confirm_delete_title(mode, &title),
                 Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
-                "This removes the JSONL file and refreshes the index.",
+                confirm_delete_description(mode),
                 Style::default().fg(theme.muted),
             )),
             Line::from(vec![
@@ -2013,6 +2167,122 @@ impl App {
                 .border_type(BorderType::Rounded)
                 .border_style(theme.border_style(true))
                 .title(block_title("Confirm Delete")),
+        );
+        frame.render_widget(paragraph, popup);
+    }
+
+    fn render_restore_confirm(
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        prompt: &RestorePrompt,
+    ) {
+        let popup = layout::centered_rect(area, 58, 22);
+        frame.render_widget(Clear, popup);
+        let (summary, action) = match prompt.kind {
+            RestorePromptKind::CreateParent => (
+                format!(
+                    "Create {} and restore the session?",
+                    prompt
+                        .target
+                        .parent()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| prompt.target.display().to_string())
+                ),
+                "create",
+            ),
+            RestorePromptKind::OverwriteFile => (
+                format!("Overwrite {}?", prompt.target.display()),
+                "overwrite",
+            ),
+        };
+        let paragraph = Paragraph::new(vec![
+            Line::from(Span::styled(
+                summary,
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!("Restore from {}", prompt.hit.session.file_path.display()),
+                Style::default().fg(theme.muted),
+            )),
+            Line::default(),
+            Line::from(vec![
+                Span::styled("Press ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    "Enter",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" to {action} or "),
+                    Style::default().fg(theme.muted),
+                ),
+                Span::styled(
+                    "Esc",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" to cancel.", Style::default().fg(theme.muted)),
+            ]),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme.border_style(true))
+                .title(block_title("Undo Trash")),
+        );
+        frame.render_widget(paragraph, popup);
+    }
+
+    fn render_restore_blocked(
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        dialog: &RestoreBlockedDialog,
+    ) {
+        let popup = layout::centered_rect(area, 58, 20);
+        frame.render_widget(Clear, popup);
+        let paragraph = Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Cannot restore over a directory",
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!("Target: {}", dialog.target.display()),
+                Style::default().fg(theme.muted),
+            )),
+            Line::from(Span::styled(
+                "Remove or rename that directory, then try undo trash again.",
+                Style::default().fg(theme.muted),
+            )),
+            Line::default(),
+            Line::from(vec![
+                Span::styled("Press ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    "Enter",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" or ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    "Esc",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" to close.", Style::default().fg(theme.muted)),
+            ]),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme.border_style(true))
+                .title(block_title("Undo Trash")),
         );
         frame.render_widget(paragraph, popup);
     }
@@ -2172,6 +2442,33 @@ fn file_label(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+fn delete_status_label(mode: DeleteMode, path: &Path, missing: bool, trashed: bool) -> String {
+    if missing {
+        return format!("removed missing session {}", file_label(path));
+    }
+    match mode {
+        DeleteMode::Trash if trashed => format!("deleted {} from Trash", file_label(path)),
+        DeleteMode::Trash => format!("moved {} to Trash", file_label(path)),
+        DeleteMode::Immediate => format!("deleted {}", file_label(path)),
+    }
+}
+
+fn confirm_delete_title(mode: DeleteMode, title: &str) -> String {
+    match mode {
+        DeleteMode::Trash => format!("Move {title} to Trash?"),
+        DeleteMode::Immediate => format!("Delete {title} immediately?"),
+    }
+}
+
+fn confirm_delete_description(mode: DeleteMode) -> &'static str {
+    match mode {
+        DeleteMode::Trash => {
+            "This copies the JSONL file to Trash, records metadata, then removes the original."
+        }
+        DeleteMode::Immediate => "This permanently removes the JSONL file and refreshes the index.",
+    }
 }
 
 fn load_summary_sources(agent: Agent, path: &Path) -> SummarySources {
@@ -2442,11 +2739,12 @@ mod tests {
         write_session_export, ActionMenuState, App, AppExit, SearchResponse, SearchWorker,
         PAGE_STEP,
     };
-    use crate::scan::AgentHomes;
+    use crate::scan::{AgentHomes, SessionRoots};
     use crate::summary::{
         AicsSummaryPreview, ClaudeAutosummaryPreview, Fingerprint, SummarizeBackend,
         SummarySidecar, SummarySources, SummaryWorker,
     };
+    use crate::trash::TrashPaths;
 
     #[test]
     fn builds_resume_commands_for_both_agents() {
@@ -2596,84 +2894,27 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_x_then_v_opens_viewer() {
+    fn ctrl_d_moves_selected_session_to_trash_without_confirmation() {
+        let temp = TempDir::new().unwrap();
+        let data_root = temp.path().join("data");
+        let source = temp.path().join("session.jsonl");
+        fs::write(&source, "{}\n").unwrap();
         let mut app = test_app();
-        app.results = vec![sample_hit(Agent::Claude)];
+        app.roots.trash = Some(TrashPaths::from_data_root(&data_root));
+        app.results = vec![sample_hit_with_path(Agent::Claude, source.clone())];
 
-        app.handle_key(crossterm_key_mods(
-            KeyCode::Char('x'),
-            KeyModifiers::CONTROL,
-        ))
-        .unwrap();
-        app.handle_key(crossterm_key(KeyCode::Char('v'))).unwrap();
-
-        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
-    }
-
-    #[test]
-    fn ctrl_x_then_d_opens_delete_confirmation() {
-        let mut app = test_app();
-        app.results = vec![sample_hit(Agent::Claude)];
-
-        app.handle_key(crossterm_key_mods(
-            KeyCode::Char('x'),
-            KeyModifiers::CONTROL,
-        ))
-        .unwrap();
-        app.handle_key(crossterm_key(KeyCode::Char('d'))).unwrap();
-
-        assert!(matches!(app.overlay, super::Overlay::ConfirmDelete));
-    }
-
-    #[test]
-    fn ctrl_x_then_ctrl_d_opens_delete_confirmation() {
-        let mut app = test_app();
-        app.results = vec![sample_hit(Agent::Claude)];
-
-        app.handle_key(crossterm_key_mods(
-            KeyCode::Char('x'),
-            KeyModifiers::CONTROL,
-        ))
-        .unwrap();
         app.handle_key(crossterm_key_mods(
             KeyCode::Char('d'),
             KeyModifiers::CONTROL,
         ))
         .unwrap();
 
-        assert!(!app.pending_main_menu_action);
-        assert!(matches!(app.overlay, super::Overlay::ConfirmDelete));
-    }
-
-    #[test]
-    fn ctrl_x_then_ctrl_g_cancels_prefix_and_toggles_scope() {
-        let mut app = test_app();
-        app.results = vec![sample_hit(Agent::Claude)];
-        app.scope = Scope::Global;
-        let (expected_local_path, expected_local_canonical) = match &app.local_scope {
-            Scope::CurrentDir(path, canonical) => (path.clone(), canonical.clone()),
-            Scope::Global => panic!("test app should have a local cwd scope"),
-        };
-
-        app.handle_key(crossterm_key_mods(
-            KeyCode::Char('x'),
-            KeyModifiers::CONTROL,
-        ))
-        .unwrap();
-        app.handle_key(crossterm_key_mods(
-            KeyCode::Char('g'),
-            KeyModifiers::CONTROL,
-        ))
-        .unwrap();
-
-        assert!(!app.pending_main_menu_action);
-        match &app.scope {
-            Scope::CurrentDir(path, canonical) => {
-                assert_eq!(path, &expected_local_path);
-                assert_eq!(canonical, &expected_local_canonical);
-            }
-            Scope::Global => panic!("scope should switch to local"),
-        }
+        assert!(matches!(app.overlay, super::Overlay::None));
+        assert!(!source.exists());
+        let trash_entries = fs::read_dir(data_root.join("trash")).unwrap().count();
+        assert_eq!(trash_entries, 1);
+        let metadata = fs::read_to_string(data_root.join("trash.jsonl")).unwrap();
+        assert!(metadata.contains("\"tn\":\"claude\""));
     }
 
     #[test]
@@ -2811,37 +3052,23 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_x_then_v_keeps_viewer_open_when_viewer_is_visible() {
+    fn ctrl_d_from_viewer_deletes_and_closes_viewer() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("session.jsonl");
+        fs::write(&source, "{}\n").unwrap();
         let mut app = test_app();
-        app.results = vec![sample_hit(Agent::Claude)];
+        app.results = vec![sample_hit_with_path(Agent::Claude, source.clone())];
         app.open_viewer();
 
         app.handle_key(crossterm_key_mods(
-            KeyCode::Char('x'),
+            KeyCode::Char('d'),
             KeyModifiers::CONTROL,
         ))
         .unwrap();
-        app.handle_key(crossterm_key(KeyCode::Char('v'))).unwrap();
 
-        assert!(!app.pending_main_menu_action);
-        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
-    }
-
-    #[test]
-    fn ctrl_x_then_d_from_viewer_opens_delete_confirmation() {
-        let mut app = test_app();
-        app.results = vec![sample_hit(Agent::Claude)];
-        app.open_viewer();
-
-        app.handle_key(crossterm_key_mods(
-            KeyCode::Char('x'),
-            KeyModifiers::CONTROL,
-        ))
-        .unwrap();
-        app.handle_key(crossterm_key(KeyCode::Char('d'))).unwrap();
-
-        assert!(!app.pending_main_menu_action);
-        assert!(matches!(app.overlay, super::Overlay::ConfirmDelete));
+        assert!(matches!(app.overlay, super::Overlay::None));
+        assert!(!source.exists());
+        assert!(app.results.is_empty());
     }
 
     #[test]
@@ -3029,7 +3256,7 @@ mod tests {
     fn double_clicking_action_menu_item_runs_it() {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude)];
-        app.overlay = super::Overlay::Actions(ActionMenuState::new());
+        app.overlay = super::Overlay::Actions(ActionMenuState::new(false));
 
         let list = crate::tui::actions::list_area(Rect::new(0, 0, 120, 30));
         let row = list.y;
@@ -3261,7 +3488,8 @@ mod tests {
         app.results = vec![sample_hit_with_path(Agent::Claude, missing_path.clone())];
         app.selected = 0;
 
-        app.delete_selected_session().unwrap();
+        app.delete_selected_session(super::DeleteMode::Trash)
+            .unwrap();
 
         assert!(app.results.is_empty());
         assert_eq!(app.selected_index(), None);
@@ -3286,7 +3514,8 @@ mod tests {
         app.latest_search_id = Some(4);
         app.next_search_id = 5;
 
-        app.delete_selected_session().unwrap();
+        app.delete_selected_session(super::DeleteMode::Trash)
+            .unwrap();
 
         assert!(app.results.is_empty());
         assert!(!app.pending_search);
@@ -3360,6 +3589,107 @@ mod tests {
     }
 
     #[test]
+    fn undo_trash_prompts_to_create_missing_parent_and_restores_on_enter() {
+        let temp = TempDir::new().unwrap();
+        let trash_source = temp.path().join("data/trash/session.jsonl");
+        let target = temp.path().join("restore/session.jsonl");
+        fs::create_dir_all(trash_source.parent().unwrap()).unwrap();
+        fs::write(&trash_source, "{}\n").unwrap();
+        let mut app = test_app();
+        app.roots.trash = Some(TrashPaths::from_data_root(temp.path().join("data")));
+        app.results = vec![sample_trashed_hit_with_paths(
+            Agent::Claude,
+            trash_source.clone(),
+            target.clone(),
+        )];
+
+        app.run_session_action(super::SessionAction::UndoTrash)
+            .unwrap();
+
+        assert!(matches!(
+            app.overlay,
+            super::Overlay::ConfirmRestore(super::RestorePrompt {
+                kind: super::RestorePromptKind::CreateParent,
+                ..
+            })
+        ));
+
+        app.handle_overlay_key(crossterm_key(KeyCode::Enter))
+            .unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::None));
+        assert!(target.exists());
+        assert!(!trash_source.exists());
+        assert!(app.results.is_empty());
+    }
+
+    #[test]
+    fn undo_trash_prompts_before_overwriting_existing_file() {
+        let temp = TempDir::new().unwrap();
+        let trash_source = temp.path().join("data/trash/session.jsonl");
+        let target = temp.path().join("restore/session.jsonl");
+        fs::create_dir_all(trash_source.parent().unwrap()).unwrap();
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&trash_source, "new\n").unwrap();
+        fs::write(&target, "old\n").unwrap();
+        let mut app = test_app();
+        app.roots.trash = Some(TrashPaths::from_data_root(temp.path().join("data")));
+        app.results = vec![sample_trashed_hit_with_paths(
+            Agent::Claude,
+            trash_source.clone(),
+            target.clone(),
+        )];
+
+        app.run_session_action(super::SessionAction::UndoTrash)
+            .unwrap();
+
+        assert!(matches!(
+            app.overlay,
+            super::Overlay::ConfirmRestore(super::RestorePrompt {
+                kind: super::RestorePromptKind::OverwriteFile,
+                ..
+            })
+        ));
+
+        app.handle_overlay_key(crossterm_key(KeyCode::Enter))
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+        assert!(!trash_source.exists());
+    }
+
+    #[test]
+    fn undo_trash_blocks_when_original_path_is_directory() {
+        let temp = TempDir::new().unwrap();
+        let trash_source = temp.path().join("data/trash/session.jsonl");
+        let target = temp.path().join("restore/session.jsonl");
+        fs::create_dir_all(trash_source.parent().unwrap()).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(&trash_source, "{}\n").unwrap();
+        let mut app = test_app();
+        app.results = vec![sample_trashed_hit_with_paths(
+            Agent::Claude,
+            trash_source.clone(),
+            target.clone(),
+        )];
+
+        app.run_session_action(super::SessionAction::UndoTrash)
+            .unwrap();
+
+        assert!(matches!(
+            app.overlay,
+            super::Overlay::RestoreBlocked(super::RestoreBlockedDialog { .. })
+        ));
+
+        app.handle_overlay_key(crossterm_key(KeyCode::Enter))
+            .unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::None));
+        assert!(trash_source.exists());
+        assert!(target.is_dir());
+    }
+
+    #[test]
     fn export_rejects_windows_reserved_titles() {
         let mut hit = sample_hit(Agent::Claude);
         hit.session.custom_title = Some("NUL".to_owned());
@@ -3399,7 +3729,7 @@ mod tests {
             Agent::Claude,
             temp.path().to_path_buf(),
         )];
-        app.overlay = super::Overlay::ConfirmDelete;
+        app.overlay = super::Overlay::ConfirmDelete(super::DeleteMode::Immediate);
 
         app.handle_overlay_key(crossterm_key(KeyCode::Char('y')))
             .unwrap();
@@ -3461,6 +3791,7 @@ mod tests {
                 },
                 Settings::default(),
                 sample_homes(),
+                sample_roots(temp.path()),
             ),
             response_tx,
         )
@@ -3470,6 +3801,14 @@ mod tests {
         AgentHomes {
             claude_home: PathBuf::from("/tmp/claude-home"),
             codex_home: PathBuf::from("/tmp/codex-home"),
+        }
+    }
+
+    fn sample_roots(base: &std::path::Path) -> SessionRoots {
+        SessionRoots {
+            claude_projects: base.join(".claude/projects"),
+            codex_sessions: base.join(".codex/sessions"),
+            trash: None,
         }
     }
 
@@ -3521,11 +3860,24 @@ mod tests {
                 is_sidechain: false,
                 custom_title: None,
                 session_info: None,
+                trashed: false,
+                original_path: None,
             },
             snippet_html: String::new(),
             score: 0.0,
             is_live: false,
         }
+    }
+
+    fn sample_trashed_hit_with_paths(
+        agent: Agent,
+        file_path: PathBuf,
+        original_path: PathBuf,
+    ) -> SearchHit {
+        let mut hit = sample_hit_with_path(agent, file_path);
+        hit.session.trashed = true;
+        hit.session.original_path = Some(original_path);
+        hit
     }
 
     fn sample_session_for_export(stem: &str) -> crate::parse::Session {
