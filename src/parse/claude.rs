@@ -439,11 +439,60 @@ fn extract_nested_text(value: &Value) -> Option<String> {
 
 fn normalize_claude_text(text: &str) -> String {
     let trimmed = text.trim();
-    if trimmed.contains('<') && trimmed.contains('>') && trimmed.contains("</") {
+    if is_claude_wrapper_markup(trimmed) {
         return strip_xml_tags(trimmed);
     }
 
     trimmed.to_owned()
+}
+
+fn is_claude_wrapper_markup(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('<') {
+        return false;
+    }
+
+    let mut saw_tag = false;
+    let mut rest = trimmed;
+    while let Some(start) = rest.find('<') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find('>') else {
+            return false;
+        };
+        let tag = rest[..end].trim();
+        rest = &rest[end + 1..];
+
+        if tag.is_empty() || tag.starts_with('!') || tag.starts_with('?') {
+            return false;
+        }
+
+        let tag_name = tag
+            .trim_start_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        if !is_claude_wrapper_tag(tag_name) {
+            return false;
+        }
+        saw_tag = true;
+    }
+
+    saw_tag
+}
+
+fn is_claude_wrapper_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "bash-input"
+            | "bash-stderr"
+            | "bash-stdout"
+            | "command-args"
+            | "command-message"
+            | "command-name"
+            | "local-command-caveat"
+            | "local-command-stderr"
+            | "local-command-stdout"
+    )
 }
 
 fn strip_xml_tags(text: &str) -> String {
@@ -488,5 +537,41 @@ fn stringify_json(value: &Value) -> String {
     match value {
         Value::String(text) => normalize_claude_text(text),
         _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_claude_text;
+
+    #[test]
+    fn normalizes_claude_local_command_wrappers() {
+        let text = "<local-command-stdout>Bye!</local-command-stdout>";
+
+        assert_eq!(normalize_claude_text(text), "Bye!");
+    }
+
+    #[test]
+    fn preserves_markdown_newlines_when_body_contains_xml_diff() {
+        let text = concat!(
+            "# Git Commit - Stage All Mode\n\n",
+            "## Global Instructions\n\n",
+            "Identity: `Mike Clark <mevanlc@gmail.com>`\n\n",
+            "# Diff\n\n",
+            "```diff\n",
+            "+<mxfile host=\"hand-authored\">\n",
+            "+  <diagram name=\"example\">\n",
+            "+  </diagram>\n",
+            "+</mxfile>\n",
+            "```\n\n",
+            "# Instructions\n\n",
+            "Keep formatting intact.\n"
+        );
+
+        let normalized = normalize_claude_text(text);
+
+        assert_eq!(normalized, text.trim());
+        assert!(normalized.contains("\n\n## Global Instructions\n\n"));
+        assert!(normalized.contains("+</mxfile>\n```\n\n# Instructions"));
     }
 }
