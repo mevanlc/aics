@@ -140,6 +140,11 @@ struct PreviewRenderCache {
     sticky_rows: Vec<StickyRowMarker>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PreviewResizeDrag {
+    areas: layout::AppLayout,
+}
+
 pub struct PreviewRenderState<'a> {
     pub text: &'a Text<'static>,
     pub max_scroll: usize,
@@ -287,6 +292,7 @@ pub struct App {
     roots: SessionRoots,
     pending_list_click: Option<PendingListClick>,
     pending_action_menu_click: Option<PendingListClick>,
+    preview_resize_drag: Option<PreviewResizeDrag>,
     viewer_before_actions: Option<ViewerState>,
 }
 
@@ -368,6 +374,7 @@ impl App {
             roots,
             pending_list_click: None,
             pending_action_menu_click: None,
+            preview_resize_drag: None,
             viewer_before_actions: None,
         }
     }
@@ -1051,7 +1058,11 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if contains(areas.list, mouse.column, mouse.row) {
+                if preview_divider_hit(areas, mouse.column, mouse.row) {
+                    self.pending_list_click = None;
+                    self.preview_resize_drag = Some(PreviewResizeDrag { areas });
+                    self.resize_preview_to_column(areas, mouse.column, false);
+                } else if contains(areas.list, mouse.column, mouse.row) {
                     if let Some(index) = self.list_index_at(areas.list, mouse.row) {
                         self.select_absolute(index);
                         let now = Instant::now();
@@ -1070,9 +1081,20 @@ impl App {
                     self.pending_list_click = None;
                 }
             }
-            MouseEventKind::Up(MouseButton::Left) => {}
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.pending_list_click = None;
+                if let Some(drag) = self.preview_resize_drag {
+                    self.resize_preview_to_column(drag.areas, mouse.column, false);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.preview_resize_drag.take().is_some() {
+                    self.save_layout_prefs();
+                }
+            }
             MouseEventKind::Down(MouseButton::Right) => {
                 self.pending_list_click = None;
+                self.preview_resize_drag = None;
                 if contains(areas.list, mouse.column, mouse.row) {
                     if let Some(index) = self.list_index_at(areas.list, mouse.row) {
                         self.select_absolute(index);
@@ -1082,6 +1104,7 @@ impl App {
             }
             MouseEventKind::ScrollDown => {
                 self.pending_list_click = None;
+                self.preview_resize_drag = None;
                 if contains(areas.list, mouse.column, mouse.row) {
                     self.move_selection(LIST_MOUSE_SCROLL_STEP);
                 } else if areas
@@ -1094,6 +1117,7 @@ impl App {
             }
             MouseEventKind::ScrollUp => {
                 self.pending_list_click = None;
+                self.preview_resize_drag = None;
                 if contains(areas.list, mouse.column, mouse.row) {
                     self.move_selection(-LIST_MOUSE_SCROLL_STEP);
                 } else if areas
@@ -1106,6 +1130,7 @@ impl App {
             }
             _ => {
                 self.pending_list_click = None;
+                self.preview_resize_drag = None;
             }
         }
         Ok(())
@@ -1755,8 +1780,35 @@ impl App {
     fn resize_preview(&mut self, delta: i16) {
         let next = (self.preview_width_pct as i16 + delta)
             .clamp(PREVIEW_WIDTH_MIN as i16, PREVIEW_WIDTH_MAX as i16);
-        self.preview_width_pct = next as u16;
+        self.set_preview_width_pct(next as u16);
         self.save_layout_prefs();
+    }
+
+    fn resize_preview_to_column(
+        &mut self,
+        areas: layout::AppLayout,
+        divider_column: u16,
+        save: bool,
+    ) {
+        let Some(preview) = areas.preview else {
+            return;
+        };
+        let body_width = areas.list.width.saturating_add(preview.width);
+        if body_width == 0 {
+            return;
+        }
+
+        let body_right = areas.list.x.saturating_add(body_width);
+        let preview_width = body_right.saturating_sub(divider_column);
+        let next = ((preview_width as u32 * 100) + (body_width as u32 / 2)) / body_width as u32;
+        self.set_preview_width_pct(next as u16);
+        if save {
+            self.save_layout_prefs();
+        }
+    }
+
+    fn set_preview_width_pct(&mut self, width_pct: u16) {
+        self.preview_width_pct = width_pct.clamp(PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX);
     }
 
     fn save_layout_prefs(&mut self) {
@@ -2436,6 +2488,14 @@ fn install_panic_hook() {
 
 fn contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
+}
+
+fn preview_divider_hit(areas: layout::AppLayout, column: u16, row: u16) -> bool {
+    let Some(preview) = areas.preview else {
+        return false;
+    };
+    let in_body_row = row >= areas.list.y && row < areas.list.bottom();
+    in_body_row && (column == areas.list.right().saturating_sub(1) || column == preview.x)
 }
 
 fn file_label(path: &Path) -> String {
@@ -3228,6 +3288,79 @@ mod tests {
         .unwrap();
 
         assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+    }
+
+    #[test]
+    fn dragging_preview_divider_resizes_preview_without_selecting_list_item() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude), sample_hit(Agent::Codex)];
+        app.selected = 1;
+        app.preview_width_pct = 50;
+        app.last_layout = Some(layout::AppLayout {
+            search: Rect::new(0, 0, 120, 3),
+            list: Rect::new(0, 3, 60, 20),
+            preview: Some(Rect::new(60, 3, 60, 20)),
+            status: Rect::new(0, 23, 120, 2),
+        });
+
+        let row = app.last_layout.as_ref().unwrap().list.y + 2;
+        app.handle_mouse(crossterm_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            59,
+            row,
+        ))
+        .unwrap();
+        app.handle_mouse(crossterm_mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            72,
+            row,
+        ))
+        .unwrap();
+        app.handle_mouse(crossterm_mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            72,
+            row,
+        ))
+        .unwrap();
+
+        assert_eq!(app.preview_width_pct, 40);
+        assert_eq!(app.settings.preview_width_pct, 40);
+        assert_eq!(app.selected, 1);
+        assert!(app.preview_resize_drag.is_none());
+    }
+
+    #[test]
+    fn dragging_preview_divider_clamps_to_supported_widths() {
+        let mut app = test_app();
+        app.last_layout = Some(layout::AppLayout {
+            search: Rect::new(0, 0, 120, 3),
+            list: Rect::new(0, 3, 60, 20),
+            preview: Some(Rect::new(60, 3, 60, 20)),
+            status: Rect::new(0, 23, 120, 2),
+        });
+
+        let row = app.last_layout.as_ref().unwrap().list.y + 2;
+        app.handle_mouse(crossterm_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            60,
+            row,
+        ))
+        .unwrap();
+        app.handle_mouse(crossterm_mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            0,
+            row,
+        ))
+        .unwrap();
+        assert_eq!(app.preview_width_pct, 75);
+
+        app.handle_mouse(crossterm_mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            119,
+            row,
+        ))
+        .unwrap();
+        assert_eq!(app.preview_width_pct, 25);
     }
 
     #[test]
