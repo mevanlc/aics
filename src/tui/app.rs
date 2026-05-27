@@ -609,20 +609,36 @@ impl App {
     }
 
     pub fn list_snippet_line(&mut self, hit: &SearchHit, theme: &Theme) -> Line<'static> {
-        if let Some(snippet) = self.active_summary_snippet_text(hit) {
-            return Line::from(highlight_spans(
+        let mut line = if let Some(snippet) = self.active_summary_snippet_text(hit) {
+            Line::from(highlight_spans(
                 &snippet,
                 &self.committed_query,
                 Style::default().fg(theme.text),
                 theme.search_match_style(),
-            ));
+            ))
+        } else {
+            parse_highlighted_html(
+                &hit.snippet_html,
+                Style::default().fg(theme.text),
+                theme.search_match_style(),
+            )
+        };
+
+        if hit.session.agent == Agent::Codex {
+            if let Some(title) = hit.session.custom_title.as_deref().map(str::trim) {
+                if !title.is_empty() {
+                    let title_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
+                    let highlight_style = title_style.patch(theme.search_match_style());
+                    let mut spans =
+                        highlight_spans(title, &self.committed_query, title_style, highlight_style);
+                    spans.push(Span::styled(": ", Style::default().fg(theme.muted)));
+                    spans.append(&mut line.spans);
+                    line = Line::from(spans);
+                }
+            }
         }
 
-        parse_highlighted_html(
-            &hit.snippet_html,
-            Style::default().fg(theme.text),
-            theme.search_match_style(),
-        )
+        line
     }
 
     fn active_summary_snippet_text(&mut self, hit: &SearchHit) -> Option<String> {
@@ -2178,13 +2194,7 @@ impl App {
         let popup = layout::centered_rect(area, 44, 20);
         frame.render_widget(Clear, popup);
         let title = hit
-            .map(|hit| {
-                session_display_title(
-                    hit.session.agent,
-                    &hit.session.project,
-                    hit.session.custom_title.as_deref(),
-                )
-            })
+            .map(|hit| session_display_title(hit.session.agent, &hit.session.project))
             .unwrap_or_else(|| "selected session".to_owned());
         let paragraph = Paragraph::new(vec![
             Line::from(Span::styled(
@@ -3611,6 +3621,29 @@ mod tests {
             app.active_summary_snippet_text(&hit).as_deref(),
             Some("Only AICS body")
         );
+    }
+
+    #[test]
+    fn codex_custom_title_prefixes_snippet_instead_of_replacing_project_title() {
+        let mut app = test_app();
+        app.committed_query = "title".to_owned();
+        let mut hit = sample_hit(Agent::Codex);
+        hit.session.custom_title = Some("Named title".to_owned());
+        hit.snippet_html = "body text".to_owned();
+
+        let line = app.list_snippet_line(&hit, &crate::tui::theme::Theme::default());
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered, "Named title: body text");
+        assert!(line.spans[0]
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD));
+        assert_eq!(crate::tui::util::list_title(&hit), "/tmp/demo");
     }
 
     #[test]

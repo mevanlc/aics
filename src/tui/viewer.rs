@@ -532,11 +532,7 @@ fn viewer_title(
     scroll_percent: usize,
 ) -> Line<'static> {
     let (badge, badge_color) = agent_badge(session.agent, theme);
-    let mut title = abbreviate_home_path(&session_display_title(
-        session.agent,
-        &session.project,
-        session.custom_title.as_deref(),
-    ));
+    let mut title = abbreviate_home_path(&session_display_title(session.agent, &session.project));
     if trashed {
         title = format!("trashed · {title}");
     }

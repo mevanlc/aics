@@ -147,7 +147,6 @@ pub fn list_title(hit: &SearchHit) -> String {
     let title = abbreviate_home_path(&session_display_title(
         hit.session.agent,
         &hit.session.project,
-        hit.session.custom_title.as_deref(),
     ));
     if hit.session.trashed {
         format!("trashed · {title}")
@@ -156,10 +155,10 @@ pub fn list_title(hit: &SearchHit) -> String {
     }
 }
 
-pub fn session_display_title(agent: Agent, project: &str, custom_title: Option<&str>) -> String {
+pub fn session_display_title(agent: Agent, project: &str) -> String {
     match agent {
         Agent::Claude => project.to_owned(),
-        Agent::Codex => custom_title.unwrap_or(project).to_owned(),
+        Agent::Codex => project.to_owned(),
     }
 }
 
@@ -745,24 +744,18 @@ mod tests {
 
     #[test]
     fn claude_display_title_ignores_custom_slug() {
-        let title = session_display_title(
-            crate::parse::Agent::Claude,
-            "/Users/testuser/projects/aics",
-            Some("memoized-booping-oasis"),
-        );
+        let title =
+            session_display_title(crate::parse::Agent::Claude, "/Users/testuser/projects/aics");
 
         assert_eq!(title, "/Users/testuser/projects/aics");
     }
 
     #[test]
-    fn codex_display_title_still_prefers_custom_title_when_present() {
-        let title = session_display_title(
-            crate::parse::Agent::Codex,
-            "/Users/testuser/projects/aics",
-            Some("hand-written-title"),
-        );
+    fn codex_display_title_uses_project_even_when_custom_title_is_present() {
+        let title =
+            session_display_title(crate::parse::Agent::Codex, "/Users/testuser/projects/aics");
 
-        assert_eq!(title, "hand-written-title");
+        assert_eq!(title, "/Users/testuser/projects/aics");
     }
 
     #[test]
