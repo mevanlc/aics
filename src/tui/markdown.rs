@@ -594,6 +594,39 @@ mod tests {
     }
 
     #[test]
+    fn query_highlighting_overrides_markdown_foreground() {
+        let theme = Theme::default();
+        let base = Style::default().fg(theme.text).bg(theme.bubble_user);
+        let text = render_markdown_message("# alpha", &theme, base, Some("alpha"));
+
+        let alpha = text.lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "alpha")
+            .expect("alpha span");
+
+        assert!(alpha.style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(alpha.style.fg, Some(theme.text));
+        assert_eq!(alpha.style.bg, Some(theme.search_match_bg));
+    }
+
+    #[test]
+    fn query_highlighting_overrides_code_syntax_foreground() {
+        let theme = Theme::default();
+        let base = Style::default().fg(theme.text).bg(theme.bubble_claude);
+        let text = render_markdown_message("```rust\nfn alpha() {}\n```", &theme, base, Some("fn"));
+
+        let keyword = text.lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "fn")
+            .expect("fn span");
+
+        assert_eq!(keyword.style.fg, Some(theme.text));
+        assert_eq!(keyword.style.bg, Some(theme.search_match_bg));
+    }
+
+    #[test]
     fn records_markdown_heading_line_indices_for_sticky_subjects() {
         let theme = Theme::default();
         let base = Style::default().fg(theme.text).bg(theme.bubble_user);

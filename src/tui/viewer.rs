@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::path::PathBuf;
 
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -52,6 +53,7 @@ struct ViewerRenderCache {
     summary_stamp: Option<(i64, usize, usize)>,
     total_rows: usize,
     text: Text<'static>,
+    match_rows: Vec<usize>,
     sticky_rows: Vec<StickyRowMarker>,
 }
 
@@ -245,17 +247,21 @@ impl ViewerState {
         let chunks = split_viewer(area);
         let body_area = chunks[0];
 
-        let (total_rows, mut text, sticky_rows) = {
+        let (total_rows, mut text, match_rows, sticky_rows) = {
             let cache = self.render_cache(area, session, summary, theme, theme_name);
             (
                 cache.total_rows,
                 cache.text.clone(),
+                cache.match_rows.clone(),
                 cache.sticky_rows.clone(),
             )
         };
-        if self.active_match.is_some() {
+        if let Some(active_match_row) = self
+            .active_match
+            .and_then(|index| match_rows.get(index).copied())
+        {
             let viewport_width = body_area.width.saturating_sub(2);
-            highlight_active_match(&mut text, self.scroll, viewport_width, theme);
+            highlight_active_match(&mut text, active_match_row, viewport_width, theme);
         }
         let viewport_height = body_area
             .height
@@ -353,10 +359,11 @@ impl ViewerState {
             return;
         };
 
-        let query = self.search.value();
         let body_area = Self::body_area(area);
-        let viewport_width = body_area.width.saturating_sub(2);
-        let matches = collect_match_rows(session, summary, theme, query, viewport_width);
+        let matches = self
+            .render_cache(area, session, summary, theme, theme_name)
+            .match_rows
+            .clone();
         if matches.is_empty() {
             self.active_match = None;
             return;
@@ -371,7 +378,10 @@ impl ViewerState {
 
         self.active_match = Some(next_index);
         let max_scroll = self.max_scroll(area, session, summary, theme, theme_name);
-        let viewport_height = body_area.height.saturating_sub(2) as usize;
+        let viewport_height = body_area
+            .height
+            .saturating_sub(2)
+            .saturating_sub(STICKY_HEADER_HEIGHT) as usize;
         self.scroll = scroll_for_match(matches[next_index], viewport_height, max_scroll);
     }
 
@@ -428,6 +438,7 @@ impl ViewerState {
             let document = render_viewer_document(session, summary, theme, highlight_query);
             let text = document.text;
             let total_rows = wrapped_text_height(&text, width).max(1);
+            let match_rows = collect_match_rows_in_text(&text, &query, width);
             let sticky_rows = sticky_rows_from_line_markers(&text, &document.sticky_markers, width);
             self.render_cache = Some(ViewerRenderCache {
                 path,
@@ -437,6 +448,7 @@ impl ViewerState {
                 summary_stamp,
                 total_rows,
                 text,
+                match_rows,
                 sticky_rows,
             });
         } else {
@@ -617,13 +629,14 @@ pub(crate) fn highlight_active_match(
     }
     let width = width as usize;
     let mut row_offset = 0usize;
+    let active_match_style = theme.active_match_style();
     for line in text.lines.iter_mut() {
         let h = wrapped_rendered_line_height(line, width);
         if active_row >= row_offset && active_row < row_offset + h {
             // This source line contains the active match row — promote highlights.
             for span in &mut line.spans {
                 if span.style.bg == Some(theme.search_match_bg) {
-                    span.style.bg = Some(theme.active_match_bg);
+                    span.style = span.style.patch(active_match_style);
                 }
             }
             return;
@@ -632,6 +645,7 @@ pub(crate) fn highlight_active_match(
     }
 }
 
+#[cfg(test)]
 fn collect_match_rows(
     session: &Session,
     summary: Option<&SummarySidecar>,
@@ -639,61 +653,9 @@ fn collect_match_rows(
     query: &str,
     width: u16,
 ) -> Vec<usize> {
-    let terms = extract_highlight_terms(query);
-    if terms.is_empty() || width == 0 {
-        return Vec::new();
-    }
-
-    let width = width as usize;
-    let mut rows = Vec::new();
-    let mut row_offset = 0usize;
-
-    if let Some(summary) = summary {
-        let rendered = render_summary_leadin(summary, theme, Some(query));
-        for line in &rendered.lines {
-            let content_line = line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>();
-            for relative_row in collect_line_match_rows(&content_line, width, &terms) {
-                let absolute_row = row_offset + relative_row;
-                if rows.last().copied() != Some(absolute_row) {
-                    rows.push(absolute_row);
-                }
-            }
-            row_offset += wrapped_rendered_line_height(line, width);
-        }
-        row_offset += 2;
-    }
-
-    for message in &session.messages {
-        row_offset += 1;
-        let rendered = render_message_body(
-            session.agent,
-            message.role,
-            message.content.as_str(),
-            theme,
-            Some(query),
-        );
-        for line in &rendered.lines {
-            let content_line = line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>();
-            for relative_row in collect_line_match_rows(&content_line, width, &terms) {
-                let absolute_row = row_offset + relative_row;
-                if rows.last().copied() != Some(absolute_row) {
-                    rows.push(absolute_row);
-                }
-            }
-            row_offset += wrapped_rendered_line_height(line, width);
-        }
-        row_offset += 1;
-    }
-
-    rows
+    let highlight_query = (!query.is_empty()).then_some(query);
+    let document = render_viewer_document(session, summary, theme, highlight_query);
+    collect_match_rows_in_text(&document.text, query, width)
 }
 
 pub(crate) fn collect_message_rows(
@@ -759,6 +721,7 @@ fn collect_line_match_rows(line: &str, width: usize, terms: &[String]) -> Vec<us
     }
 
     let lower = line.to_ascii_lowercase();
+    let wrapped_ranges = wrapped_line_byte_ranges(line, width);
     let mut rows = Vec::new();
     let mut index = 0usize;
 
@@ -771,7 +734,7 @@ fn collect_line_match_rows(line: &str, width: usize, terms: &[String]) -> Vec<us
         }
 
         if matched_len > 0 {
-            let row = UnicodeWidthStr::width(&line[..index]) / width;
+            let row = wrapped_row_for_match(&wrapped_ranges, index, index + matched_len);
             if rows.last().copied() != Some(row) {
                 rows.push(row);
             }
@@ -787,6 +750,128 @@ fn collect_line_match_rows(line: &str, width: usize, terms: &[String]) -> Vec<us
     }
 
     rows
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WrappedGrapheme {
+    start: usize,
+    end: usize,
+    width: usize,
+    is_whitespace: bool,
+}
+
+fn wrapped_line_byte_ranges(line: &str, width: usize) -> Vec<Range<usize>> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let mut rows = Vec::new();
+    let mut pending_line = Vec::new();
+    let mut line_width = 0usize;
+    let mut pending_word = Vec::new();
+    let mut word_width = 0usize;
+    let mut pending_whitespace = std::collections::VecDeque::<WrappedGrapheme>::new();
+    let mut whitespace_width = 0usize;
+    let mut non_whitespace_previous = false;
+
+    for (start, grapheme) in line.grapheme_indices(true) {
+        let symbol_width = UnicodeWidthStr::width(grapheme);
+        if symbol_width > width {
+            continue;
+        }
+
+        let grapheme = WrappedGrapheme {
+            start,
+            end: start + grapheme.len(),
+            width: symbol_width,
+            is_whitespace: is_wrapping_whitespace(grapheme),
+        };
+        let word_found = non_whitespace_previous && grapheme.is_whitespace;
+        let untrimmed_overflow =
+            pending_line.is_empty() && word_width + whitespace_width + grapheme.width > width;
+
+        if word_found || untrimmed_overflow {
+            pending_line.extend(pending_whitespace.drain(..));
+            line_width += whitespace_width;
+            pending_line.append(&mut pending_word);
+            line_width += word_width;
+
+            whitespace_width = 0;
+            word_width = 0;
+        }
+
+        let line_full = line_width >= width;
+        let pending_word_overflow =
+            grapheme.width > 0 && line_width + whitespace_width + word_width >= width;
+
+        if line_full || pending_word_overflow {
+            let mut remaining_width = width.saturating_sub(line_width);
+            push_wrapped_range(&mut rows, &pending_line);
+            pending_line.clear();
+            line_width = 0;
+
+            while let Some(grapheme) = pending_whitespace.front() {
+                if grapheme.width > remaining_width {
+                    break;
+                }
+
+                whitespace_width = whitespace_width.saturating_sub(grapheme.width);
+                remaining_width = remaining_width.saturating_sub(grapheme.width);
+                pending_whitespace.pop_front();
+            }
+
+            if grapheme.is_whitespace && pending_whitespace.is_empty() {
+                continue;
+            }
+        }
+
+        if grapheme.is_whitespace {
+            whitespace_width += grapheme.width;
+            pending_whitespace.push_back(grapheme);
+        } else {
+            word_width += grapheme.width;
+            pending_word.push(grapheme);
+        }
+
+        non_whitespace_previous = !grapheme.is_whitespace;
+    }
+
+    pending_line.extend(pending_whitespace);
+    pending_line.append(&mut pending_word);
+    if pending_line.is_empty() {
+        if rows.is_empty() {
+            rows.push(0..0);
+        }
+    } else {
+        push_wrapped_range(&mut rows, &pending_line);
+    }
+
+    rows
+}
+
+fn is_wrapping_whitespace(grapheme: &str) -> bool {
+    grapheme == "\u{200b}" || grapheme.chars().all(char::is_whitespace) && grapheme != "\u{00a0}"
+}
+
+fn push_wrapped_range(rows: &mut Vec<Range<usize>>, graphemes: &[WrappedGrapheme]) {
+    let Some(first) = graphemes.first() else {
+        rows.push(0..0);
+        return;
+    };
+    let start = first.start;
+    let end = graphemes
+        .last()
+        .map(|grapheme| grapheme.end)
+        .unwrap_or(first.end);
+    rows.push(start..end);
+}
+
+fn wrapped_row_for_match(ranges: &[Range<usize>], start: usize, end: usize) -> usize {
+    ranges
+        .iter()
+        .position(|range| start < range.end && end > range.start)
+        .or_else(|| ranges.iter().position(|range| start <= range.end))
+        .unwrap_or_else(|| ranges.len().saturating_sub(1))
 }
 
 fn wrapped_line_height(line: &str, width: usize) -> usize {
@@ -850,7 +935,8 @@ mod tests {
     use chrono::Utc;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
-    use ratatui::text::{Line, Text};
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span, Text};
     use tui_input::Input;
 
     use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionMessage};
@@ -861,18 +947,49 @@ mod tests {
     use crate::tui::util::wrapped_text_height;
 
     use super::{
-        collect_match_rows, collect_message_rows, match_scrolloff, message_header_text,
-        message_row_for_scroll, next_match_index, previous_match_index, scroll_for_match,
-        scroll_progress_percent, viewer_title, MessageDirection, MessageJumpScope, ViewerOutcome,
-        ViewerState,
+        collect_line_match_rows, collect_match_rows, collect_message_rows, match_scrolloff,
+        message_header_text, message_row_for_scroll, next_match_index, previous_match_index,
+        scroll_for_match, scroll_progress_percent, viewer_title, MessageDirection,
+        MessageJumpScope, ViewerOutcome, ViewerState,
     };
+
+    #[test]
+    fn active_match_uses_theme_foreground() {
+        let theme = Theme::lazygit();
+        let mut text = Text::from(Line::from(vec![
+            Span::styled(
+                "alpha",
+                Style::default()
+                    .fg(theme.text)
+                    .bg(theme.search_match_bg)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+            Span::styled(" beta", Style::default().fg(theme.text)),
+        ]));
+
+        super::highlight_active_match(&mut text, 0, 80, &theme);
+
+        let alpha = &text.lines[0].spans[0];
+        assert_eq!(alpha.style.fg, Some(theme.active_match_fg));
+        assert_eq!(alpha.style.bg, Some(theme.active_match_bg));
+        assert!(alpha.style.add_modifier.contains(Modifier::ITALIC));
+        assert!(alpha.style.add_modifier.contains(Modifier::BOLD));
+    }
 
     #[test]
     fn collect_match_rows_tracks_wrapped_content_lines() {
         let session = sample_session();
         let rows = collect_match_rows(&session, None, &Theme::default(), "alpha", 12);
 
-        assert_eq!(rows, vec![1, 2, 6]);
+        assert_eq!(rows, vec![3, 5, 10]);
+    }
+
+    #[test]
+    fn collect_line_match_rows_follows_word_wrap_boundaries() {
+        let terms = vec!["world".to_owned()];
+        let rows = collect_line_match_rows("Hello World", 10, &terms);
+
+        assert_eq!(rows, vec![1]);
     }
 
     #[test]

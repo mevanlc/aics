@@ -25,6 +25,7 @@ pub struct Theme {
     pub highlight: Color,
     pub search_match_bg: Color,
     pub active_match_bg: Color,
+    pub active_match_fg: Color,
     pub list_header_bg: Color,
     pub list_body_bg: Color,
     pub claude: Color,
@@ -80,6 +81,7 @@ impl Theme {
             highlight: Color::Rgb(255, 215, 90),
             search_match_bg: Color::Rgb(92, 72, 20),
             active_match_bg: Color::Rgb(160, 130, 20),
+            active_match_fg: Color::Black,
             list_header_bg,
             list_body_bg,
             claude: Color::Rgb(242, 153, 74),
@@ -122,6 +124,7 @@ impl Theme {
             highlight,
             search_match_bg: highlight.darken(0.62),
             active_match_bg: highlight.darken(0.33),
+            active_match_fg: Color::Black,
             list_header_bg: border.darken(0.545),
             list_body_bg: border.darken(0.692),
             claude,
@@ -163,6 +166,7 @@ impl Theme {
             highlight: Color::Rgb(255, 209, 102),
             search_match_bg: Color::Rgb(122, 78, 24),
             active_match_bg: Color::Rgb(200, 140, 30),
+            active_match_fg: Color::Black,
             list_header_bg,
             list_body_bg: list_header_bg.darken(0.349),
             claude: bubble_claude.brighten(2.484),
@@ -209,6 +213,7 @@ impl Theme {
             highlight,
             search_match_bg: Color::Rgb(80, 56, 24),
             active_match_bg: Color::Rgb(120, 80, 32),
+            active_match_fg: text.brighten(0.5),
             list_header_bg,
             list_body_bg,
             claude,
@@ -223,7 +228,7 @@ impl Theme {
         }
     }
 
-    pub fn palette_entries(&self) -> [PaletteEntry; 25] {
+    pub fn palette_entries(&self) -> [PaletteEntry; 26] {
         [
             PaletteEntry {
                 name: "border",
@@ -280,6 +285,10 @@ impl Theme {
             PaletteEntry {
                 name: "active_match_bg",
                 color: self.active_match_bg,
+            },
+            PaletteEntry {
+                name: "active_match_fg",
+                color: self.active_match_fg,
             },
             PaletteEntry {
                 name: "list_header_bg",
@@ -368,7 +377,15 @@ impl Theme {
 
     pub fn search_match_style(&self) -> Style {
         Style::default()
+            .fg(self.text)
             .bg(self.search_match_bg)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn active_match_style(&self) -> Style {
+        Style::default()
+            .fg(self.active_match_fg)
+            .bg(self.active_match_bg)
             .add_modifier(Modifier::BOLD)
     }
 }
@@ -392,9 +409,9 @@ mod tests {
     fn palette_entries_cover_all_theme_fields() {
         let entries = Theme::aics().palette_entries();
 
-        assert_eq!(entries.len(), 25);
+        assert_eq!(entries.len(), 26);
         assert_eq!(entries[0].name, "border");
-        assert_eq!(entries[24].name, "bubble_tool");
+        assert_eq!(entries[25].name, "bubble_tool");
     }
 
     #[test]
