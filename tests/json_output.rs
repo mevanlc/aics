@@ -10,10 +10,12 @@ fn json_mode_emits_valid_jsonl_hits() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
     let cache_root = temp.path().join("cache");
+    let data_root = temp.path().join("data");
 
     let output = Command::new(env!("CARGO_BIN_EXE_aics"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("AICS_CACHE_ROOT", &cache_root)
+        .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.0)
         .env("AICS_CODEX_SESSIONS_DIR", &roots.1)
         .args(["--json", "-g", "-n", "2", "--agent", "claude", "git status"])
@@ -44,10 +46,12 @@ fn json_mode_accepts_sort_by_relevance() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
     let cache_root = temp.path().join("cache");
+    let data_root = temp.path().join("data");
 
     let output = Command::new(env!("CARGO_BIN_EXE_aics"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("AICS_CACHE_ROOT", &cache_root)
+        .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.0)
         .env("AICS_CODEX_SESSIONS_DIR", &roots.1)
         .args([
