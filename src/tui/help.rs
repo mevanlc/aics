@@ -90,8 +90,8 @@ const SESSION_LIST_ITEMS: [HelpItem; 19] = [
     ),
     HelpItem::new(
         "^N / ^P",
-        "next/prev hit in preview",
-        "When the preview pane is visible and the search query is non-empty, jump to the next or previous highlighted match inside the preview. The active match is emphasized. Navigation wraps around.",
+        "preview matches",
+        "When the preview pane is visible and the search query is non-empty, jump to the first/next or previous/last highlighted match inside the preview, including matches outside the visible viewport.",
     ),
     HelpItem::new(
         "^Y",

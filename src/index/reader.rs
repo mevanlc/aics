@@ -626,39 +626,19 @@ fn build_snippet_html(
 ) -> String {
     if let Some(generator) = snippet_generator {
         let snippet = generator.snippet_from_doc(document);
-        if !snippet.fragment().is_empty() && !snippet.highlighted().is_empty() {
-            return render_snippet_html(&snippet);
+        if !snippet.fragment().is_empty() {
+            return render_snippet_html(&snippet, query);
         }
     }
     fallback_snippet(session, query)
 }
 
-/// Build `<b>…</b>` markup from a Tantivy snippet without HTML-escaping the
-/// surrounding text. The TUI renderer (`parse_highlighted_html`) expects plain
-/// text with literal `<b>` tags and treats other angle brackets as literals,
-/// so `Snippet::to_html` (which escapes entities) would leak `&lt;` into the
-/// UI.
-fn render_snippet_html(snippet: &Snippet) -> String {
-    let fragment = snippet.fragment();
-    let mut ranges: Vec<_> = snippet.highlighted().to_vec();
-    ranges.sort_by_key(|range| range.start);
-
-    let mut out = String::with_capacity(fragment.len() + ranges.len() * 7);
-    let mut cursor = 0usize;
-    for range in ranges {
-        let start = range.start.min(fragment.len());
-        let end = range.end.min(fragment.len());
-        if start < cursor || end <= start {
-            continue;
-        }
-        out.push_str(fragment.get(cursor..start).unwrap_or(""));
-        out.push_str("<b>");
-        out.push_str(fragment.get(start..end).unwrap_or(""));
-        out.push_str("</b>");
-        cursor = end;
-    }
-    out.push_str(fragment.get(cursor..).unwrap_or(""));
-    out
+/// Build `<b>…</b>` markup from a Tantivy-chosen fragment using AICS query terms.
+/// This keeps bare multi-word queries aligned with our AND-by-default search
+/// semantics: each displayed term can be highlighted independently, even when
+/// the terms are not adjacent in the document.
+fn render_snippet_html(snippet: &Snippet, query: &str) -> String {
+    emphasize_terms(snippet.fragment(), query)
 }
 
 fn fallback_snippet(session: &StoredSession, query: &str) -> String {
@@ -969,5 +949,17 @@ mod tests {
         assert!(highlighted.contains("INSTRUCTI<b>ON</b>S"));
         assert!(highlighted.contains("<b>running</b>"));
         assert!(highlighted.contains("<b>Android</b>"));
+    }
+
+    #[test]
+    fn emphasize_terms_treats_bare_multi_word_query_as_independent_terms() {
+        let highlighted = emphasize_terms(
+            "wordB appears first. Later, wordA appears by itself.",
+            "wordA wordB",
+        );
+
+        assert!(highlighted.contains("<b>wordB</b> appears first"));
+        assert!(highlighted.contains("<b>wordA</b> appears by itself"));
+        assert!(!highlighted.contains("<b>wordA wordB</b>"));
     }
 }

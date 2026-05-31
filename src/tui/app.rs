@@ -305,7 +305,7 @@ impl App {
         keymap_hint::KeymapHint::new("^S", "settings"),
         keymap_hint::KeymapHint::new("^Y", "cycle snippet"),
         keymap_hint::KeymapHint::new("^T", "preview"),
-        keymap_hint::KeymapHint::new("^N/^P", "next/prev hit"),
+        keymap_hint::KeymapHint::new("^N/^P", "preview matches"),
         keymap_hint::KeymapHint::new("Esc", "clear/cancel"),
         keymap_hint::KeymapHint::new("^C", "quit"),
         keymap_hint::KeymapHint::new("PgUp/PgDn", "scroll"),
@@ -1511,38 +1511,46 @@ impl App {
         };
 
         let theme = self.current_frame_theme();
-        // Building the render state populates the match-row cache and clamps
-        // max_scroll, both of which we rely on to pick the target scroll.
-        let max_scroll = match self.preview_render_state(preview_area, &theme) {
-            Some(state) => state.max_scroll,
-            None => return,
-        };
-        let Some(cache) = self.preview_render_cache.as_ref() else {
+        // Build or refresh the rendered cache before reading match rows.
+        if self.preview_render_state(preview_area, &theme).is_none() {
+            return;
+        }
+
+        let viewport_height = preview_area
+            .height
+            .saturating_sub(2)
+            .saturating_sub(STICKY_HEADER_HEIGHT) as usize;
+        let Some(cache) = self.preview_render_cache.as_mut() else {
             return;
         };
         if cache.match_rows.is_empty() {
             self.preview_active_match = None;
             return;
         }
+        if cache.wrapped_height.is_none() {
+            cache.wrapped_height = Some(wrapped_text_height(&cache.text, cache.width));
+        }
 
-        let next_index = match direction {
-            MatchDirection::Next => next_match_index(
-                &cache.match_rows,
-                self.preview_active_match,
-                self.preview_scroll,
-            ),
-            MatchDirection::Previous => previous_match_index(
-                &cache.match_rows,
-                self.preview_active_match,
-                self.preview_scroll,
-            ),
+        let active_match = self
+            .preview_active_match
+            .filter(|index| *index < cache.match_rows.len());
+        let next_index = match (direction, active_match) {
+            (MatchDirection::Next, None) => 0,
+            (MatchDirection::Previous, None) => cache.match_rows.len().saturating_sub(1),
+            (MatchDirection::Next, Some(_)) => {
+                next_match_index(&cache.match_rows, active_match, self.preview_scroll)
+            }
+            (MatchDirection::Previous, Some(_)) => {
+                previous_match_index(&cache.match_rows, active_match, self.preview_scroll)
+            }
         };
+
+        let max_scroll = cache
+            .wrapped_height
+            .unwrap_or_default()
+            .saturating_sub(viewport_height);
         let target_row = cache.match_rows[next_index];
         self.preview_active_match = Some(next_index);
-        let viewport_height = preview_area
-            .height
-            .saturating_sub(2)
-            .saturating_sub(STICKY_HEADER_HEIGHT) as usize;
         self.preview_scroll = scroll_for_match(target_row, viewport_height, max_scroll);
     }
 
@@ -2792,6 +2800,7 @@ mod tests {
     use anyhow::anyhow;
     use ratatui::crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
+    use ratatui::text::{Line, Text};
     use tempfile::TempDir;
     use tui_input::Input;
 
@@ -3444,6 +3453,62 @@ mod tests {
         assert_eq!(app.selected, 4);
         assert_eq!(app.list_offset(3), 3);
         assert_eq!(selected_within, Some(1));
+    }
+
+    #[test]
+    fn control_n_and_p_jump_preview_matches_on_main_screen() {
+        let mut app = test_app();
+        let path = PathBuf::from("/tmp/demo/session-match.jsonl");
+        let preview_area = Rect::new(60, 3, 40, 8);
+        app.results = vec![sample_hit_with_path(Agent::Claude, path.clone())];
+        app.committed_query = "alpha".to_owned();
+        app.last_layout = Some(layout::AppLayout {
+            search: Rect::new(0, 0, 120, 3),
+            list: Rect::new(0, 3, 60, 20),
+            preview: Some(preview_area),
+            status: Rect::new(0, 23, 120, 2),
+        });
+        app.preview_render_cache = Some(super::PreviewRenderCache {
+            path,
+            query: "alpha".to_owned(),
+            width: preview_area.width.saturating_sub(2),
+            theme_name: app.current_frame_theme_name(),
+            wrapped_height: None,
+            text: Text::from(
+                (0..30)
+                    .map(|index| Line::from(format!("line {index} alpha")))
+                    .collect::<Vec<_>>(),
+            ),
+            match_rows: vec![0, 20],
+            sticky_rows: Vec::new(),
+        });
+
+        app.handle_search_key(crossterm_key_mods(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert_eq!(app.preview_active_match, Some(1));
+        assert!(app.preview_scroll > 0);
+
+        app.preview_scroll = 0;
+        app.preview_active_match = None;
+
+        app.handle_search_key(crossterm_key_mods(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert_eq!(app.preview_active_match, Some(0));
+        assert_eq!(app.preview_scroll, 0);
+
+        app.handle_search_key(crossterm_key_mods(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert_eq!(app.preview_active_match, Some(1));
+        assert!(app.preview_scroll > 0);
     }
 
     #[test]

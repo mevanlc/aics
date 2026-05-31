@@ -100,6 +100,12 @@ mod tests {
     use super::{extract_highlight_terms, has_explicit_boolean_operators};
 
     #[test]
+    fn splits_bare_multi_word_queries_for_highlighting() {
+        let terms = extract_highlight_terms("wordA wordB");
+        assert_eq!(terms, ["worda", "wordb"]);
+    }
+
+    #[test]
     fn ignores_uppercase_boolean_operators_for_highlighting() {
         let terms = extract_highlight_terms("alpha AND beta OR gamma NOT delta");
         assert_eq!(terms, ["alpha", "beta", "gamma", "delta"]);
