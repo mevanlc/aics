@@ -916,6 +916,9 @@ fn render_cell_into(
             timestamp,
             ..
         } => {
+            if display_options.hide_tool_calls {
+                return;
+            }
             render_exec_into(
                 lines,
                 sticky_markers,
@@ -939,6 +942,9 @@ fn render_cell_into(
             stderr,
             timestamp,
         } => {
+            if display_options.hide_tool_calls {
+                return;
+            }
             render_patch_into(
                 lines,
                 sticky_markers,
@@ -957,6 +963,9 @@ fn render_cell_into(
             queries,
             timestamp,
         } => {
+            if display_options.hide_tool_calls {
+                return;
+            }
             render_web_search_into(
                 lines,
                 sticky_markers,
@@ -1938,7 +1947,42 @@ mod tests {
         assert!(!joined.contains("src/lib.rs"));
         assert!(!joined.contains("tool result text"));
         assert!(!joined.contains("exec stdout"));
+        assert!(!joined.contains("$ ls"));
+    }
+
+    #[test]
+    fn display_options_hide_tool_results_keeps_exec_call_header() {
+        let theme = Theme::default();
+        let session = empty_session(
+            Agent::Codex,
+            vec![SessionCell::Exec {
+                command: vec!["/bin/zsh".to_owned(), "-lc".to_owned(), "ls".to_owned()],
+                cwd: None,
+                parsed_summary: Some("ls".to_owned()),
+                stdout: "exec stdout".to_owned(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                duration_ms: None,
+                status: ExecStatus::Completed,
+                timestamp: None,
+            }],
+        );
+
+        let doc = super::render_session_document_with_options(
+            &session,
+            &theme,
+            None,
+            DisplayOptions {
+                hide_tool_calls: false,
+                hide_tool_results: true,
+                hide_agent_replies: false,
+                hide_user_messages: false,
+            },
+        );
+        let joined = rendered_lines(&doc.text).join("\n");
+
         assert!(joined.contains("$ ls"));
+        assert!(!joined.contains("exec stdout"));
     }
 
     #[test]
