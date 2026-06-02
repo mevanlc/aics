@@ -11,6 +11,7 @@ use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
 use crate::search_query::extract_highlight_terms;
+use crate::tui::ansi::strip_terminal_escapes;
 use crate::tui::theme::Theme;
 use crate::tui::util::{highlight_spans_with_terms, highlight_styled_spans};
 
@@ -308,9 +309,14 @@ impl<'a> MarkdownRenderer<'a> {
             return;
         }
 
+        let text = strip_terminal_escapes(text);
+        if text.is_empty() {
+            return;
+        }
+
         self.ensure_line_prefix();
         self.current_line.extend(highlight_spans_with_terms(
-            text,
+            &text,
             &self.terms,
             style,
             style.patch(self.search_highlight),
@@ -327,9 +333,10 @@ impl<'a> MarkdownRenderer<'a> {
         };
 
         for raw_line in LinesWithEndings::from(text) {
-            let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+            let safe_raw_line = strip_terminal_escapes(raw_line);
+            let line = safe_raw_line.strip_suffix('\n').unwrap_or(&safe_raw_line);
             let spans = if let Some(highlighter) = &mut code_block.highlighter {
-                match highlighter.highlight_line(raw_line, &SYNTAX_SET) {
+                match highlighter.highlight_line(&safe_raw_line, &SYNTAX_SET) {
                     Ok(segments) => {
                         let mut spans = segments
                             .into_iter()

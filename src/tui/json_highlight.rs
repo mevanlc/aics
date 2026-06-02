@@ -15,6 +15,7 @@ use syntect::highlighting::{Color as SyntectColor, FontStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
+use crate::tui::ansi::strip_terminal_escapes;
 use crate::tui::markdown::SYNTECT_THEME;
 use crate::tui::theme::Theme;
 use crate::tui::util::highlight_styled_spans;
@@ -48,7 +49,13 @@ pub fn highlight_json_string(
     terms: &[String],
 ) -> Vec<Line<'static>> {
     let pretty = pretty_print_if_parseable(text);
-    let source: &str = pretty.as_deref().unwrap_or(text);
+    let sanitized;
+    let source: &str = if let Some(pretty) = pretty.as_deref() {
+        pretty
+    } else {
+        sanitized = strip_terminal_escapes(text);
+        &sanitized
+    };
 
     let Some(mut highlighter) = create_highlighter() else {
         return plain_lines(source, base_style, theme, terms);
@@ -136,7 +143,7 @@ fn plain_line(
     terms: &[String],
     overlay: Style,
 ) -> Line<'static> {
-    let span = Span::styled(text.to_owned(), base_style);
+    let span = Span::styled(strip_terminal_escapes(text), base_style);
     let spans = highlight_styled_spans(vec![span], terms, overlay);
     let mut line = Line::from(spans);
     line.style = base_style;

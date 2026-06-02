@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod ansi;
 pub mod app;
 pub mod color_ext;
 pub mod filter;

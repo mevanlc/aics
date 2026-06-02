@@ -720,6 +720,7 @@ fn highlight_into_spans(
     base: Style,
     theme: &Theme,
 ) -> Vec<Span<'static>> {
+    let text = crate::tui::ansi::strip_terminal_escapes(text);
     let Some(query) = highlight_query.filter(|q| !q.is_empty()) else {
         return vec![Span::styled(text.to_owned(), base)];
     };

@@ -19,6 +19,7 @@ use crate::tui::keymap_hint;
 use crate::tui::layout;
 use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
+use crate::tui::util::textarea_input_from_key_event;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsField {
@@ -1428,10 +1429,12 @@ impl SummarizerModalState {
 
         match *self.field.current() {
             SummarizerField::Command => {
-                self.command_textarea.input(key);
+                self.command_textarea
+                    .input(textarea_input_from_key_event(key));
             }
             SummarizerField::Prompt => {
-                self.prompt_textarea.input(key);
+                self.prompt_textarea
+                    .input(textarea_input_from_key_event(key));
             }
         }
         SummarizerOutcome::Stay
@@ -1476,7 +1479,7 @@ impl SummarizerModalState {
         );
         render_field_label(frame, rows[1], theme, cmd_label, cmd_focused);
         style_textarea(&mut self.command_textarea, theme, cmd_focused);
-        frame.render_widget(&self.command_textarea, pad_rect(rows[2]));
+        frame.render_widget(self.command_textarea.widget(), pad_rect(rows[2]));
 
         let prompt_focused = self.field == SummarizerField::Prompt;
         render_field_label(
@@ -1487,7 +1490,7 @@ impl SummarizerModalState {
             prompt_focused,
         );
         style_textarea(&mut self.prompt_textarea, theme, prompt_focused);
-        frame.render_widget(&self.prompt_textarea, pad_rect(rows[5]));
+        frame.render_widget(self.prompt_textarea.widget(), pad_rect(rows[5]));
 
         frame.render_widget(
             Paragraph::new("─".repeat(inner.width as usize))

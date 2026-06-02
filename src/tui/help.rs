@@ -13,6 +13,7 @@ use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::layout;
 use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
+use crate::tui::util::textarea_input_from_key_event;
 
 const HELP_HINTS: [KeymapHint; 4] = [
     KeymapHint::new("Esc", "clear/close"),
@@ -333,7 +334,7 @@ impl HelpModalState {
                 HelpOutcome::Stay
             }
             _ => {
-                if self.filter.input(key) {
+                if self.filter.input(textarea_input_from_key_event(key)) {
                     self.collapse_filter_to_single_line();
                     self.selected = 0;
                 }
@@ -367,7 +368,7 @@ impl HelpModalState {
         frame.render_widget(Paragraph::new(self.render_tabs(theme)), left_chunks[0]);
 
         self.configure_filter_widget(theme);
-        frame.render_widget(&self.filter, left_chunks[1]);
+        frame.render_widget(self.filter.widget(), left_chunks[1]);
 
         let filtered = self.filtered_items();
         let max_rows = left_chunks[2].height as usize;
