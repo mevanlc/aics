@@ -68,10 +68,10 @@ By default, searches are scoped to the current working directory. Use `-g` / `--
 | `^S` | Settings modal |
 | `^T` | Toggle preview panel |
 | `^Y` | Toggle session/summary preview mode |
-| `^H` / `^L` | Resize list/preview split |
-| `^X` + action letter | Run a session action directly; in `^X` mode the action letter wins even if `Ctrl` is still held |
+| `^X` | View menu |
+| `^]` / `^\` | Resize list/preview split; `Ctrl+5` / `Ctrl+4` are aliases |
 | `Shift+↑` / `Shift+↓` | Jump between messages in the viewer |
-| `?` | Help |
+| `?` / `^L` | Help |
 | `Esc` | Cancel / close modal |
 | `^C` | Quit |
 
@@ -122,4 +122,3 @@ Available options:
 ## License
 
 MIT. See [LICENSE](LICENSE).
-

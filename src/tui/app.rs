@@ -40,7 +40,7 @@ use crate::index::{
 use crate::parse::claude::read_claude_autosummaries;
 use crate::parse::{parse_session_file, Agent, MessageRole, Session};
 use crate::scan::{AgentHomes, SessionRoots};
-use crate::settings::{Settings, ThemeName};
+use crate::settings::{DisplayOptions, Settings, ThemeName};
 use crate::summary::sidecar::sidecar_path;
 use crate::summary::staleness::fingerprint as compute_fingerprint;
 use crate::summary::{
@@ -60,6 +60,7 @@ use crate::tui::util::{
     sticky_header_for_scroll, sticky_rows_from_line_markers, wrapped_text_height, StickyHeader,
     StickyRowMarker, STICKY_HEADER_HEIGHT,
 };
+use crate::tui::view_menu::{ViewMenuOutcome, ViewMenuState};
 use crate::tui::viewer::{
     collect_match_rows_in_text, collect_message_rows, message_row_for_scroll, next_match_index,
     previous_match_index, scroll_for_match, MatchDirection, MessageDirection, MessageJumpScope,
@@ -95,6 +96,7 @@ enum Overlay {
     None,
     Filters(FilterModalState),
     Actions(ActionMenuState),
+    View(ViewMenuState, Option<ViewerState>),
     Viewer(ViewerState),
     Settings(SettingsModalState),
     ConfirmDelete(DeleteMode),
@@ -134,6 +136,7 @@ struct PreviewRenderCache {
     query: String,
     width: u16,
     theme_name: ThemeName,
+    display_options: DisplayOptions,
     wrapped_height: Option<usize>,
     text: Text<'static>,
     match_rows: Vec<usize>,
@@ -281,6 +284,7 @@ pub struct App {
     should_quit: bool,
     preview_visible: bool,
     preview_width_pct: u16,
+    display_options: DisplayOptions,
     last_frame_area: Rect,
     last_layout: Option<layout::AppLayout>,
     overlay: Overlay,
@@ -297,18 +301,14 @@ pub struct App {
 }
 
 impl App {
-    const MAIN_HINTS: [keymap_hint::KeymapHint; 11] = [
-        keymap_hint::KeymapHint::new("?", "help"),
-        keymap_hint::KeymapHint::new("↑↓", "select"),
-        keymap_hint::KeymapHint::new("⏎", "actions"),
+    const MAIN_HINTS: [keymap_hint::KeymapHint; 7] = [
+        keymap_hint::KeymapHint::new("⏎", "action menu"),
+        keymap_hint::KeymapHint::new("^X", "view menu"),
         keymap_hint::KeymapHint::new("^F", "filters"),
         keymap_hint::KeymapHint::new("^S", "settings"),
-        keymap_hint::KeymapHint::new("^Y", "cycle snippet"),
-        keymap_hint::KeymapHint::new("^T", "preview"),
-        keymap_hint::KeymapHint::new("^N/^P", "preview matches"),
-        keymap_hint::KeymapHint::new("Esc", "clear/cancel"),
+        keymap_hint::KeymapHint::new("^N/^P", "matches"),
+        keymap_hint::KeymapHint::new("Esc", "back"),
         keymap_hint::KeymapHint::new("^C", "quit"),
-        keymap_hint::KeymapHint::new("PgUp/PgDn", "scroll"),
     ];
 
     fn new(
@@ -328,6 +328,8 @@ impl App {
                 .map(Scope::current_dir)
                 .unwrap_or(Scope::Global),
         };
+
+        let display_options = settings.display_options;
 
         Self {
             focus: Focus::Search,
@@ -363,6 +365,7 @@ impl App {
             preview_width_pct: settings
                 .preview_width_pct
                 .clamp(PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX),
+            display_options,
             last_frame_area: Rect::default(),
             last_layout: None,
             overlay: Overlay::None,
@@ -523,24 +526,27 @@ impl App {
         let query = self.committed_query.clone();
         let width = area.width.saturating_sub(2);
         let theme_name = self.current_frame_theme_name();
+        let display_options = self.display_options;
 
         let cache_miss = self.preview_render_cache.as_ref().is_none_or(|cache| {
             cache.path != path
                 || cache.query != query
                 || cache.width != width
                 || cache.theme_name != theme_name
+                || cache.display_options != display_options
         });
         if cache_miss {
             profile::event("preview.cache.miss");
             let highlight_query = (!query.is_empty()).then_some(query.as_str());
             let session = self.selected_preview().cloned();
             self.ensure_summary_cache(agent, &path);
-            let document = preview::render_composite_document(
+            let document = preview::render_composite_document_with_options(
                 session.as_ref(),
                 self.summary_cache.get(&path)?,
                 theme,
                 highlight_query,
                 self.summary_inflight.contains(&path),
+                display_options,
             );
             let text = document.text;
             let match_rows = collect_match_rows_in_text(&text, &query, width);
@@ -550,6 +556,7 @@ impl App {
                 query: query.clone(),
                 width,
                 theme_name,
+                display_options,
                 wrapped_height: None,
                 text,
                 match_rows,
@@ -705,6 +712,7 @@ impl App {
         let local_scope_label = self.local_scope_label();
         let viewer_theme_name = self.current_frame_theme_name();
         let selected = self.selected;
+        let display_options = self.display_options;
         let viewer_summary_target = self
             .results
             .get(selected)
@@ -734,10 +742,32 @@ impl App {
                             viewer_summary.as_ref(),
                             &theme,
                             viewer_theme_name,
+                            display_options,
                         );
                     }
                 }
                 action_menu.render(frame, frame.area(), &theme);
+            }
+            Overlay::View(view_menu, viewer_before_view) => {
+                if let Some(viewer_state) = viewer_before_view.as_mut() {
+                    let hit = results.get(selected);
+                    let session = hit
+                        .and_then(|hit| preview_cache.get(&hit.session.file_path))
+                        .and_then(|session| session.as_ref());
+                    if let Some(session) = session {
+                        viewer_state.render(
+                            frame,
+                            frame.area(),
+                            session,
+                            hit.is_some_and(|hit| hit.session.trashed),
+                            viewer_summary.as_ref(),
+                            &theme,
+                            viewer_theme_name,
+                            display_options,
+                        );
+                    }
+                }
+                view_menu.render(frame, frame.area(), &theme);
             }
             Overlay::Viewer(viewer_state) => {
                 let hit = results.get(selected);
@@ -753,6 +783,7 @@ impl App {
                         viewer_summary.as_ref(),
                         &theme,
                         viewer_theme_name,
+                        display_options,
                     );
                 }
             }
@@ -839,6 +870,9 @@ impl App {
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_filters()
             }
+            KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_view_menu()
+            }
             KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.toggle_scope()?
             }
@@ -903,11 +937,15 @@ impl App {
             KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.cycle_snippet_source()
             }
-            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.resize_preview(-5)
-            }
-            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(']') | KeyCode::Char('5')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
                 self.resize_preview(5)
+            }
+            KeyCode::Char('\\') | KeyCode::Char('4')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.resize_preview(-5)
             }
             _ => {
                 let before = self.query.value().to_owned();
@@ -933,6 +971,14 @@ impl App {
     fn handle_overlay_key(&mut self, key: KeyEvent) -> Result<()> {
         if matches!(self.overlay, Overlay::Viewer(_)) && is_help_key(key) {
             self.open_help(HelpTab::Viewer);
+            return Ok(());
+        }
+
+        if matches!(self.overlay, Overlay::Viewer(_))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('x')
+        {
+            self.open_view_menu();
             return Ok(());
         }
 
@@ -991,6 +1037,18 @@ impl App {
                     }
                 }
             },
+            Overlay::View(state, viewer_before_view) => match state.handle_key(key) {
+                ViewMenuOutcome::Stay => {}
+                ViewMenuOutcome::Close => {
+                    self.overlay = viewer_before_view
+                        .take()
+                        .map(Overlay::Viewer)
+                        .unwrap_or(Overlay::None);
+                }
+                ViewMenuOutcome::Update(options) => {
+                    self.apply_display_options(options);
+                }
+            },
             Overlay::Viewer(state) => {
                 match state.handle_key(
                     key,
@@ -999,6 +1057,7 @@ impl App {
                     viewer_summary.as_ref(),
                     &self.theme,
                     viewer_theme_name,
+                    self.display_options,
                 ) {
                     ViewerOutcome::Stay => {}
                     ViewerOutcome::Close => self.overlay = Overlay::None,
@@ -1483,7 +1542,7 @@ impl App {
                     }
                 })
                 .unwrap_or(0);
-            collect_message_rows(&session, None, &theme, width, scope)
+            collect_message_rows(&session, None, &theme, width, scope, self.display_options)
                 .into_iter()
                 .map(|row| row + summary_offset)
                 .collect::<Vec<_>>()
@@ -1595,6 +1654,7 @@ impl App {
         // settings modal, so preserve the live values here.
         new_settings.show_preview = self.preview_visible;
         new_settings.preview_width_pct = self.preview_width_pct;
+        new_settings.display_options = self.display_options;
         self.theme = Theme::from_name(new_settings.theme);
         self.preview_render_cache = None;
         self.settings = new_settings;
@@ -1648,6 +1708,33 @@ impl App {
             }
         };
         self.overlay = Overlay::Actions(ActionMenuState::new(trashed));
+    }
+
+    fn open_view_menu(&mut self) {
+        let previous_overlay = std::mem::replace(&mut self.overlay, Overlay::None);
+        let viewer_before_view = match previous_overlay {
+            Overlay::Viewer(state) => Some(state),
+            other => {
+                self.overlay = other;
+                None
+            }
+        };
+        self.overlay = Overlay::View(ViewMenuState::new(self.display_options), viewer_before_view);
+    }
+
+    fn apply_display_options(&mut self, options: DisplayOptions) {
+        if self.display_options == options {
+            return;
+        }
+        self.display_options = options;
+        self.settings.display_options = options;
+        self.preview_render_cache = None;
+        self.preview_active_match = None;
+        if let Err(err) = self.settings.save() {
+            self.statusline = Some(statusline::Entry::failed(format!(
+                "settings error: {err:#}"
+            )));
+        }
     }
 
     fn close_actions_overlay(&mut self) {
@@ -1876,6 +1963,7 @@ impl App {
                 viewer_summary.as_ref(),
                 &theme,
                 theme_name,
+                self.display_options,
             );
             state.scroll = state.scroll.min(max_scroll);
         }
@@ -2600,9 +2688,10 @@ fn load_summary_sources(agent: Agent, path: &Path) -> SummarySources {
 }
 
 fn is_help_key(key: KeyEvent) -> bool {
-    key.code == KeyCode::Char('?')
+    (key.code == KeyCode::Char('?')
         && !key.modifiers.contains(KeyModifiers::CONTROL)
-        && !key.modifiers.contains(KeyModifiers::ALT)
+        && !key.modifiers.contains(KeyModifiers::ALT))
+        || (key.code == KeyCode::Char('l') && key.modifiers == KeyModifiers::CONTROL)
 }
 
 fn build_resume_command(
@@ -3011,6 +3100,26 @@ mod tests {
     }
 
     #[test]
+    fn control_bracket_keys_resize_preview_divider() {
+        let mut app = test_app();
+        app.preview_width_pct = 40;
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char(']'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert_eq!(app.preview_width_pct, 45);
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('\\'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert_eq!(app.preview_width_pct, 40);
+    }
+
+    #[test]
     fn ctrl_s_opens_settings() {
         let mut app = test_app();
 
@@ -3093,6 +3202,22 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_l_opens_help_from_main_screen() {
+        let mut app = test_app();
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('l'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            app.help.as_ref().map(|state| state.tab()),
+            Some(HelpTab::SessionList)
+        );
+    }
+
+    #[test]
     fn question_mark_opens_viewer_help_when_viewer_is_visible() {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude)];
@@ -3105,6 +3230,37 @@ mod tests {
             app.help.as_ref().map(|state| state.tab()),
             Some(HelpTab::Viewer)
         );
+    }
+
+    #[test]
+    fn ctrl_x_opens_view_menu_from_main_screen() {
+        let mut app = test_app();
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::View(_, None)));
+    }
+
+    #[test]
+    fn ctrl_x_opens_view_menu_over_viewer_and_restores_viewer() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.open_viewer();
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert!(matches!(app.overlay, super::Overlay::View(_, Some(_))));
+
+        app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
     }
 
     #[test]
@@ -3473,6 +3629,7 @@ mod tests {
             query: "alpha".to_owned(),
             width: preview_area.width.saturating_sub(2),
             theme_name: app.current_frame_theme_name(),
+            display_options: app.display_options,
             wrapped_height: None,
             text: Text::from(
                 (0..30)

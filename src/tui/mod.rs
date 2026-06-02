@@ -15,6 +15,7 @@ pub mod settings;
 pub mod statusline;
 pub mod theme;
 pub mod util;
+pub mod view_menu;
 pub mod viewer;
 
 pub use app::run_app;

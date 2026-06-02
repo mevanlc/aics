@@ -48,7 +48,19 @@ pub fn render(
         .title(block_title(Span::styled(
             "Sessions",
             Style::default().fg(theme.accent),
-        )));
+        )))
+        .title(
+            Line::from(vec![
+                Span::styled(
+                    "↑↓",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" select", Style::default().fg(theme.muted)),
+            ])
+            .right_aligned(),
+        );
 
     let compact = effective_item_height(area, snippet_line_count, separator) == 1;
     let items = if app.results.is_empty() {

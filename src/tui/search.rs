@@ -11,6 +11,7 @@ use crate::tui::util::block_title;
 pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let scope_label = app.scope_label();
     let status_text = app.title_status_text();
+    const HELP_HINT: &str = "^L help";
 
     // ─Search · {scope} · {status}
     // The top border is area.width chars wide; corners take 1 char each, so
@@ -21,7 +22,8 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         + " · ".chars().count()
         + scope_label.chars().count()
         + " · ".chars().count();
-    let status_budget = (area.width as usize).saturating_sub(2 + fixed_width); // 2 for the two border corners
+    let status_budget =
+        (area.width as usize).saturating_sub(2 + fixed_width + HELP_HINT.chars().count() + 1);
     let status_text: std::borrow::Cow<str> = if status_text.chars().count() <= status_budget {
         status_text.into()
     } else {
@@ -48,7 +50,19 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                 status_text,
                 Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
             ),
-        ])));
+        ])))
+        .title(
+            Line::from(vec![
+                Span::styled(
+                    "^L",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" help", Style::default().fg(theme.muted)),
+            ])
+            .right_aligned(),
+        );
 
     let widget = Paragraph::new(app.query.value())
         .style(Style::default().fg(theme.text))

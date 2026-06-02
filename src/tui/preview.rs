@@ -8,6 +8,7 @@ use crate::parse::{
     Agent, ExecStatus, MessageRole, PatchFile, PatchOp, PlanItemStatus, RuntimeMetrics, Session,
     SessionCell, SessionInfo, ToolStatus,
 };
+use crate::settings::DisplayOptions;
 use crate::summary::{
     AicsSummaryPreview, ClaudeAutosummaryPreview, SummaryPreview, SummarySources,
 };
@@ -56,10 +57,19 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme.border_style(false))
-        .title(block_title(Span::styled(
-            app.preview_title(),
-            Style::default().fg(theme.accent),
-        )));
+        .title(block_title(Line::from(vec![
+            Span::styled(app.preview_title(), Style::default().fg(theme.accent)),
+            Span::styled(" (^T)", Style::default().fg(theme.muted)),
+        ])))
+        .title(
+            Line::from(Span::styled(
+                "PgUp/PgDn",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -89,13 +99,31 @@ pub fn render_session_text(
     theme: &Theme,
     highlight_query: Option<&str>,
 ) -> Text<'static> {
-    render_session_document(session, theme, highlight_query).text
+    render_session_text_with_options(session, theme, highlight_query, DisplayOptions::default())
+}
+
+pub fn render_session_text_with_options(
+    session: &Session,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+    display_options: DisplayOptions,
+) -> Text<'static> {
+    render_session_document_with_options(session, theme, highlight_query, display_options).text
 }
 
 pub fn render_session_document(
     session: &Session,
     theme: &Theme,
     highlight_query: Option<&str>,
+) -> DisplayDocument {
+    render_session_document_with_options(session, theme, highlight_query, DisplayOptions::default())
+}
+
+pub fn render_session_document_with_options(
+    session: &Session,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+    display_options: DisplayOptions,
 ) -> DisplayDocument {
     let _profile = profile::scope("preview.render_session_text");
     let mut lines = Vec::new();
@@ -116,14 +144,16 @@ pub fn render_session_document(
     if session.cells.is_empty() {
         // Backwards compatibility: if no cells were emitted, fall back to messages.
         for message in &session.messages {
-            render_message_into(
-                &mut lines,
-                &mut sticky_markers,
-                session.agent,
-                message,
-                theme,
-                highlight_query,
-            );
+            if shows_message_role(display_options, message.role) {
+                render_message_into(
+                    &mut lines,
+                    &mut sticky_markers,
+                    session.agent,
+                    message,
+                    theme,
+                    highlight_query,
+                );
+            }
         }
     } else {
         for cell in &session.cells {
@@ -142,6 +172,7 @@ pub fn render_session_document(
                 cell,
                 theme,
                 highlight_query,
+                display_options,
             );
         }
 
@@ -182,13 +213,36 @@ pub fn render_composite_document(
     highlight_query: Option<&str>,
     summary_inflight: bool,
 ) -> DisplayDocument {
+    render_composite_document_with_options(
+        session,
+        summaries,
+        theme,
+        highlight_query,
+        summary_inflight,
+        DisplayOptions::default(),
+    )
+}
+
+pub fn render_composite_document_with_options(
+    session: Option<&Session>,
+    summaries: &SummarySources,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+    summary_inflight: bool,
+    display_options: DisplayOptions,
+) -> DisplayDocument {
     let mut summary =
         render_summary_sections_document(summaries, theme, highlight_query, summary_inflight);
     if !summary.text.lines.is_empty() && session.is_some() {
         summary.text.lines.push(Line::default());
     }
 
-    let session_doc = render_session_section_document(session, theme, highlight_query);
+    let session_doc = render_session_section_document_with_options(
+        session,
+        theme,
+        highlight_query,
+        display_options,
+    );
     let session_offset = summary.text.lines.len();
     summary.text.lines.extend(session_doc.text.lines);
     summary
@@ -325,8 +379,22 @@ pub fn render_session_section_document(
     theme: &Theme,
     highlight_query: Option<&str>,
 ) -> DisplayDocument {
+    render_session_section_document_with_options(
+        session,
+        theme,
+        highlight_query,
+        DisplayOptions::default(),
+    )
+}
+
+pub fn render_session_section_document_with_options(
+    session: Option<&Session>,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+    display_options: DisplayOptions,
+) -> DisplayDocument {
     let body = if let Some(session) = session {
-        render_session_document(session, theme, highlight_query)
+        render_session_document_with_options(session, theme, highlight_query, display_options)
     } else {
         DisplayDocument {
             text: render_summary_missing(
@@ -353,6 +421,16 @@ pub fn render_session_section_document(
     DisplayDocument {
         text,
         sticky_markers,
+    }
+}
+
+pub(crate) fn shows_message_role(display_options: DisplayOptions, role: MessageRole) -> bool {
+    match role {
+        MessageRole::User => !display_options.hide_user_messages,
+        MessageRole::Assistant => !display_options.hide_agent_replies,
+        MessageRole::ToolCall => !display_options.hide_tool_calls,
+        MessageRole::ToolResult => !display_options.hide_tool_results,
+        MessageRole::System | MessageRole::Summary => true,
     }
 }
 
@@ -738,6 +816,7 @@ fn render_cell_into(
     cell: &SessionCell,
     theme: &Theme,
     highlight_query: Option<&str>,
+    display_options: DisplayOptions,
 ) {
     match cell {
         SessionCell::Message {
@@ -745,6 +824,9 @@ fn render_cell_into(
             content,
             timestamp,
         } => {
+            if !shows_message_role(display_options, *role) {
+                return;
+            }
             let synthetic = crate::parse::SessionMessage {
                 role: *role,
                 content: content.clone(),
@@ -765,6 +847,9 @@ fn render_cell_into(
             body,
             timestamp,
         } => {
+            if display_options.hide_agent_replies {
+                return;
+            }
             render_reasoning_into(
                 lines,
                 sticky_markers,
@@ -783,6 +868,9 @@ fn render_cell_into(
             status,
             timestamp,
         } => {
+            if display_options.hide_tool_calls {
+                return;
+            }
             render_tool_call_into(
                 lines,
                 sticky_markers,
@@ -803,6 +891,9 @@ fn render_cell_into(
             call_summary,
             timestamp,
         } => {
+            if display_options.hide_tool_results {
+                return;
+            }
             render_tool_result_into(
                 lines,
                 sticky_markers,
@@ -839,6 +930,7 @@ fn render_cell_into(
                 *timestamp,
                 theme,
                 highlight_query,
+                display_options,
             );
         }
         SessionCell::Patch {
@@ -858,6 +950,7 @@ fn render_cell_into(
                 *timestamp,
                 theme,
                 highlight_query,
+                display_options,
             );
         }
         SessionCell::WebSearch {
@@ -1166,6 +1259,7 @@ fn render_exec_into(
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
     theme: &Theme,
     highlight_query: Option<&str>,
+    display_options: DisplayOptions,
 ) {
     let display = parsed_summary
         .filter(|s| !s.is_empty())
@@ -1205,28 +1299,30 @@ fn render_exec_into(
         theme,
     );
 
-    let stdout_style = Style::default().fg(theme.muted);
-    for line in stdout.lines() {
-        let mut spans = vec![Span::styled("  ", Style::default())];
-        spans.extend(highlight_into_spans(
-            line,
-            highlight_query,
-            stdout_style,
-            theme,
-        ));
-        lines.push(Line::from(spans));
-    }
-    if !stderr.is_empty() {
-        let stderr_style = Style::default().fg(ratatui::style::Color::Red);
-        for line in stderr.lines() {
-            let mut spans = vec![Span::styled("! ", stderr_style)];
+    if !display_options.hide_tool_results {
+        let stdout_style = Style::default().fg(theme.muted);
+        for line in stdout.lines() {
+            let mut spans = vec![Span::styled("  ", Style::default())];
             spans.extend(highlight_into_spans(
                 line,
                 highlight_query,
-                stderr_style,
+                stdout_style,
                 theme,
             ));
             lines.push(Line::from(spans));
+        }
+        if !stderr.is_empty() {
+            let stderr_style = Style::default().fg(ratatui::style::Color::Red);
+            for line in stderr.lines() {
+                let mut spans = vec![Span::styled("! ", stderr_style)];
+                spans.extend(highlight_into_spans(
+                    line,
+                    highlight_query,
+                    stderr_style,
+                    theme,
+                ));
+                lines.push(Line::from(spans));
+            }
         }
     }
     lines.push(Line::default());
@@ -1243,6 +1339,7 @@ fn render_patch_into(
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
     theme: &Theme,
     highlight_query: Option<&str>,
+    display_options: DisplayOptions,
 ) {
     let total_adds: usize = files.iter().map(|f| f.additions).sum();
     let total_dels: usize = files.iter().map(|f| f.deletions).sum();
@@ -1315,20 +1412,22 @@ fn render_patch_into(
         lines.push(Line::from(spans));
     }
 
-    if !stdout.is_empty() {
-        let dim = Style::default().fg(theme.muted);
-        for line in stdout.lines() {
-            let mut spans = vec![Span::styled("  ", Style::default())];
-            spans.extend(highlight_into_spans(line, highlight_query, dim, theme));
-            lines.push(Line::from(spans));
+    if !display_options.hide_tool_results {
+        if !stdout.is_empty() {
+            let dim = Style::default().fg(theme.muted);
+            for line in stdout.lines() {
+                let mut spans = vec![Span::styled("  ", Style::default())];
+                spans.extend(highlight_into_spans(line, highlight_query, dim, theme));
+                lines.push(Line::from(spans));
+            }
         }
-    }
-    if !stderr.is_empty() {
-        let red = Style::default().fg(ratatui::style::Color::Red);
-        for line in stderr.lines() {
-            let mut spans = vec![Span::styled("! ", red)];
-            spans.extend(highlight_into_spans(line, highlight_query, red, theme));
-            lines.push(Line::from(spans));
+        if !stderr.is_empty() {
+            let red = Style::default().fg(ratatui::style::Color::Red);
+            for line in stderr.lines() {
+                let mut spans = vec![Span::styled("! ", red)];
+                spans.extend(highlight_into_spans(line, highlight_query, red, theme));
+                lines.push(Line::from(spans));
+            }
         }
     }
     lines.push(Line::default());
@@ -1643,6 +1742,7 @@ mod tests {
         ExecStatus, PatchFile, PatchOp, PlanItem, PlanItemStatus, RuntimeMetrics, SessionCell,
         SessionInfo,
     };
+    use crate::settings::DisplayOptions;
     use crate::tui::theme::Theme;
 
     fn empty_session(agent: Agent, cells: Vec<SessionCell>) -> Session {
@@ -1774,6 +1874,72 @@ mod tests {
         assert!(joined.contains("Totals"), "metrics footer missing");
         assert!(joined.contains("1,250"), "total_tokens not formatted");
         assert!(joined.contains("4 tool call(s)"), "tool count missing");
+    }
+
+    #[test]
+    fn display_options_hide_selected_transcript_parts() {
+        let theme = Theme::default();
+        let session = empty_session(
+            Agent::Codex,
+            vec![
+                SessionCell::Message {
+                    role: MessageRole::User,
+                    content: "user text".to_owned(),
+                    timestamp: None,
+                },
+                SessionCell::Message {
+                    role: MessageRole::Assistant,
+                    content: "agent text".to_owned(),
+                    timestamp: None,
+                },
+                SessionCell::ToolCall {
+                    tool: "Read".to_owned(),
+                    raw_name: "Read".to_owned(),
+                    summary: "src/lib.rs".to_owned(),
+                    input: serde_json::Value::Null,
+                    status: crate::parse::ToolStatus::Completed,
+                    timestamp: None,
+                },
+                SessionCell::ToolResult {
+                    tool: Some("Read".to_owned()),
+                    output: "tool result text".to_owned(),
+                    is_error: false,
+                    call_summary: Some("src/lib.rs".to_owned()),
+                    timestamp: None,
+                },
+                SessionCell::Exec {
+                    command: vec!["/bin/zsh".to_owned(), "-lc".to_owned(), "ls".to_owned()],
+                    cwd: None,
+                    parsed_summary: Some("ls".to_owned()),
+                    stdout: "exec stdout".to_owned(),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    duration_ms: None,
+                    status: ExecStatus::Completed,
+                    timestamp: None,
+                },
+            ],
+        );
+
+        let doc = super::render_session_document_with_options(
+            &session,
+            &theme,
+            None,
+            DisplayOptions {
+                hide_tool_calls: true,
+                hide_tool_results: true,
+                hide_agent_replies: true,
+                hide_user_messages: true,
+            },
+        );
+        let joined = rendered_lines(&doc.text).join("\n");
+
+        assert!(!joined.contains("user text"));
+        assert!(!joined.contains("agent text"));
+        assert!(!joined.contains("src/lib.rs"));
+        assert!(!joined.contains("tool result text"));
+        assert!(!joined.contains("exec stdout"));
+        assert!(joined.contains("$ ls"));
     }
 
     #[test]

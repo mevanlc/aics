@@ -14,12 +14,13 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::parse::Session;
 use crate::search_query::extract_highlight_terms;
-use crate::settings::ThemeName;
+use crate::settings::{DisplayOptions, ThemeName};
 use crate::summary::SummarySidecar;
 use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::markdown::render_markdown_message;
 use crate::tui::preview::{
-    render_message_body, render_session_document, split_sticky_body, DisplayDocument,
+    render_message_body, render_session_document_with_options, shows_message_role,
+    split_sticky_body, DisplayDocument,
 };
 use crate::tui::profile;
 use crate::tui::theme::Theme;
@@ -50,6 +51,7 @@ struct ViewerRenderCache {
     query: String,
     width: u16,
     theme_name: ThemeName,
+    display_options: DisplayOptions,
     summary_stamp: Option<(i64, usize, usize)>,
     total_rows: usize,
     text: Text<'static>,
@@ -114,6 +116,7 @@ impl ViewerState {
         self.search.value()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn handle_key(
         &mut self,
         key: KeyEvent,
@@ -122,6 +125,7 @@ impl ViewerState {
         summary: Option<&SummarySidecar>,
         theme: &Theme,
         theme_name: ThemeName,
+        display_options: DisplayOptions,
     ) -> ViewerOutcome {
         match key.code {
             KeyCode::Esc => ViewerOutcome::Close,
@@ -134,6 +138,7 @@ impl ViewerState {
                     summary,
                     theme,
                     theme_name,
+                    display_options,
                 );
                 ViewerOutcome::Stay
             }
@@ -146,6 +151,7 @@ impl ViewerState {
                     summary,
                     theme,
                     theme_name,
+                    display_options,
                 );
                 ViewerOutcome::Stay
             }
@@ -157,6 +163,7 @@ impl ViewerState {
                     summary,
                     theme,
                     theme_name,
+                    display_options,
                 );
                 ViewerOutcome::Stay
             }
@@ -168,6 +175,7 @@ impl ViewerState {
                     summary,
                     theme,
                     theme_name,
+                    display_options,
                 );
                 ViewerOutcome::Stay
             }
@@ -180,6 +188,7 @@ impl ViewerState {
                     summary,
                     theme,
                     theme_name,
+                    display_options,
                 );
                 ViewerOutcome::Stay
             }
@@ -192,6 +201,7 @@ impl ViewerState {
                     summary,
                     theme,
                     theme_name,
+                    display_options,
                 );
                 ViewerOutcome::Stay
             }
@@ -241,6 +251,7 @@ impl ViewerState {
         summary: Option<&SummarySidecar>,
         theme: &Theme,
         theme_name: ThemeName,
+        display_options: DisplayOptions,
     ) {
         let _profile = profile::scope("viewer.render");
         frame.render_widget(Clear, area);
@@ -248,7 +259,8 @@ impl ViewerState {
         let body_area = chunks[0];
 
         let (total_rows, mut text, match_rows, sticky_rows) = {
-            let cache = self.render_cache(area, session, summary, theme, theme_name);
+            let cache =
+                self.render_cache(area, session, summary, theme, theme_name, display_options);
             (
                 cache.total_rows,
                 cache.text.clone(),
@@ -331,9 +343,10 @@ impl ViewerState {
         summary: Option<&SummarySidecar>,
         theme: &Theme,
         theme_name: ThemeName,
+        display_options: DisplayOptions,
     ) -> usize {
         let body_area = split_viewer(area)[0];
-        let cache = self.render_cache(area, session, summary, theme, theme_name);
+        let cache = self.render_cache(area, session, summary, theme, theme_name, display_options);
         let viewport_height = body_area
             .height
             .saturating_sub(2)
@@ -345,6 +358,7 @@ impl ViewerState {
         split_viewer(area)[0]
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn jump_to_match(
         &mut self,
         direction: MatchDirection,
@@ -353,6 +367,7 @@ impl ViewerState {
         summary: Option<&SummarySidecar>,
         theme: &Theme,
         theme_name: ThemeName,
+        display_options: DisplayOptions,
     ) {
         let Some(session) = session else {
             self.active_match = None;
@@ -361,7 +376,7 @@ impl ViewerState {
 
         let body_area = Self::body_area(area);
         let matches = self
-            .render_cache(area, session, summary, theme, theme_name)
+            .render_cache(area, session, summary, theme, theme_name, display_options)
             .match_rows
             .clone();
         if matches.is_empty() {
@@ -377,7 +392,8 @@ impl ViewerState {
         };
 
         self.active_match = Some(next_index);
-        let max_scroll = self.max_scroll(area, session, summary, theme, theme_name);
+        let max_scroll =
+            self.max_scroll(area, session, summary, theme, theme_name, display_options);
         let viewport_height = body_area
             .height
             .saturating_sub(2)
@@ -395,6 +411,7 @@ impl ViewerState {
         summary: Option<&SummarySidecar>,
         theme: &Theme,
         theme_name: ThemeName,
+        display_options: DisplayOptions,
     ) {
         let Some(session) = session else {
             return;
@@ -402,12 +419,20 @@ impl ViewerState {
 
         let body_area = Self::body_area(area);
         let viewport_width = body_area.width.saturating_sub(2);
-        let rows = collect_message_rows(session, summary, theme, viewport_width, scope);
+        let rows = collect_message_rows(
+            session,
+            summary,
+            theme,
+            viewport_width,
+            scope,
+            display_options,
+        );
         let Some(target_row) = message_row_for_scroll(&rows, self.scroll, direction) else {
             return;
         };
 
-        let max_scroll = self.max_scroll(area, session, summary, theme, theme_name);
+        let max_scroll =
+            self.max_scroll(area, session, summary, theme, theme_name, display_options);
         self.scroll = target_row.min(max_scroll);
     }
 
@@ -418,6 +443,7 @@ impl ViewerState {
         summary: Option<&SummarySidecar>,
         theme: &Theme,
         theme_name: ThemeName,
+        display_options: DisplayOptions,
     ) -> &ViewerRenderCache {
         let body_area = Self::body_area(area);
         let width = body_area.width.saturating_sub(2);
@@ -430,12 +456,14 @@ impl ViewerState {
                 || cache.query != query
                 || cache.width != width
                 || cache.theme_name != theme_name
+                || cache.display_options != display_options
                 || cache.summary_stamp != summary_stamp
         });
         if cache_miss {
             profile::event("viewer.cache.miss");
             let highlight_query = (!query.is_empty()).then_some(query.as_str());
-            let document = render_viewer_document(session, summary, theme, highlight_query);
+            let document =
+                render_viewer_document(session, summary, theme, highlight_query, display_options);
             let text = document.text;
             let total_rows = wrapped_text_height(&text, width).max(1);
             let match_rows = collect_match_rows_in_text(&text, &query, width);
@@ -445,6 +473,7 @@ impl ViewerState {
                 query,
                 width,
                 theme_name,
+                display_options,
                 summary_stamp,
                 total_rows,
                 text,
@@ -472,6 +501,7 @@ fn render_viewer_document(
     summary: Option<&SummarySidecar>,
     theme: &Theme,
     highlight_query: Option<&str>,
+    display_options: DisplayOptions,
 ) -> DisplayDocument {
     let mut lines = Vec::new();
     let mut sticky_markers = Vec::new();
@@ -490,7 +520,8 @@ fn render_viewer_document(
         lines.push(Line::default());
     }
     let session_start = lines.len();
-    let session_doc = render_session_document(session, theme, highlight_query);
+    let session_doc =
+        render_session_document_with_options(session, theme, highlight_query, display_options);
     lines.extend(session_doc.text.lines);
     sticky_markers.extend(session_doc.sticky_markers.into_iter().map(|marker| {
         crate::tui::util::StickyLineMarker {
@@ -650,7 +681,13 @@ fn collect_match_rows(
     width: u16,
 ) -> Vec<usize> {
     let highlight_query = (!query.is_empty()).then_some(query);
-    let document = render_viewer_document(session, summary, theme, highlight_query);
+    let document = render_viewer_document(
+        session,
+        summary,
+        theme,
+        highlight_query,
+        DisplayOptions::default(),
+    );
     collect_match_rows_in_text(&document.text, query, width)
 }
 
@@ -660,6 +697,7 @@ pub(crate) fn collect_message_rows(
     theme: &Theme,
     width: u16,
     scope: MessageJumpScope,
+    display_options: DisplayOptions,
 ) -> Vec<usize> {
     if width == 0 {
         return Vec::new();
@@ -674,6 +712,9 @@ pub(crate) fn collect_message_rows(
         .unwrap_or(0);
 
     for message in &session.messages {
+        if !shows_message_role(display_options, message.role) {
+            continue;
+        }
         if matches!(scope, MessageJumpScope::Any)
             || matches!(scope, MessageJumpScope::UserOnly)
                 && message.role == crate::parse::MessageRole::User
@@ -936,7 +977,7 @@ mod tests {
     use tui_input::Input;
 
     use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionMessage};
-    use crate::settings::ThemeName;
+    use crate::settings::{DisplayOptions, ThemeName};
     use crate::summary::{Fingerprint, SummarizeBackend, SummarySidecar};
     use crate::tui::preview::render_message_body;
     use crate::tui::theme::Theme;
@@ -999,8 +1040,14 @@ mod tests {
     #[test]
     fn collect_message_rows_tracks_header_boundaries() {
         let session = sample_session();
-        let rows =
-            collect_message_rows(&session, None, &Theme::default(), 12, MessageJumpScope::Any);
+        let rows = collect_message_rows(
+            &session,
+            None,
+            &Theme::default(),
+            12,
+            MessageJumpScope::Any,
+            DisplayOptions::default(),
+        );
 
         assert_eq!(rows, vec![0, 7]);
     }
@@ -1014,6 +1061,7 @@ mod tests {
             &Theme::default(),
             80,
             MessageJumpScope::UserOnly,
+            DisplayOptions::default(),
         );
 
         assert_eq!(rows, vec![0, 12]);
@@ -1024,7 +1072,14 @@ mod tests {
         let session = wrapped_navigation_session();
         let theme = Theme::default();
         let width = 9;
-        let rows = collect_message_rows(&session, None, &theme, width, MessageJumpScope::Any);
+        let rows = collect_message_rows(
+            &session,
+            None,
+            &theme,
+            width,
+            MessageJumpScope::Any,
+            DisplayOptions::default(),
+        );
 
         let first = &session.messages[0];
         let expected_second_start =
@@ -1175,6 +1230,7 @@ mod tests {
             &Theme::default(),
             80,
             MessageJumpScope::Any,
+            DisplayOptions::default(),
         );
 
         assert_eq!(match_rows, vec![2, 6, 9]);
@@ -1195,6 +1251,7 @@ mod tests {
             None,
             &Theme::default(),
             ThemeName::Lazygit,
+            DisplayOptions::default(),
         );
         assert_eq!(outcome, ViewerOutcome::Close);
     }
@@ -1212,6 +1269,7 @@ mod tests {
             None,
             &Theme::default(),
             ThemeName::Lazygit,
+            DisplayOptions::default(),
         );
 
         state.handle_key(
@@ -1221,6 +1279,7 @@ mod tests {
             None,
             &Theme::default(),
             ThemeName::Lazygit,
+            DisplayOptions::default(),
         );
 
         assert_eq!(state.search_query(), "np");
@@ -1240,6 +1299,7 @@ mod tests {
             None,
             &Theme::default(),
             ThemeName::Lazygit,
+            DisplayOptions::default(),
         );
 
         assert_eq!(outcome, ViewerOutcome::Stay);
@@ -1263,6 +1323,7 @@ mod tests {
             None,
             &Theme::default(),
             ThemeName::Lazygit,
+            DisplayOptions::default(),
         );
         assert_eq!(state.active_match, Some(0));
         assert_eq!(state.scroll, 0);
@@ -1274,6 +1335,7 @@ mod tests {
             None,
             &Theme::default(),
             ThemeName::Lazygit,
+            DisplayOptions::default(),
         );
         assert_eq!(state.active_match, Some(1));
         assert_eq!(state.scroll, 0);
@@ -1285,6 +1347,7 @@ mod tests {
             None,
             &Theme::default(),
             ThemeName::Lazygit,
+            DisplayOptions::default(),
         );
         assert_eq!(state.active_match, Some(0));
         assert_eq!(state.scroll, 0);
@@ -1303,6 +1366,7 @@ mod tests {
             None,
             &Theme::default(),
             ThemeName::Lazygit,
+            DisplayOptions::default(),
         );
         assert_eq!(state.scroll, 7);
 
@@ -1313,6 +1377,7 @@ mod tests {
             None,
             &Theme::default(),
             ThemeName::Lazygit,
+            DisplayOptions::default(),
         );
         assert_eq!(state.scroll, 0);
     }
@@ -1330,6 +1395,7 @@ mod tests {
             None,
             &Theme::default(),
             ThemeName::Lazygit,
+            DisplayOptions::default(),
         );
         assert_eq!(state.scroll, 12);
 
@@ -1340,6 +1406,7 @@ mod tests {
             None,
             &Theme::default(),
             ThemeName::Lazygit,
+            DisplayOptions::default(),
         );
         assert_eq!(state.scroll, 0);
     }

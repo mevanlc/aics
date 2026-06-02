@@ -34,7 +34,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 19] = [
         "Type in the main search box to filter sessions. Searches dispatch after a short debounce, and the committed query is reused when you open the full viewer.",
     ),
     HelpItem::new(
-        "?",
+        "? / ^L",
         "open this help",
         "Open the contextual hotkey help for the session list screen. This tab is selected by default when help is opened from the main search screen.",
     ),
@@ -50,8 +50,8 @@ const SESSION_LIST_ITEMS: [HelpItem; 19] = [
     ),
     HelpItem::new(
         "^X",
-        "session action mode",
-        "Arm the session action hotkeys for the current selection. While ^X mode is active, the hint line switches to the available action letters until you run one or cancel.",
+        "view menu",
+        "Open display toggles for hiding tool results, agent replies, or user messages in preview and viewer transcript rendering.",
     ),
     HelpItem::new(
         "PgUp / PgDn",
@@ -99,9 +99,9 @@ const SESSION_LIST_ITEMS: [HelpItem; 19] = [
         "Cycle the selected session card snippet between session text and available summaries. The preview pane always shows all available summaries plus the session log.",
     ),
     HelpItem::new(
-        "^H / ^L",
+        "^] / ^\\",
         "resize preview",
-        "Resize the preview pane width. Ctrl+H makes the preview wider; Ctrl+L makes it narrower.",
+        "Resize the preview pane width. Ctrl+] moves the divider left; Ctrl+\\ moves it right. Ctrl+5 and Ctrl+4 are accepted aliases.",
     ),
     HelpItem::new(
         "^C",

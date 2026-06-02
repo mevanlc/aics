@@ -59,6 +59,20 @@ pub struct Settings {
     pub summarize_command: String,
     #[serde(default = "default_summarize_prompt")]
     pub summarize_prompt: String,
+    #[serde(default)]
+    pub display_options: DisplayOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DisplayOptions {
+    #[serde(default)]
+    pub hide_tool_calls: bool,
+    #[serde(default)]
+    pub hide_tool_results: bool,
+    #[serde(default)]
+    pub hide_agent_replies: bool,
+    #[serde(default)]
+    pub hide_user_messages: bool,
 }
 
 fn default_claude_command() -> String {
@@ -111,6 +125,7 @@ impl Default for Settings {
             snippet_line_count: default_snippet_line_count(),
             summarize_command: String::new(),
             summarize_prompt: default_summarize_prompt(),
+            display_options: DisplayOptions::default(),
         }
     }
 }
@@ -215,6 +230,7 @@ mod tests {
         assert_eq!(parsed.codex_args, "--yolo");
         assert!(parsed.show_preview);
         assert_eq!(parsed.preview_width_pct, 40);
+        assert_eq!(parsed.display_options, DisplayOptions::default());
     }
 
     #[test]
