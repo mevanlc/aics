@@ -26,6 +26,7 @@ const LEFT_PANEL_PREFERRED_WIDTH: u16 = 36;
 const RIGHT_PANEL_MIN_CONTENT_WIDTH: u16 = 12;
 const RIGHT_PANEL_HORIZONTAL_CHROME: u16 = 3;
 const RIGHT_PANEL_MIN_WIDTH: u16 = RIGHT_PANEL_MIN_CONTENT_WIDTH + RIGHT_PANEL_HORIZONTAL_CHROME;
+const HELP_KEY_COLUMN_WIDTH: usize = 12;
 
 const SESSION_LIST_ITEMS: [HelpItem; 19] = [
     HelpItem::new(
@@ -394,7 +395,7 @@ impl HelpModalState {
                     };
                     Line::from(vec![
                         Span::styled(prefix, style),
-                        Span::styled(format!("{:<12}", item.key), style),
+                        Span::styled(format!("{:<HELP_KEY_COLUMN_WIDTH$} ", item.key), style),
                         Span::styled(item.short, style),
                     ])
                 })
@@ -618,13 +619,19 @@ fn visible_window(total: usize, selected: usize, max_rows: usize) -> (usize, usi
 }
 
 #[cfg(test)]
+fn help_item_summary_text(item: &HelpItem) -> String {
+    format!("{:<HELP_KEY_COLUMN_WIDTH$} {}", item.key, item.short)
+}
+
+#[cfg(test)]
 mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
 
     use super::{
-        preferred_left_panel_width, split_help_columns, HelpModalState, HelpOutcome, HelpTab,
-        LEFT_PANEL_PREFERRED_WIDTH, RIGHT_PANEL_MIN_CONTENT_WIDTH, RIGHT_PANEL_MIN_WIDTH,
+        help_item_summary_text, preferred_left_panel_width, split_help_columns, HelpItem,
+        HelpModalState, HelpOutcome, HelpTab, LEFT_PANEL_PREFERRED_WIDTH,
+        RIGHT_PANEL_MIN_CONTENT_WIDTH, RIGHT_PANEL_MIN_WIDTH,
     };
 
     #[test]
@@ -665,6 +672,17 @@ mod tests {
         let items = help.filtered_items();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].key, "Mouse");
+    }
+
+    #[test]
+    fn help_item_summary_keeps_space_after_full_width_key() {
+        let item = HelpItem::new(
+            "Double click",
+            "view session",
+            "Double-click a session card in the result list.",
+        );
+
+        assert_eq!(help_item_summary_text(&item), "Double click view session");
     }
 
     #[test]

@@ -17,8 +17,9 @@ use crate::tui::markdown::{render_markdown_message, render_markdown_message_with
 use crate::tui::profile;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
-    block_title, session_message_label, wrapped_text_height, FullLineBackgroundParagraph,
-    StickyHeader, StickyHeaderWidget, StickyLineMarker, STICKY_HEADER_HEIGHT,
+    block_title, right_block_title, session_message_label, wrapped_text_height,
+    FullLineBackgroundParagraph, StickyHeader, StickyHeaderWidget, StickyLineMarker,
+    STICKY_HEADER_HEIGHT,
 };
 
 #[derive(Debug, Clone)]
@@ -61,15 +62,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
             Span::styled(app.preview_title(), Style::default().fg(theme.accent)),
             Span::styled(" (^T)", Style::default().fg(theme.muted)),
         ])))
-        .title(
-            Line::from(Span::styled(
-                "PgUp/PgDn",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .right_aligned(),
-        );
+        .title(right_block_title(Line::from(Span::styled(
+            "PgUp/PgDn",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ))));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);

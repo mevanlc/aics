@@ -168,6 +168,12 @@ pub fn block_title<'a>(title: impl Into<Line<'a>>) -> Line<'a> {
     title
 }
 
+pub fn right_block_title<'a>(title: impl Into<Line<'a>>) -> Line<'a> {
+    let mut title = title.into();
+    title.spans.push(Span::raw("─"));
+    title.right_aligned()
+}
+
 pub fn list_meta(hit: &SearchHit) -> String {
     let mut meta = format!(
         "{} lines · {}",
@@ -519,9 +525,9 @@ mod tests {
 
     use super::{
         abbreviate_home_path_with, block_title, highlight_spans, highlight_styled_spans,
-        list_title, parse_highlighted_html, session_display_title, sticky_header_for_scroll,
-        sticky_rows_from_line_markers, truncate_plain, wrapped_text_height,
-        FullLineBackgroundParagraph, StickyHeader, StickyLineMarker,
+        list_title, parse_highlighted_html, right_block_title, session_display_title,
+        sticky_header_for_scroll, sticky_rows_from_line_markers, truncate_plain,
+        wrapped_text_height, FullLineBackgroundParagraph, StickyHeader, StickyLineMarker,
     };
     use crate::index::{SearchHit, StoredSession};
     use crate::parse::{Agent, DerivationType};
@@ -802,5 +808,40 @@ mod tests {
             .collect::<String>();
 
         assert_eq!(rendered, "─Viewer · 9%");
+    }
+
+    #[test]
+    fn right_block_title_suffixes_top_border_dash() {
+        let title = right_block_title(Line::from("^L help"));
+        let rendered = title
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered, "^L help─");
+        assert_eq!(title.alignment, Some(ratatui::layout::Alignment::Right));
+    }
+
+    #[test]
+    fn right_block_title_renders_dash_before_corner() {
+        let backend = TestBackend::new(16, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .title(right_block_title("^L help"));
+                frame.render_widget(block, frame.area());
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let top_border = (0..buffer.area.width)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect::<String>();
+
+        assert_eq!(top_border, "┌──────^L help─┐");
     }
 }

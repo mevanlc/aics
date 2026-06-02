@@ -6,7 +6,7 @@ use ratatui::Frame;
 
 use crate::tui::app::App;
 use crate::tui::theme::Theme;
-use crate::tui::util::block_title;
+use crate::tui::util::{block_title, right_block_title};
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let scope_label = app.scope_label();
@@ -22,8 +22,9 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         + " · ".chars().count()
         + scope_label.chars().count()
         + " · ".chars().count();
+    let right_title_width = HELP_HINT.chars().count() + 1; // trailing "─" from right_block_title
     let status_budget =
-        (area.width as usize).saturating_sub(2 + fixed_width + HELP_HINT.chars().count() + 1);
+        (area.width as usize).saturating_sub(2 + fixed_width + right_title_width + 1);
     let status_text: std::borrow::Cow<str> = if status_text.chars().count() <= status_budget {
         status_text.into()
     } else {
@@ -51,18 +52,15 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                 Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
             ),
         ])))
-        .title(
-            Line::from(vec![
-                Span::styled(
-                    "^L",
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" help", Style::default().fg(theme.muted)),
-            ])
-            .right_aligned(),
-        );
+        .title(right_block_title(Line::from(vec![
+            Span::styled(
+                "^L",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" help", Style::default().fg(theme.muted)),
+        ])));
 
     let widget = Paragraph::new(app.query.value())
         .style(Style::default().fg(theme.text))
