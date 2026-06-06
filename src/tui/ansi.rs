@@ -1,13 +1,12 @@
 use std::borrow::Cow;
 
-use ansi_to_tui::IntoText;
-
+/// Strip terminal escape/control sequences from transcript text so it is safe to
+/// hand to ratatui, which assumes printable, fixed-width cell content. Recorded
+/// session output can contain ANSI SGR/CSI, OSC, and other control bytes (and
+/// tabs); emitting those raw desyncs ratatui's cell map from the terminal and
+/// corrupts rendering. Tabs are expanded to spaces; newlines are preserved.
 pub(crate) fn strip_terminal_escapes(text: &str) -> String {
-    let expanded = expand_tabs(text);
-    match expanded.as_bytes().into_text() {
-        Ok(parsed) => strip_remaining_controls(&flatten_ansi_text(parsed)),
-        Err(_) => strip_escape_sequences(&expanded),
-    }
+    strip_escape_sequences(&expand_tabs(text))
 }
 
 fn expand_tabs(text: &str) -> Cow<'_, str> {
@@ -18,41 +17,13 @@ fn expand_tabs(text: &str) -> Cow<'_, str> {
     }
 }
 
-fn flatten_ansi_text(text: impl IntoAnsiTextParts) -> String {
-    text.into_plain_text()
-}
-
-trait IntoAnsiTextParts {
-    fn into_plain_text(self) -> String;
-}
-
-impl IntoAnsiTextParts for ratatui::text::Text<'static> {
-    fn into_plain_text(self) -> String {
-        let mut plain = String::new();
-        for (line_index, line) in self.lines.into_iter().enumerate() {
-            if line_index > 0 {
-                plain.push('\n');
-            }
-            for span in line.spans {
-                plain.push_str(span.content.as_ref());
-            }
-        }
-        plain
-    }
-}
-
-fn strip_remaining_controls(text: &str) -> String {
-    text.chars()
-        .filter(|ch| *ch == '\n' || !ch.is_control())
-        .collect()
-}
-
 fn strip_escape_sequences(text: &str) -> String {
     let mut visible = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
             '\x1b' => match chars.peek().copied() {
+                // CSI: ESC [ ... <final byte in 0x40..=0x7E>
                 Some('[') => {
                     chars.next();
                     for c in chars.by_ref() {
@@ -61,10 +32,18 @@ fn strip_escape_sequences(text: &str) -> String {
                         }
                     }
                 }
+                // OSC: ESC ] ... terminated by BEL or ST (ESC \)
                 Some(']') => {
                     chars.next();
-                    for c in chars.by_ref() {
+                    while let Some(c) = chars.next() {
                         if c == '\x07' {
+                            break;
+                        }
+                        if c == '\x1b' {
+                            // Consume the trailing '\' of an ST terminator.
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
                             break;
                         }
                     }
@@ -91,6 +70,11 @@ mod tests {
     #[test]
     fn strips_osc_escape_sequences() {
         assert_eq!(strip_terminal_escapes("a\x1b]52;c;SGk=\x07b"), "ab");
+    }
+
+    #[test]
+    fn strips_osc_terminated_by_st() {
+        assert_eq!(strip_terminal_escapes("a\x1b]0;title\x1b\\b"), "ab");
     }
 
     #[test]

@@ -4,7 +4,6 @@ use std::sync::OnceLock;
 use chrono::{Local, TimeZone, Utc};
 use directories::BaseDirs;
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -18,38 +17,6 @@ use crate::search_query::extract_highlight_terms;
 use crate::tui::theme::Theme;
 
 pub const STICKY_HEADER_HEIGHT: u16 = 3;
-
-pub(crate) fn textarea_input_from_key_event(key: KeyEvent) -> ratatui_textarea::Input {
-    if matches!(key.kind, KeyEventKind::Release) {
-        return ratatui_textarea::Input::default();
-    }
-
-    let textarea_key = match key.code {
-        KeyCode::Char(ch) => ratatui_textarea::Key::Char(ch),
-        KeyCode::Backspace => ratatui_textarea::Key::Backspace,
-        KeyCode::Enter => ratatui_textarea::Key::Enter,
-        KeyCode::Left => ratatui_textarea::Key::Left,
-        KeyCode::Right => ratatui_textarea::Key::Right,
-        KeyCode::Up => ratatui_textarea::Key::Up,
-        KeyCode::Down => ratatui_textarea::Key::Down,
-        KeyCode::Tab | KeyCode::BackTab => ratatui_textarea::Key::Tab,
-        KeyCode::Delete => ratatui_textarea::Key::Delete,
-        KeyCode::Home => ratatui_textarea::Key::Home,
-        KeyCode::End => ratatui_textarea::Key::End,
-        KeyCode::PageUp => ratatui_textarea::Key::PageUp,
-        KeyCode::PageDown => ratatui_textarea::Key::PageDown,
-        KeyCode::Esc => ratatui_textarea::Key::Esc,
-        KeyCode::F(n) => ratatui_textarea::Key::F(n),
-        _ => ratatui_textarea::Key::Null,
-    };
-
-    ratatui_textarea::Input {
-        key: textarea_key,
-        ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
-        alt: key.modifiers.contains(KeyModifiers::ALT),
-        shift: key.modifiers.contains(KeyModifiers::SHIFT) || matches!(key.code, KeyCode::BackTab),
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StickyHeader {
