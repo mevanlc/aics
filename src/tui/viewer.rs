@@ -731,14 +731,7 @@ pub(crate) fn collect_message_rows(
         display_options,
         ..SessionRenderOptions::default()
     };
-    collect_message_rows_with_options(
-        session,
-        summary,
-        theme,
-        width,
-        scope,
-        options,
-    )
+    collect_message_rows_with_options(session, summary, theme, width, scope, options)
 }
 
 pub(crate) fn collect_message_rows_with_options(
@@ -807,9 +800,9 @@ pub(crate) fn collect_message_rows_with_options(
                         session_info: None,
                         ..session.clone()
                     },
-                        theme,
-                        None,
-                        options,
+                    theme,
+                    None,
+                    options,
                 )
                 .text,
                 width as u16,
@@ -844,7 +837,11 @@ pub(crate) fn collect_message_rows_with_options(
     rows
 }
 
-fn should_skip_message_row(role: MessageRole, content: &str, options: SessionRenderOptions) -> bool {
+fn should_skip_message_row(
+    role: MessageRole,
+    content: &str,
+    options: SessionRenderOptions,
+) -> bool {
     !crate::tui::preview::shows_message_role(options.display_options, role)
         || options.hide_project_docs_autodump && is_project_docs_autodump(role, content)
 }
