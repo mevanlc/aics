@@ -127,7 +127,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 19] = [
     ),
 ];
 
-const VIEWER_ITEMS: [HelpItem; 16] = [
+const VIEWER_ITEMS: [HelpItem; 17] = [
     HelpItem::new(
         "?",
         "open this help",
@@ -162,6 +162,11 @@ const VIEWER_ITEMS: [HelpItem; 16] = [
         "^U / ^E",
         "edit line",
         "Use readline-style editing in the always-focused search box, such as Ctrl+U to clear backward and Ctrl+E to move to the end.",
+    ),
+    HelpItem::new(
+        "^B",
+        "toggle project docs",
+        "Show or hide auto-dumped AGENTS.md and CLAUDE.md instruction blocks in the viewer.",
     ),
     HelpItem::new(
         "Shift ↑",
