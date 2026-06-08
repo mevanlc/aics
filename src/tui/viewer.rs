@@ -12,15 +12,15 @@ use tui_input::Input;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::parse::Session;
+use crate::parse::{is_project_docs_autodump, MessageRole, Session, SessionCell};
 use crate::search_query::extract_highlight_terms;
 use crate::settings::{DisplayOptions, ThemeName};
 use crate::summary::SummarySidecar;
 use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::markdown::render_markdown_message;
 use crate::tui::preview::{
-    render_message_body, render_session_document_with_options, shows_message_role,
-    split_sticky_body, DisplayDocument,
+    render_message_body, render_session_document_with_options, split_sticky_body, DisplayDocument,
+    SessionRenderOptions,
 };
 use crate::tui::profile;
 use crate::tui::theme::Theme;
@@ -42,6 +42,7 @@ pub struct ViewerState {
     pub scroll: usize,
     search: Input,
     active_match: Option<usize>,
+    hide_project_docs_autodump: bool,
     render_cache: Option<ViewerRenderCache>,
 }
 
@@ -53,6 +54,7 @@ struct ViewerRenderCache {
     theme_name: ThemeName,
     display_options: DisplayOptions,
     summary_stamp: Option<(i64, usize, usize)>,
+    hide_project_docs_autodump: bool,
     total_rows: usize,
     text: Text<'static>,
     match_rows: Vec<usize>,
@@ -90,11 +92,12 @@ impl Default for ViewerState {
 }
 
 impl ViewerState {
-    const HINTS: [KeymapHint; 6] = [
+    const HINTS: [KeymapHint; 7] = [
         KeymapHint::new("↑↓/PgUp/PgDn/Home/End", "scroll"),
         KeymapHint::new("^Up/^Dn", "message"),
         KeymapHint::new("^⇧Up/^⇧Dn", "user"),
         KeymapHint::new("^N/^P", "matches"),
+        KeymapHint::new("^B", "docs"),
         KeymapHint::new("^U/^E", "edit"),
         KeymapHint::new("Esc", "close"),
     ];
@@ -108,12 +111,17 @@ impl ViewerState {
             scroll: 0,
             search: Input::default().with_value(query.to_owned()),
             active_match: None,
+            hide_project_docs_autodump: true,
             render_cache: None,
         }
     }
 
     pub fn search_query(&self) -> &str {
         self.search.value()
+    }
+
+    pub fn hide_project_docs_autodump(&self) -> bool {
+        self.hide_project_docs_autodump
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -177,6 +185,12 @@ impl ViewerState {
                     theme_name,
                     display_options,
                 );
+                ViewerOutcome::Stay
+            }
+            KeyCode::Char('b') if key.modifiers == KeyModifiers::CONTROL => {
+                self.hide_project_docs_autodump = !self.hide_project_docs_autodump;
+                self.active_match = None;
+                self.render_cache = None;
                 ViewerOutcome::Stay
             }
             KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
@@ -419,13 +433,13 @@ impl ViewerState {
 
         let body_area = Self::body_area(area);
         let viewport_width = body_area.width.saturating_sub(2);
-        let rows = collect_message_rows(
+        let rows = collect_message_rows_with_options(
             session,
             summary,
             theme,
             viewport_width,
             scope,
-            display_options,
+            self.render_options(display_options),
         );
         let Some(target_row) = message_row_for_scroll(&rows, self.scroll, direction) else {
             return;
@@ -458,12 +472,18 @@ impl ViewerState {
                 || cache.theme_name != theme_name
                 || cache.display_options != display_options
                 || cache.summary_stamp != summary_stamp
+                || cache.hide_project_docs_autodump != self.hide_project_docs_autodump
         });
         if cache_miss {
             profile::event("viewer.cache.miss");
             let highlight_query = (!query.is_empty()).then_some(query.as_str());
-            let document =
-                render_viewer_document(session, summary, theme, highlight_query, display_options);
+            let document = render_viewer_document(
+                session,
+                summary,
+                theme,
+                highlight_query,
+                self.render_options(display_options),
+            );
             let text = document.text;
             let total_rows = wrapped_text_height(&text, width).max(1);
             let match_rows = collect_match_rows_in_text(&text, &query, width);
@@ -475,6 +495,7 @@ impl ViewerState {
                 theme_name,
                 display_options,
                 summary_stamp,
+                hide_project_docs_autodump: self.hide_project_docs_autodump,
                 total_rows,
                 text,
                 match_rows,
@@ -487,6 +508,13 @@ impl ViewerState {
         self.render_cache
             .as_ref()
             .expect("viewer cache should exist")
+    }
+
+    fn render_options(&self, display_options: DisplayOptions) -> SessionRenderOptions {
+        SessionRenderOptions {
+            display_options,
+            hide_project_docs_autodump: self.hide_project_docs_autodump,
+        }
     }
 }
 
@@ -501,7 +529,7 @@ fn render_viewer_document(
     summary: Option<&SummarySidecar>,
     theme: &Theme,
     highlight_query: Option<&str>,
-    display_options: DisplayOptions,
+    options: SessionRenderOptions,
 ) -> DisplayDocument {
     let mut lines = Vec::new();
     let mut sticky_markers = Vec::new();
@@ -521,7 +549,7 @@ fn render_viewer_document(
     }
     let session_start = lines.len();
     let session_doc =
-        render_session_document_with_options(session, theme, highlight_query, display_options);
+        render_session_document_with_options(session, theme, highlight_query, options);
     lines.extend(session_doc.text.lines);
     sticky_markers.extend(session_doc.sticky_markers.into_iter().map(|marker| {
         crate::tui::util::StickyLineMarker {
@@ -686,7 +714,7 @@ fn collect_match_rows(
         summary,
         theme,
         highlight_query,
-        DisplayOptions::default(),
+        SessionRenderOptions::default(),
     );
     collect_match_rows_in_text(&document.text, query, width)
 }
@@ -699,37 +727,107 @@ pub(crate) fn collect_message_rows(
     scope: MessageJumpScope,
     display_options: DisplayOptions,
 ) -> Vec<usize> {
+    let options = SessionRenderOptions {
+        display_options,
+        ..SessionRenderOptions::default()
+    };
+    collect_message_rows_with_options(session, summary, theme, width, scope, options)
+}
+
+pub(crate) fn collect_message_rows_with_options(
+    session: &Session,
+    summary: Option<&SummarySidecar>,
+    theme: &Theme,
+    width: u16,
+    scope: MessageJumpScope,
+    options: SessionRenderOptions,
+) -> Vec<usize> {
     if width == 0 {
         return Vec::new();
     }
 
     let width = width as usize;
-    let mut rows = Vec::with_capacity(session.messages.len());
+    let mut rows = Vec::with_capacity(session.messages.len().max(session.cells.len()));
     let mut row_offset = summary
         .map(|summary| {
             wrapped_text_height(&render_summary_leadin(summary, theme, None), width as u16) + 2
         })
         .unwrap_or(0);
 
-    for message in &session.messages {
-        if !shows_message_role(display_options, message.role) {
+    if session.cells.is_empty() {
+        for message in &session.messages {
+            if should_skip_message_row(message.role, &message.content, options) {
+                continue;
+            }
+            if matches!(scope, MessageJumpScope::Any)
+                || matches!(scope, MessageJumpScope::UserOnly) && message.role == MessageRole::User
+            {
+                rows.push(row_offset);
+            }
+            row_offset += wrapped_line_height(&message_header_text(message), width);
+
+            let rendered = render_message_body(
+                session.agent,
+                message.role,
+                message.content.as_str(),
+                theme,
+                None,
+            );
+            for line in &rendered.lines {
+                row_offset += wrapped_rendered_line_height(line, width);
+            }
+            row_offset += 1;
+        }
+        return rows;
+    }
+
+    for cell in &session.cells {
+        if matches!(cell, SessionCell::SessionInfo(_) | SessionCell::Metrics(_)) {
+            continue;
+        }
+        let SessionCell::Message {
+            role,
+            content,
+            timestamp,
+        } = cell
+        else {
+            let before = row_offset;
+            row_offset += wrapped_text_height(
+                &render_session_document_with_options(
+                    &Session {
+                        cells: vec![cell.clone()],
+                        messages: Vec::new(),
+                        session_info: None,
+                        ..session.clone()
+                    },
+                    theme,
+                    None,
+                    options,
+                )
+                .text,
+                width as u16,
+            );
+            if row_offset == before {
+                row_offset += 1;
+            }
+            continue;
+        };
+        if should_skip_message_row(*role, content, options) {
             continue;
         }
         if matches!(scope, MessageJumpScope::Any)
-            || matches!(scope, MessageJumpScope::UserOnly)
-                && message.role == crate::parse::MessageRole::User
+            || matches!(scope, MessageJumpScope::UserOnly) && *role == MessageRole::User
         {
             rows.push(row_offset);
         }
-        row_offset += wrapped_line_height(&message_header_text(message), width);
-
-        let rendered = render_message_body(
-            session.agent,
-            message.role,
-            message.content.as_str(),
-            theme,
-            None,
-        );
+        let message = crate::parse::SessionMessage {
+            role: *role,
+            content: content.clone(),
+            timestamp: *timestamp,
+            tool_name: None,
+        };
+        row_offset += wrapped_line_height(&message_header_text(&message), width);
+        let rendered = render_message_body(session.agent, *role, content.as_str(), theme, None);
         for line in &rendered.lines {
             row_offset += wrapped_rendered_line_height(line, width);
         }
@@ -737,6 +835,15 @@ pub(crate) fn collect_message_rows(
     }
 
     rows
+}
+
+fn should_skip_message_row(
+    role: MessageRole,
+    content: &str,
+    options: SessionRenderOptions,
+) -> bool {
+    !crate::tui::preview::shows_message_role(options.display_options, role)
+        || options.hide_project_docs_autodump && is_project_docs_autodump(role, content)
 }
 
 fn message_header_text(message: &crate::parse::SessionMessage) -> String {
@@ -976,18 +1083,20 @@ mod tests {
     use ratatui::text::{Line, Span, Text};
     use tui_input::Input;
 
-    use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionMessage};
+    use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionCell, SessionMessage};
     use crate::settings::{DisplayOptions, ThemeName};
     use crate::summary::{Fingerprint, SummarizeBackend, SummarySidecar};
     use crate::tui::preview::render_message_body;
+    use crate::tui::preview::SessionRenderOptions;
     use crate::tui::theme::Theme;
     use crate::tui::util::wrapped_text_height;
 
     use super::{
-        collect_line_match_rows, collect_match_rows, collect_message_rows, match_scrolloff,
-        message_header_text, message_row_for_scroll, next_match_index, previous_match_index,
-        scroll_for_match, scroll_progress_percent, viewer_title, MessageDirection,
-        MessageJumpScope, ViewerOutcome, ViewerState,
+        collect_line_match_rows, collect_match_rows, collect_message_rows,
+        collect_message_rows_with_options, match_scrolloff, message_header_text,
+        message_row_for_scroll, next_match_index, previous_match_index, scroll_for_match,
+        scroll_progress_percent, viewer_title, MessageDirection, MessageJumpScope, ViewerOutcome,
+        ViewerState,
     };
 
     #[test]
@@ -1170,6 +1279,92 @@ mod tests {
         let state = ViewerState::new();
 
         assert!(state.active_match.is_none());
+    }
+
+    #[test]
+    fn viewer_hides_project_docs_autodump_by_default_and_can_toggle_visible() {
+        let session = project_docs_session();
+        let area = Rect::new(0, 0, 80, 20);
+        let theme = Theme::default();
+        let mut state = ViewerState::new();
+
+        let hidden_text = rendered_lines(
+            &state
+                .render_cache(
+                    area,
+                    &session,
+                    None,
+                    &theme,
+                    ThemeName::Lazygit,
+                    DisplayOptions::default(),
+                )
+                .text,
+        )
+        .join("\n");
+
+        assert!(state.hide_project_docs_autodump());
+        assert!(!hidden_text.contains("AGENTS.md instructions"));
+        assert!(hidden_text.contains("real request"));
+
+        state.handle_key(
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            area,
+            Some(&session),
+            None,
+            &theme,
+            ThemeName::Lazygit,
+            DisplayOptions::default(),
+        );
+
+        let visible_text = rendered_lines(
+            &state
+                .render_cache(
+                    area,
+                    &session,
+                    None,
+                    &theme,
+                    ThemeName::Lazygit,
+                    DisplayOptions::default(),
+                )
+                .text,
+        )
+        .join("\n");
+
+        assert!(!state.hide_project_docs_autodump());
+        assert!(visible_text.contains("AGENTS.md instructions"));
+        assert!(visible_text.contains("real request"));
+    }
+
+    #[test]
+    fn message_navigation_skips_hidden_project_docs_autodump() {
+        let session = project_docs_session();
+        let theme = Theme::default();
+
+        let hidden_rows = collect_message_rows_with_options(
+            &session,
+            None,
+            &theme,
+            80,
+            MessageJumpScope::UserOnly,
+            SessionRenderOptions {
+                hide_project_docs_autodump: true,
+                ..SessionRenderOptions::default()
+            },
+        );
+        let visible_rows = collect_message_rows_with_options(
+            &session,
+            None,
+            &theme,
+            80,
+            MessageJumpScope::UserOnly,
+            SessionRenderOptions {
+                hide_project_docs_autodump: false,
+                ..SessionRenderOptions::default()
+            },
+        );
+
+        assert_eq!(hidden_rows, vec![0]);
+        assert_eq!(visible_rows, vec![0, 5]);
     }
 
     #[test]
@@ -1411,6 +1606,18 @@ mod tests {
         assert_eq!(state.scroll, 0);
     }
 
+    fn rendered_lines(text: &Text<'_>) -> Vec<String> {
+        text.lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
     fn sample_session() -> Session {
         Session {
             session_id: "session-1".to_owned(),
@@ -1447,6 +1654,46 @@ mod tests {
             ],
             content: "alpha beta gamma delta alpha\nomega alpha".to_owned(),
             cells: Vec::new(),
+            session_info: None,
+        }
+    }
+
+    fn project_docs_session() -> Session {
+        let docs = "# AGENTS.md instructions for /tmp/demo\n\n<INSTRUCTIONS>\nUse cargo test.\n</INSTRUCTIONS>";
+        let request = "real request";
+        Session {
+            session_id: "session-docs".to_owned(),
+            agent: Agent::Codex,
+            project: "/tmp/demo".to_owned(),
+            branch: None,
+            cwd: Some("/tmp/demo".to_owned()),
+            created: Some(Utc::now()),
+            modified: Some(Utc::now()),
+            modified_ts: 0,
+            lines: 8,
+            file_path: PathBuf::from("/tmp/demo/session-docs.jsonl"),
+            first_msg_role: Some(MessageRole::User),
+            first_msg_content: docs.to_owned(),
+            last_msg_role: Some(MessageRole::User),
+            last_msg_content: request.to_owned(),
+            first_user_msg_content: docs.to_owned(),
+            derivation_type: DerivationType::Original,
+            is_sidechain: false,
+            custom_title: Some("demo docs".to_owned()),
+            messages: Vec::new(),
+            content: format!("{docs}\n{request}"),
+            cells: vec![
+                SessionCell::Message {
+                    role: MessageRole::User,
+                    content: docs.to_owned(),
+                    timestamp: Some(Utc::now()),
+                },
+                SessionCell::Message {
+                    role: MessageRole::User,
+                    content: request.to_owned(),
+                    timestamp: Some(Utc::now()),
+                },
+            ],
             session_info: None,
         }
     }

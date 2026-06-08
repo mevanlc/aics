@@ -389,6 +389,22 @@ impl Session {
     }
 }
 
+pub fn is_project_docs_autodump(role: MessageRole, content: &str) -> bool {
+    if !matches!(role, MessageRole::User | MessageRole::System) {
+        return false;
+    }
+
+    let trimmed = content.trim_start();
+    [
+        "AGENTS.md instructions for ",
+        "# AGENTS.md instructions for ",
+        "CLAUDE.md instructions for ",
+        "# CLAUDE.md instructions for ",
+    ]
+    .into_iter()
+    .any(|header| trimmed.starts_with(header))
+}
+
 pub fn parse_timestamp_str(raw: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
         .ok()
@@ -693,7 +709,9 @@ pub fn system_time_or_epoch(timestamp: Option<SystemTime>) -> SystemTime {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_claude_project_dir, normalize_session_path};
+    use super::{
+        decode_claude_project_dir, is_project_docs_autodump, normalize_session_path, MessageRole,
+    };
 
     #[test]
     fn decodes_termux_project_dir_to_package_path() {
@@ -710,5 +728,25 @@ mod tests {
         let normalized = normalize_session_path("/data/data/com/termux/files/home/p/my/aics");
 
         assert_eq!(normalized, "/data/data/com.termux/files/home/p/my/aics");
+    }
+
+    #[test]
+    fn detects_project_docs_autodump_headers() {
+        assert!(is_project_docs_autodump(
+            MessageRole::User,
+            "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>Use cargo test</INSTRUCTIONS>",
+        ));
+        assert!(is_project_docs_autodump(
+            MessageRole::System,
+            "CLAUDE.md instructions for /repo\nFollow local rules.",
+        ));
+        assert!(!is_project_docs_autodump(
+            MessageRole::User,
+            "Please update AGENTS.md with the new commands.",
+        ));
+        assert!(!is_project_docs_autodump(
+            MessageRole::Assistant,
+            "# AGENTS.md instructions for /repo\nThis is quoted back to the user.",
+        ));
     }
 }

@@ -5,8 +5,8 @@ use ratatui::widgets::{Block, BorderType, Borders};
 use ratatui::Frame;
 
 use crate::parse::{
-    Agent, ExecStatus, MessageRole, PatchFile, PatchOp, PlanItemStatus, RuntimeMetrics, Session,
-    SessionCell, SessionInfo, ToolStatus,
+    is_project_docs_autodump, Agent, ExecStatus, MessageRole, PatchFile, PatchOp, PlanItemStatus,
+    RuntimeMetrics, Session, SessionCell, SessionInfo, ToolStatus,
 };
 use crate::settings::DisplayOptions;
 use crate::summary::{
@@ -26,6 +26,12 @@ use crate::tui::util::{
 pub struct DisplayDocument {
     pub text: Text<'static>,
     pub sticky_markers: Vec<StickyLineMarker>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SessionRenderOptions {
+    pub display_options: DisplayOptions,
+    pub hide_project_docs_autodump: bool,
 }
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
@@ -106,7 +112,16 @@ pub fn render_session_text_with_options(
     highlight_query: Option<&str>,
     display_options: DisplayOptions,
 ) -> Text<'static> {
-    render_session_document_with_options(session, theme, highlight_query, display_options).text
+    render_session_document_with_options(
+        session,
+        theme,
+        highlight_query,
+        SessionRenderOptions {
+            display_options,
+            ..SessionRenderOptions::default()
+        },
+    )
+    .text
 }
 
 pub fn render_session_document(
@@ -114,14 +129,19 @@ pub fn render_session_document(
     theme: &Theme,
     highlight_query: Option<&str>,
 ) -> DisplayDocument {
-    render_session_document_with_options(session, theme, highlight_query, DisplayOptions::default())
+    render_session_document_with_options(
+        session,
+        theme,
+        highlight_query,
+        SessionRenderOptions::default(),
+    )
 }
 
 pub fn render_session_document_with_options(
     session: &Session,
     theme: &Theme,
     highlight_query: Option<&str>,
-    display_options: DisplayOptions,
+    options: SessionRenderOptions,
 ) -> DisplayDocument {
     let _profile = profile::scope("preview.render_session_text");
     let mut lines = Vec::new();
@@ -142,19 +162,23 @@ pub fn render_session_document_with_options(
     if session.cells.is_empty() {
         // Backwards compatibility: if no cells were emitted, fall back to messages.
         for message in &session.messages {
-            if shows_message_role(display_options, message.role) {
-                render_message_into(
-                    &mut lines,
-                    &mut sticky_markers,
-                    session.agent,
-                    message,
-                    theme,
-                    highlight_query,
-                );
+            if should_hide_message(message.role, &message.content, options) {
+                continue;
             }
+            render_message_into(
+                &mut lines,
+                &mut sticky_markers,
+                session.agent,
+                message,
+                theme,
+                highlight_query,
+            );
         }
     } else {
         for cell in &session.cells {
+            if should_hide_cell(cell, options) {
+                continue;
+            }
             // SessionInfo is rendered separately above.
             if matches!(cell, SessionCell::SessionInfo(_)) {
                 continue;
@@ -170,7 +194,7 @@ pub fn render_session_document_with_options(
                 cell,
                 theme,
                 highlight_query,
-                display_options,
+                options.display_options,
             );
         }
 
@@ -191,6 +215,18 @@ pub fn render_session_document_with_options(
     DisplayDocument {
         text: Text::from(lines),
         sticky_markers,
+    }
+}
+
+fn should_hide_message(role: MessageRole, content: &str, options: SessionRenderOptions) -> bool {
+    !shows_message_role(options.display_options, role)
+        || options.hide_project_docs_autodump && is_project_docs_autodump(role, content)
+}
+
+fn should_hide_cell(cell: &SessionCell, options: SessionRenderOptions) -> bool {
+    match cell {
+        SessionCell::Message { role, content, .. } => should_hide_message(*role, content, options),
+        _ => false,
     }
 }
 
@@ -392,7 +428,15 @@ pub fn render_session_section_document_with_options(
     display_options: DisplayOptions,
 ) -> DisplayDocument {
     let body = if let Some(session) = session {
-        render_session_document_with_options(session, theme, highlight_query, display_options)
+        render_session_document_with_options(
+            session,
+            theme,
+            highlight_query,
+            SessionRenderOptions {
+                display_options,
+                ..SessionRenderOptions::default()
+            },
+        )
     } else {
         DisplayDocument {
             text: render_summary_missing(
@@ -1744,7 +1788,7 @@ mod tests {
     use super::{
         normalize_highlight_query, render_composite_text, render_session_document,
         render_session_text, render_summary_missing, render_summary_text, result_sticky_subject,
-        RESULT_SUBJECT_MAX_CHARS,
+        SessionRenderOptions, RESULT_SUBJECT_MAX_CHARS,
     };
     use crate::parse::{
         ExecStatus, PatchFile, PatchOp, PlanItem, PlanItemStatus, RuntimeMetrics, SessionCell,
@@ -1933,11 +1977,14 @@ mod tests {
             &session,
             &theme,
             None,
-            DisplayOptions {
-                hide_tool_calls: true,
-                hide_tool_results: true,
-                hide_agent_replies: true,
-                hide_user_messages: true,
+            SessionRenderOptions {
+                display_options: DisplayOptions {
+                    hide_tool_calls: true,
+                    hide_tool_results: true,
+                    hide_agent_replies: true,
+                    hide_user_messages: true,
+                },
+                ..SessionRenderOptions::default()
             },
         );
         let joined = rendered_lines(&doc.text).join("\n");
@@ -1972,11 +2019,14 @@ mod tests {
             &session,
             &theme,
             None,
-            DisplayOptions {
-                hide_tool_calls: false,
-                hide_tool_results: true,
-                hide_agent_replies: false,
-                hide_user_messages: false,
+            SessionRenderOptions {
+                display_options: DisplayOptions {
+                    hide_tool_calls: false,
+                    hide_tool_results: true,
+                    hide_agent_replies: false,
+                    hide_user_messages: false,
+                },
+                ..SessionRenderOptions::default()
             },
         );
         let joined = rendered_lines(&doc.text).join("\n");

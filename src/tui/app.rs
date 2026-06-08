@@ -49,6 +49,7 @@ use crate::summary::{
 };
 use crate::trash::TrashStore;
 use crate::tui::actions::{self, ActionMenuState, ActionOutcome, SessionAction};
+use crate::tui::ansi::strip_terminal_escapes;
 use crate::tui::filter::{FilterModalState, FilterOutcome};
 use crate::tui::help::{HelpModalState, HelpOutcome, HelpTab};
 use crate::tui::profile;
@@ -642,6 +643,19 @@ impl App {
                     spans.append(&mut line.spans);
                     line = Line::from(spans);
                 }
+            }
+        }
+
+        // Session transcripts can contain raw control characters (tabs, ANSI/OSC
+        // escapes recorded from terminal output). ratatui assumes printable,
+        // fixed-width cell content, so emitting those raw desyncs its cell map
+        // from the terminal and corrupts the list (stale cells / black boxes).
+        // Mirror the preview paths and strip escapes before the text reaches the
+        // renderer. This is the single chokepoint for every snippet source.
+        for span in &mut line.spans {
+            let cleaned = strip_terminal_escapes(span.content.as_ref());
+            if cleaned != span.content.as_ref() {
+                span.content = cleaned.into();
             }
         }
 

@@ -13,7 +13,6 @@ use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::layout;
 use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
-use crate::tui::util::textarea_input_from_key_event;
 
 const HELP_HINTS: [KeymapHint; 4] = [
     KeymapHint::new("Esc", "clear/close"),
@@ -137,7 +136,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 21] = [
     ),
 ];
 
-const VIEWER_ITEMS: [HelpItem; 16] = [
+const VIEWER_ITEMS: [HelpItem; 17] = [
     HelpItem::new(
         "?",
         "open this help",
@@ -172,6 +171,11 @@ const VIEWER_ITEMS: [HelpItem; 16] = [
         "^U / ^E",
         "edit line",
         "Use readline-style editing in the always-focused search box, such as Ctrl+U to clear backward and Ctrl+E to move to the end.",
+    ),
+    HelpItem::new(
+        "^B",
+        "toggle project docs",
+        "Show or hide auto-dumped AGENTS.md and CLAUDE.md instruction blocks in the viewer.",
     ),
     HelpItem::new(
         "Shift ↑",
@@ -344,7 +348,7 @@ impl HelpModalState {
                 HelpOutcome::Stay
             }
             _ => {
-                if self.filter.input(textarea_input_from_key_event(key)) {
+                if self.filter.input(key) {
                     self.collapse_filter_to_single_line();
                     self.selected = 0;
                 }
@@ -378,7 +382,7 @@ impl HelpModalState {
         frame.render_widget(Paragraph::new(self.render_tabs(theme)), left_chunks[0]);
 
         self.configure_filter_widget(theme);
-        frame.render_widget(self.filter.widget(), left_chunks[1]);
+        frame.render_widget(&self.filter, left_chunks[1]);
 
         let filtered = self.filtered_items();
         let max_rows = left_chunks[2].height as usize;
