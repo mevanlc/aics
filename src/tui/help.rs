@@ -29,7 +29,7 @@ const RIGHT_PANEL_HORIZONTAL_CHROME: u16 = 3;
 const RIGHT_PANEL_MIN_WIDTH: u16 = RIGHT_PANEL_MIN_CONTENT_WIDTH + RIGHT_PANEL_HORIZONTAL_CHROME;
 const HELP_KEY_COLUMN_WIDTH: usize = 12;
 
-const SESSION_LIST_ITEMS: [HelpItem; 19] = [
+const SESSION_LIST_ITEMS: [HelpItem; 21] = [
     HelpItem::new(
         "Type",
         "filter sessions",
@@ -94,6 +94,16 @@ const SESSION_LIST_ITEMS: [HelpItem; 19] = [
         "^N / ^P",
         "preview matches",
         "When the preview pane is visible and the search query is non-empty, jump to the first/next or previous/last highlighted match inside the preview, including matches outside the visible viewport.",
+    ),
+    HelpItem::new(
+        "Shift ↑ / ↓",
+        "jump message/event",
+        "When the preview pane is visible, jump to the previous or next message or event boundary in the preview.",
+    ),
+    HelpItem::new(
+        "^Shift ↑ / ↓",
+        "jump user message",
+        "When the preview pane is visible, jump backward or forward to the previous or next user-authored message, skipping assistant replies, tool calls, and tool results.",
     ),
     HelpItem::new(
         "^Y",
