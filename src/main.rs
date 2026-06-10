@@ -292,16 +292,21 @@ struct StartupProgress {
 impl StartupProgress {
     fn new(draw_target: ProgressDrawTarget) -> Self {
         let bar = ProgressBar::with_draw_target(None, draw_target);
-        bar.set_style(bar_style());
+        bar.set_style(discovering_style());
         bar.enable_steady_tick(Duration::from_millis(100));
         Self { bar }
     }
 
     fn update(&mut self, event: SyncProgress) {
         match event {
-            SyncProgress::Discovering { .. } => {}
+            SyncProgress::Discovering { discovered } => {
+                self.bar.set_message(format!("{discovered} found"));
+            }
             SyncProgress::IndexingStarted { total } => {
+                self.bar.set_style(indexing_style());
+                self.bar.set_message(String::new());
                 self.bar.set_length(total as u64);
+                self.bar.set_position(0);
             }
             SyncProgress::IndexingProgress { processed, .. } => {
                 self.bar.set_position(processed as u64);
@@ -314,10 +319,15 @@ impl StartupProgress {
     }
 }
 
-fn bar_style() -> ProgressStyle {
-    ProgressStyle::with_template("Indexing {bar:40}")
+fn discovering_style() -> ProgressStyle {
+    ProgressStyle::with_template("{spinner:.green} Discovering sessions {msg:.dim}")
         .expect("valid progress template")
-        .progress_chars("=> ")
+}
+
+fn indexing_style() -> ProgressStyle {
+    ProgressStyle::with_template("Indexing {wide_bar:.green/blue} {pos}/{len} ({eta})")
+        .expect("valid progress template")
+        .progress_chars("█▉▊▋▌▍▎▏ ")
 }
 
 fn build_request(cli: &Cli) -> Result<SearchRequest> {
