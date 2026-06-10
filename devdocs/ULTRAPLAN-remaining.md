@@ -2,7 +2,7 @@
 
 Last reviewed: 2026-04-06
 
-This is a short status pass against [ULTRAPLAN.md](/Users/mclark/p/my/aics/aidocs/ULTRAPLAN.md).
+This is a short status pass against [ULTRAPLAN.md](/Users/mclark/p/my/aics/devdocs/ULTRAPLAN.md).
 
 ## Status Legend
 
