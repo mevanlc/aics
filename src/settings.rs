@@ -1,9 +1,10 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::summary::prompt::DEFAULT_PROMPT;
 
@@ -75,6 +76,93 @@ pub struct DisplayOptions {
     pub hide_user_messages: bool,
     #[serde(default = "default_hide_project_docs_autodump")]
     pub hide_project_docs_autodump: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SettingsPatch {
+    theme: Option<ThemeName>,
+    claude_command: Option<String>,
+    claude_args: Option<String>,
+    codex_command: Option<String>,
+    codex_args: Option<String>,
+    show_preview: Option<bool>,
+    preview_width_pct: Option<u16>,
+    session_separator: Option<String>,
+    snippet_line_count: Option<usize>,
+    summarize_command: Option<String>,
+    summarize_prompt: Option<String>,
+    display_options: Option<DisplayOptions>,
+}
+
+impl SettingsPatch {
+    pub fn settings_modal(settings: &Settings) -> Self {
+        Self {
+            theme: Some(settings.theme),
+            claude_command: Some(settings.claude_command.clone()),
+            claude_args: Some(settings.claude_args.clone()),
+            codex_command: Some(settings.codex_command.clone()),
+            codex_args: Some(settings.codex_args.clone()),
+            session_separator: Some(settings.session_separator.clone()),
+            snippet_line_count: Some(settings.snippet_line_count),
+            summarize_command: Some(settings.summarize_command.clone()),
+            summarize_prompt: Some(settings.summarize_prompt.clone()),
+            ..Self::default()
+        }
+    }
+
+    pub fn layout(show_preview: bool, preview_width_pct: u16) -> Self {
+        Self {
+            show_preview: Some(show_preview),
+            preview_width_pct: Some(preview_width_pct),
+            ..Self::default()
+        }
+    }
+
+    pub fn display_options(display_options: DisplayOptions) -> Self {
+        Self {
+            display_options: Some(display_options),
+            ..Self::default()
+        }
+    }
+
+    pub fn apply_to(&self, settings: &mut Settings) {
+        if let Some(value) = self.theme {
+            settings.theme = value;
+        }
+        if let Some(value) = self.claude_command.as_ref() {
+            settings.claude_command.clone_from(value);
+        }
+        if let Some(value) = self.claude_args.as_ref() {
+            settings.claude_args.clone_from(value);
+        }
+        if let Some(value) = self.codex_command.as_ref() {
+            settings.codex_command.clone_from(value);
+        }
+        if let Some(value) = self.codex_args.as_ref() {
+            settings.codex_args.clone_from(value);
+        }
+        if let Some(value) = self.show_preview {
+            settings.show_preview = value;
+        }
+        if let Some(value) = self.preview_width_pct {
+            settings.preview_width_pct = value;
+        }
+        if let Some(value) = self.session_separator.as_ref() {
+            settings.session_separator.clone_from(value);
+        }
+        if let Some(value) = self.snippet_line_count {
+            settings.snippet_line_count = value;
+        }
+        if let Some(value) = self.summarize_command.as_ref() {
+            settings.summarize_command.clone_from(value);
+        }
+        if let Some(value) = self.summarize_prompt.as_ref() {
+            settings.summarize_prompt.clone_from(value);
+        }
+        if let Some(value) = self.display_options {
+            settings.display_options = value;
+        }
+    }
 }
 
 impl Default for DisplayOptions {
@@ -151,10 +239,14 @@ impl Default for Settings {
 impl Settings {
     pub fn load() -> Result<Self> {
         let path = settings_path()?;
+        Self::load_from_path(&path)
+    }
+
+    fn load_from_path(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let contents = fs::read_to_string(&path)
+        let contents = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
         let settings: Self = serde_json::from_str(&contents)
             .with_context(|| format!("failed to parse {}", path.display()))?;
@@ -163,14 +255,39 @@ impl Settings {
 
     pub fn save(&self) -> Result<()> {
         let path = settings_path()?;
+        Self::save_to_path(&path, self)
+    }
+
+    pub fn save_patch(patch: &SettingsPatch) -> Result<Self> {
+        let path = settings_path()?;
+        Self::save_patch_to_path(&path, patch)
+    }
+
+    fn save_to_path(path: &Path, settings: &Self) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        let contents = serde_json::to_string_pretty(self)?;
-        fs::write(&path, contents)
-            .with_context(|| format!("failed to write {}", path.display()))?;
+        let contents = serde_json::to_string_pretty(settings)?;
+        fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
         Ok(())
+    }
+
+    fn save_patch_to_path(path: &Path, patch: &SettingsPatch) -> Result<Self> {
+        let raw = load_raw_settings(path)?;
+        let mut settings = raw
+            .as_ref()
+            .map(|value| {
+                serde_json::from_value(value.clone())
+                    .with_context(|| format!("failed to parse {}", path.display()))
+            })
+            .unwrap_or_else(|| Ok(Self::default()))?;
+        patch.apply_to(&mut settings);
+
+        let mut output = serde_json::to_value(&settings)?;
+        preserve_unknown_settings_fields(raw.as_ref(), &mut output);
+        write_settings_value(path, &output)?;
+        Ok(settings)
     }
 
     /// Split a command string into program and arguments.
@@ -205,6 +322,57 @@ impl Settings {
     }
 }
 
+fn load_raw_settings(path: &Path) -> Result<Option<Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let value: Value = serde_json::from_str(&contents)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(Some(value))
+}
+
+fn write_settings_value(path: &Path, value: &Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let contents = serde_json::to_string_pretty(value)?;
+    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn preserve_unknown_settings_fields(raw: Option<&Value>, output: &mut Value) {
+    let Some(Value::Object(raw_object)) = raw else {
+        return;
+    };
+    let Value::Object(output_object) = output else {
+        return;
+    };
+
+    for (key, value) in raw_object {
+        if !SETTINGS_FIELD_NAMES.contains(&key.as_str()) {
+            output_object.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+const SETTINGS_FIELD_NAMES: &[&str] = &[
+    "theme",
+    "claude_command",
+    "claude_args",
+    "codex_command",
+    "codex_args",
+    "show_preview",
+    "preview_width_pct",
+    "session_separator",
+    "snippet_line_count",
+    "summarize_command",
+    "summarize_prompt",
+    "display_options",
+];
+
 fn settings_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("settings.json"))
 }
@@ -223,6 +391,7 @@ pub fn config_dir() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::ring_cursor::RingCursor;
+    use tempfile::TempDir;
 
     #[test]
     fn fresh_install_has_preview_pane_on() {
@@ -258,6 +427,85 @@ mod tests {
 
         assert!(parsed.hide_tool_calls);
         assert!(parsed.hide_project_docs_autodump);
+    }
+
+    #[test]
+    fn layout_patch_preserves_unpatched_disk_settings() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        let disk = Settings {
+            theme: ThemeName::Sunset,
+            session_separator: "---".to_owned(),
+            display_options: DisplayOptions {
+                hide_tool_calls: true,
+                ..DisplayOptions::default()
+            },
+            show_preview: false,
+            preview_width_pct: 60,
+            ..Settings::default()
+        };
+        Settings::save_to_path(&path, &disk).unwrap();
+
+        Settings::save_patch_to_path(&path, &SettingsPatch::layout(true, 33)).unwrap();
+
+        let saved = Settings::load_from_path(&path).unwrap();
+        assert_eq!(saved.theme, ThemeName::Sunset);
+        assert_eq!(saved.session_separator, "---");
+        assert!(saved.display_options.hide_tool_calls);
+        assert!(saved.show_preview);
+        assert_eq!(saved.preview_width_pct, 33);
+    }
+
+    #[test]
+    fn settings_modal_patch_preserves_layout_and_display_options() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        let disk = Settings {
+            show_preview: false,
+            preview_width_pct: 65,
+            display_options: DisplayOptions {
+                hide_agent_replies: true,
+                ..DisplayOptions::default()
+            },
+            ..Settings::default()
+        };
+        Settings::save_to_path(&path, &disk).unwrap();
+
+        let modal = Settings {
+            theme: ThemeName::Aics,
+            claude_command: "claude-dev".to_owned(),
+            session_separator: "~~~".to_owned(),
+            snippet_line_count: 5,
+            show_preview: true,
+            preview_width_pct: 25,
+            display_options: DisplayOptions::default(),
+            ..Settings::default()
+        };
+        Settings::save_patch_to_path(&path, &SettingsPatch::settings_modal(&modal)).unwrap();
+
+        let saved = Settings::load_from_path(&path).unwrap();
+        assert_eq!(saved.theme, ThemeName::Aics);
+        assert_eq!(saved.claude_command, "claude-dev");
+        assert_eq!(saved.session_separator, "~~~");
+        assert_eq!(saved.snippet_line_count, 5);
+        assert!(!saved.show_preview);
+        assert_eq!(saved.preview_width_pct, 65);
+        assert!(saved.display_options.hide_agent_replies);
+    }
+
+    #[test]
+    fn patch_preserves_unknown_json_fields() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        fs::write(&path, r#"{"theme":"sunset","future_option":{"keep":true}}"#).unwrap();
+
+        Settings::save_patch_to_path(&path, &SettingsPatch::layout(false, 44)).unwrap();
+
+        let raw: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["theme"], "sunset");
+        assert_eq!(raw["show_preview"], false);
+        assert_eq!(raw["preview_width_pct"], 44);
+        assert_eq!(raw["future_option"]["keep"], true);
     }
 
     #[test]

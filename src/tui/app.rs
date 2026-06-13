@@ -40,7 +40,7 @@ use crate::index::{
 use crate::parse::claude::read_claude_autosummaries;
 use crate::parse::{parse_session_file, Agent, MessageRole, Session};
 use crate::scan::{AgentHomes, SessionRoots};
-use crate::settings::{DisplayOptions, Settings, ThemeName};
+use crate::settings::{DisplayOptions, Settings, SettingsPatch, ThemeName};
 use crate::summary::sidecar::sidecar_path;
 use crate::summary::staleness::fingerprint as compute_fingerprint;
 use crate::summary::{
@@ -1663,16 +1663,15 @@ impl App {
         Theme::from_name(self.current_frame_theme_name())
     }
 
-    fn apply_settings(&mut self, mut new_settings: Settings) -> Result<()> {
-        // Layout prefs are controlled directly from the main screen, not the
-        // settings modal, so preserve the live values here.
-        new_settings.show_preview = self.preview_visible;
-        new_settings.preview_width_pct = self.preview_width_pct;
-        new_settings.display_options = self.display_options;
+    fn apply_settings(&mut self, new_settings: Settings) -> Result<()> {
+        let patch = SettingsPatch::settings_modal(&new_settings);
+        patch.apply_to(&mut self.settings);
+        self.settings.show_preview = self.preview_visible;
+        self.settings.preview_width_pct = self.preview_width_pct;
+        self.settings.display_options = self.display_options;
         self.theme = Theme::from_name(new_settings.theme);
         self.preview_render_cache = None;
-        self.settings = new_settings;
-        if let Err(err) = self.settings.save() {
+        if let Err(err) = Settings::save_patch(&patch) {
             self.statusline = Some(statusline::Entry::failed(format!(
                 "settings error: {err:#}"
             )));
@@ -1741,10 +1740,11 @@ impl App {
             return;
         }
         self.display_options = options;
-        self.settings.display_options = options;
+        let patch = SettingsPatch::display_options(options);
+        patch.apply_to(&mut self.settings);
         self.preview_render_cache = None;
         self.preview_active_match = None;
-        if let Err(err) = self.settings.save() {
+        if let Err(err) = Settings::save_patch(&patch) {
             self.statusline = Some(statusline::Entry::failed(format!(
                 "settings error: {err:#}"
             )));
@@ -1937,9 +1937,9 @@ impl App {
     }
 
     fn save_layout_prefs(&mut self) {
-        self.settings.show_preview = self.preview_visible;
-        self.settings.preview_width_pct = self.preview_width_pct;
-        if let Err(err) = self.settings.save() {
+        let patch = SettingsPatch::layout(self.preview_visible, self.preview_width_pct);
+        patch.apply_to(&mut self.settings);
+        if let Err(err) = Settings::save_patch(&patch) {
             self.statusline = Some(statusline::Entry::failed(format!(
                 "settings error: {err:#}"
             )));
