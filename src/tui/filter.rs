@@ -115,6 +115,10 @@ impl FilterModalState {
             *self = Self::new(local_scope, &SearchFilters::default(), SortMode::Time);
             return Ok(FilterOutcome::Stay);
         }
+        if let Some(field) = self.mnemonic_target(key) {
+            self.selected.set(&field);
+            return Ok(FilterOutcome::Stay);
+        }
 
         match key.code {
             KeyCode::Esc => Ok(FilterOutcome::Close),
@@ -188,17 +192,19 @@ impl FilterModalState {
 
             rows.push(Line::from(vec![
                 Span::styled(prefix, style),
+                Span::styled(format!("[{}] ", field.mnemonic()), style),
                 Span::styled(format!("{:<12}", field.label()), style),
                 Span::styled(field.value(self, scope_label), style),
             ]));
         }
 
-        const FILTER_HINTS: [KeymapHint; 5] = [
+        const FILTER_HINTS: [KeymapHint; 6] = [
             KeymapHint::new("Enter", "apply"),
             KeymapHint::new("Esc", "close"),
             KeymapHint::new("^R", "reset"),
             KeymapHint::new("←/→", "toggle"),
             KeymapHint::new("↑↓", "move"),
+            KeymapHint::new("letter", "jump"),
         ];
 
         frame.render_widget(Paragraph::new(rows), left_chunks[0]);
@@ -286,6 +292,23 @@ impl FilterModalState {
         }
     }
 
+    fn mnemonic_target(&self, key: KeyEvent) -> Option<FilterField> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return None;
+        }
+
+        let is_alt = key.modifiers.contains(KeyModifiers::ALT);
+        let is_plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+        if !is_alt && (!is_plain || self.selected.current().is_text()) {
+            return None;
+        }
+
+        let KeyCode::Char(ch) = key.code else {
+            return None;
+        };
+        FilterField::from_mnemonic(ch)
+    }
+
     fn adjust_current(&mut self, forward: bool) {
         match *self.selected.current() {
             FilterField::Scope => self.scope_global = !self.scope_global,
@@ -336,11 +359,11 @@ impl FilterModalState {
             _ => return None,
         };
 
-        // prefix "› " (2) + label "{:<12}" (12) = 14
+        // prefix "› " (2) + mnemonic "[x] " (4) + label "{:<12}" (12) = 18
         Some((
             rows_area
                 .x
-                .saturating_add(14 + input.visual_cursor() as u16),
+                .saturating_add(18 + input.visual_cursor() as u16),
             rows_area.y.saturating_add(row_index),
         ))
     }
@@ -370,6 +393,29 @@ impl FilterField {
             FilterField::Trashed => "Trashed",
             FilterField::Sort => "Sort",
         }
+    }
+
+    fn mnemonic(self) -> char {
+        match self {
+            FilterField::Scope => 's',
+            FilterField::Agent => 'a',
+            FilterField::Branch => 'b',
+            FilterField::After => 'f',
+            FilterField::Before => 'e',
+            FilterField::MinLines => 'm',
+            FilterField::Original => 'o',
+            FilterField::Trimmed => 't',
+            FilterField::Continued => 'c',
+            FilterField::SubAgents => 'u',
+            FilterField::LiveOnly => 'l',
+            FilterField::Trashed => 'h',
+            FilterField::Sort => 'r',
+        }
+    }
+
+    fn from_mnemonic(ch: char) -> Option<Self> {
+        let ch = ch.to_ascii_lowercase();
+        FIELD_ORDER.into_iter().find(|field| field.mnemonic() == ch)
     }
 
     fn description(self) -> &'static str {
@@ -489,7 +535,7 @@ mod tests {
 
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::FilterModalState;
+    use super::{FilterField, FilterModalState};
     use crate::index::{Scope, SearchFilters, SortMode};
 
     #[test]
@@ -509,5 +555,52 @@ mod tests {
 
         let update = state.build_update(&scope).unwrap();
         assert_eq!(update.sort, SortMode::Time);
+    }
+
+    #[test]
+    fn plain_mnemonic_jumps_from_non_text_field() {
+        let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
+        let mut state = FilterModalState::new(&scope, &SearchFilters::default(), SortMode::Time);
+
+        let outcome = state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+                &scope,
+            )
+            .unwrap();
+
+        assert!(matches!(outcome, super::FilterOutcome::Stay));
+        assert_eq!(*state.selected.current(), FilterField::Sort);
+    }
+
+    #[test]
+    fn plain_mnemonic_types_into_text_field() {
+        let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
+        let mut state = FilterModalState::new(&scope, &SearchFilters::default(), SortMode::Time);
+        assert!(state.selected.set(&FilterField::Branch));
+
+        state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+                &scope,
+            )
+            .unwrap();
+
+        assert_eq!(*state.selected.current(), FilterField::Branch);
+        assert_eq!(state.branch.value(), "s");
+    }
+
+    #[test]
+    fn alt_mnemonic_jumps_from_text_field() {
+        let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
+        let mut state = FilterModalState::new(&scope, &SearchFilters::default(), SortMode::Time);
+        assert!(state.selected.set(&FilterField::Branch));
+
+        state
+            .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT), &scope)
+            .unwrap();
+
+        assert_eq!(*state.selected.current(), FilterField::Scope);
+        assert_eq!(state.branch.value(), "");
     }
 }

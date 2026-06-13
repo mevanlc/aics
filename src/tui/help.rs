@@ -20,6 +20,12 @@ const HELP_HINTS: [KeymapHint; 4] = [
     KeymapHint::new("↑↓", "move"),
     KeymapHint::new("Type", "filter"),
 ];
+const QUERY_HELP_HINTS: [KeymapHint; 3] = [
+    KeymapHint::new("Esc", "close"),
+    KeymapHint::new("Tab", "switch tab"),
+    KeymapHint::new("↑↓", "scroll"),
+];
+const HELP_TABS: [HelpTab; 3] = [HelpTab::SessionList, HelpTab::Viewer, HelpTab::SearchQuery];
 
 const PAGE_STEP: usize = 8;
 const LEFT_PANEL_PREFERRED_WIDTH: u16 = 36;
@@ -52,7 +58,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 21] = [
     HelpItem::new(
         "^X",
         "view menu",
-        "Open display toggles for hiding tool results, agent replies, or user messages in preview and viewer transcript rendering.",
+        "Open display toggles for hiding AGENTS.md/CLAUDE.md instruction blocks, tool results, agent replies, or user messages in preview and viewer transcript rendering.",
     ),
     HelpItem::new(
         "PgUp / PgDn",
@@ -136,7 +142,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 21] = [
     ),
 ];
 
-const VIEWER_ITEMS: [HelpItem; 17] = [
+const VIEWER_ITEMS: [HelpItem; 16] = [
     HelpItem::new(
         "?",
         "open this help",
@@ -171,11 +177,6 @@ const VIEWER_ITEMS: [HelpItem; 17] = [
         "^U / ^E",
         "edit line",
         "Use readline-style editing in the always-focused search box, such as Ctrl+U to clear backward and Ctrl+E to move to the end.",
-    ),
-    HelpItem::new(
-        "^B",
-        "toggle project docs",
-        "Show or hide auto-dumped AGENTS.md and CLAUDE.md instruction blocks in the viewer.",
     ),
     HelpItem::new(
         "Shift ↑",
@@ -228,6 +229,7 @@ const VIEWER_ITEMS: [HelpItem; 17] = [
 pub enum HelpTab {
     SessionList,
     Viewer,
+    SearchQuery,
 }
 
 impl HelpTab {
@@ -235,6 +237,7 @@ impl HelpTab {
         match self {
             Self::SessionList => "Session List",
             Self::Viewer => "Viewer",
+            Self::SearchQuery => "Search Query",
         }
     }
 
@@ -242,14 +245,20 @@ impl HelpTab {
         match self {
             Self::SessionList => "Session List Hotkeys",
             Self::Viewer => "Viewer Hotkeys",
+            Self::SearchQuery => "Search Query Help",
         }
     }
 
-    fn items(self) -> &'static [HelpItem] {
+    fn items(self) -> Option<&'static [HelpItem]> {
         match self {
-            Self::SessionList => &SESSION_LIST_ITEMS,
-            Self::Viewer => &VIEWER_ITEMS,
+            Self::SessionList => Some(&SESSION_LIST_ITEMS),
+            Self::Viewer => Some(&VIEWER_ITEMS),
+            Self::SearchQuery => None,
         }
+    }
+
+    fn is_hotkey_tab(self) -> bool {
+        self.items().is_some()
     }
 }
 
@@ -275,6 +284,7 @@ pub enum HelpOutcome {
 pub struct HelpModalState {
     tab: RingCursor<HelpTab>,
     selected: usize,
+    query_scroll: u16,
     filter: TextArea<'static>,
 }
 
@@ -283,6 +293,7 @@ impl fmt::Debug for HelpModalState {
         f.debug_struct("HelpModalState")
             .field("tab", &self.tab)
             .field("selected", &self.selected)
+            .field("query_scroll", &self.query_scroll)
             .field("filter", &self.filter_text())
             .finish()
     }
@@ -293,6 +304,7 @@ impl HelpModalState {
         Self {
             tab: help_tab_cursor(tab),
             selected: 0,
+            query_scroll: 0,
             filter: build_filter_input(),
         }
     }
@@ -302,6 +314,10 @@ impl HelpModalState {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> HelpOutcome {
+        if !self.tab().is_hotkey_tab() {
+            return self.handle_query_help_key(key);
+        }
+
         match key.code {
             KeyCode::Esc => {
                 if self.filter_text().is_empty() {
@@ -360,6 +376,11 @@ impl HelpModalState {
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let popup = layout::centered_rect(area, 80, 72);
         frame.render_widget(Clear, popup);
+
+        if !self.tab().is_hotkey_tab() {
+            self.render_query_help(frame, popup, theme);
+            return;
+        }
 
         let [left_area, right_area] = split_help_columns(popup);
 
@@ -479,6 +500,87 @@ impl HelpModalState {
         );
     }
 
+    fn handle_query_help_key(&mut self, key: KeyEvent) -> HelpOutcome {
+        match key.code {
+            KeyCode::Esc => HelpOutcome::Close,
+            KeyCode::Tab => {
+                self.switch_tab(true);
+                HelpOutcome::Stay
+            }
+            KeyCode::BackTab => {
+                self.switch_tab(false);
+                HelpOutcome::Stay
+            }
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+                self.query_scroll = self.query_scroll.saturating_sub(1);
+                HelpOutcome::Stay
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+                self.query_scroll = self.query_scroll.saturating_add(1);
+                HelpOutcome::Stay
+            }
+            KeyCode::PageUp => {
+                self.query_scroll = self.query_scroll.saturating_sub(PAGE_STEP as u16);
+                HelpOutcome::Stay
+            }
+            KeyCode::PageDown => {
+                self.query_scroll = self.query_scroll.saturating_add(PAGE_STEP as u16);
+                HelpOutcome::Stay
+            }
+            KeyCode::Home => {
+                self.query_scroll = 0;
+                HelpOutcome::Stay
+            }
+            KeyCode::End => {
+                self.query_scroll = u16::MAX / 4;
+                HelpOutcome::Stay
+            }
+            KeyCode::Enter => HelpOutcome::Stay,
+            KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                HelpOutcome::Stay
+            }
+            _ => HelpOutcome::Stay,
+        }
+    }
+
+    fn render_query_help(&mut self, frame: &mut Frame, popup: Rect, theme: &Theme) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(theme.border_style(true))
+            .title(block_title(self.tab.current().title()));
+        frame.render_widget(block, popup);
+
+        let inner = padded_inner(popup);
+        let chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+
+        frame.render_widget(Paragraph::new(self.render_tabs(theme)), chunks[0]);
+
+        let sep_width = chunks[1].width as usize;
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "─".repeat(sep_width),
+                Style::default().fg(theme.border),
+            ))),
+            chunks[1],
+        );
+
+        frame.render_widget(
+            Paragraph::new(search_query_help_lines(theme))
+                .style(Style::default().fg(theme.text))
+                .scroll((self.query_scroll, 0))
+                .wrap(Wrap { trim: false }),
+            chunks[2],
+        );
+        keymap_hint::render(frame, chunks[3], &QUERY_HELP_HINTS, theme, "");
+    }
+
     fn switch_tab(&mut self, forward: bool) {
         if forward {
             self.tab.move_next();
@@ -486,6 +588,7 @@ impl HelpModalState {
             self.tab.move_prev();
         }
         self.selected = 0;
+        self.query_scroll = 0;
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -503,6 +606,7 @@ impl HelpModalState {
         self.tab
             .current()
             .items()
+            .unwrap_or_default()
             .iter()
             .filter(|item| {
                 filter.is_empty()
@@ -557,10 +661,7 @@ impl HelpModalState {
 
     fn render_tabs(&self, theme: &Theme) -> Line<'static> {
         let mut spans = vec![Span::raw(" ")];
-        for (index, tab) in [HelpTab::SessionList, HelpTab::Viewer]
-            .into_iter()
-            .enumerate()
-        {
+        for (index, tab) in HELP_TABS.into_iter().enumerate() {
             if index > 0 {
                 spans.push(Span::styled("  ", Style::default().fg(theme.muted)));
             }
@@ -587,9 +688,58 @@ fn build_filter_input() -> TextArea<'static> {
 }
 
 fn help_tab_cursor(selected: HelpTab) -> RingCursor<HelpTab> {
-    let mut cursor = RingCursor::new(vec![HelpTab::SessionList, HelpTab::Viewer]);
+    let mut cursor = RingCursor::new(HELP_TABS.to_vec());
     assert!(cursor.set(&selected));
     cursor
+}
+
+fn search_query_help_lines(theme: &Theme) -> Vec<Line<'static>> {
+    let heading = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let body = Style::default().fg(theme.text);
+    let muted = Style::default().fg(theme.muted);
+
+    search_query_help_text()
+        .lines()
+        .map(|line| {
+            if line.starts_with("## ") {
+                Line::from(Span::styled(line.trim_start_matches("## "), heading))
+            } else if line.starts_with("- ") {
+                Line::from(vec![
+                    Span::styled("  - ", muted),
+                    Span::styled(line.trim_start_matches("- "), body),
+                ])
+            } else if line.is_empty() {
+                Line::default()
+            } else {
+                Line::from(Span::styled(line, body))
+            }
+        })
+        .collect()
+}
+
+fn search_query_help_text() -> &'static str {
+    "## What AICS searches\n\
+- The query is trimmed before it is sent to the search engine.\n\
+- An empty query shows recent sessions instead of running a text query.\n\
+- Non-empty queries run through Tantivy's lenient QueryParser against AICS's default content field.\n\
+- That content field contains the custom thread title, the first user/resume-preview text, and the full parsed transcript.\n\
+\n\
+## Query syntax\n\
+- Bare words are token searches. Tantivy's default tokenizer handles case and punctuation normalization.\n\
+- Multiple bare words are AND by default: rust serde means both terms must match.\n\
+- Use uppercase AND, OR, and NOT for explicit boolean logic. Lowercase and/or/not are ordinary words.\n\
+- Use parentheses to group boolean clauses, for example (rust OR go) parser.\n\
+- Use quotes for an exact phrase, for example \"vector db\".\n\
+- AICS parses leniently, so malformed input should not open an error screen; Tantivy returns the usable parts it can parse.\n\
+\n\
+## AICS ranking and display\n\
+- Bare multi-word queries without explicit boolean operators get an extra quoted-phrase query boosted 5x, so exact adjacent wording ranks higher without making the phrase required.\n\
+- Sort: Time orders matching sessions by modified timestamp. Relevance uses Tantivy scores, then AICS applies a recency boost and timestamp tie-breaks.\n\
+- Filters still apply after text search: scope, agent, branch, dates, line count, derivation type, sub-agent, live-only, and trash settings can hide otherwise matching sessions.\n\
+- Snippets prefer Tantivy-selected fragments. If that is unavailable, AICS falls back to first user text, first message, then last message.\n\
+- Highlighting is AICS post-processing: query terms are extracted independently, uppercase boolean operators are not highlighted, and fallback snippets strip leading AGENTS.md/CLAUDE.md/environment boilerplate."
 }
 
 fn padded_inner(area: Rect) -> Rect {
@@ -644,9 +794,9 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        help_item_summary_text, preferred_left_panel_width, split_help_columns, HelpItem,
-        HelpModalState, HelpOutcome, HelpTab, LEFT_PANEL_PREFERRED_WIDTH,
-        RIGHT_PANEL_MIN_CONTENT_WIDTH, RIGHT_PANEL_MIN_WIDTH,
+        help_item_summary_text, preferred_left_panel_width, search_query_help_text,
+        split_help_columns, HelpItem, HelpModalState, HelpOutcome, HelpTab,
+        LEFT_PANEL_PREFERRED_WIDTH, RIGHT_PANEL_MIN_CONTENT_WIDTH, RIGHT_PANEL_MIN_WIDTH,
     };
 
     #[test]
@@ -675,6 +825,40 @@ mod tests {
 
         help.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert_eq!(help.tab(), HelpTab::SessionList);
+    }
+
+    #[test]
+    fn tab_reaches_search_query_help() {
+        let mut help = HelpModalState::new(HelpTab::SessionList);
+
+        help.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        help.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert_eq!(help.tab(), HelpTab::SearchQuery);
+    }
+
+    #[test]
+    fn search_query_help_ignores_filter_typing() {
+        let mut help = HelpModalState::new(HelpTab::SearchQuery);
+
+        help.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+
+        assert_eq!(help.tab(), HelpTab::SearchQuery);
+        assert_eq!(help.filter_text(), "");
+        assert!(help.filtered_items().is_empty());
+    }
+
+    #[test]
+    fn search_query_help_mentions_aics_processing() {
+        let text = search_query_help_text();
+
+        assert!(text.contains("Tantivy's lenient QueryParser"));
+        assert!(text.contains("custom thread title"));
+        assert!(text.contains("first user/resume-preview text"));
+        assert!(text.contains("full parsed transcript"));
+        assert!(text.contains("boosted 5x"));
+        assert!(text.contains("recency boost"));
+        assert!(text.contains("AGENTS.md/CLAUDE.md/environment boilerplate"));
     }
 
     #[test]

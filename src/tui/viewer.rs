@@ -42,7 +42,6 @@ pub struct ViewerState {
     pub scroll: usize,
     search: Input,
     active_match: Option<usize>,
-    hide_project_docs_autodump: bool,
     render_cache: Option<ViewerRenderCache>,
 }
 
@@ -54,7 +53,6 @@ struct ViewerRenderCache {
     theme_name: ThemeName,
     display_options: DisplayOptions,
     summary_stamp: Option<(i64, usize, usize)>,
-    hide_project_docs_autodump: bool,
     total_rows: usize,
     text: Text<'static>,
     match_rows: Vec<usize>,
@@ -92,12 +90,11 @@ impl Default for ViewerState {
 }
 
 impl ViewerState {
-    const HINTS: [KeymapHint; 7] = [
+    const HINTS: [KeymapHint; 6] = [
         KeymapHint::new("↑↓/PgUp/PgDn/Home/End", "scroll"),
         KeymapHint::new("^Up/^Dn", "message"),
         KeymapHint::new("^⇧Up/^⇧Dn", "user"),
         KeymapHint::new("^N/^P", "matches"),
-        KeymapHint::new("^B", "docs"),
         KeymapHint::new("^U/^E", "edit"),
         KeymapHint::new("Esc", "close"),
     ];
@@ -111,17 +108,12 @@ impl ViewerState {
             scroll: 0,
             search: Input::default().with_value(query.to_owned()),
             active_match: None,
-            hide_project_docs_autodump: true,
             render_cache: None,
         }
     }
 
     pub fn search_query(&self) -> &str {
         self.search.value()
-    }
-
-    pub fn hide_project_docs_autodump(&self) -> bool {
-        self.hide_project_docs_autodump
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -185,12 +177,6 @@ impl ViewerState {
                     theme_name,
                     display_options,
                 );
-                ViewerOutcome::Stay
-            }
-            KeyCode::Char('b') if key.modifiers == KeyModifiers::CONTROL => {
-                self.hide_project_docs_autodump = !self.hide_project_docs_autodump;
-                self.active_match = None;
-                self.render_cache = None;
                 ViewerOutcome::Stay
             }
             KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
@@ -472,7 +458,6 @@ impl ViewerState {
                 || cache.theme_name != theme_name
                 || cache.display_options != display_options
                 || cache.summary_stamp != summary_stamp
-                || cache.hide_project_docs_autodump != self.hide_project_docs_autodump
         });
         if cache_miss {
             profile::event("viewer.cache.miss");
@@ -495,7 +480,6 @@ impl ViewerState {
                 theme_name,
                 display_options,
                 summary_stamp,
-                hide_project_docs_autodump: self.hide_project_docs_autodump,
                 total_rows,
                 text,
                 match_rows,
@@ -511,10 +495,7 @@ impl ViewerState {
     }
 
     fn render_options(&self, display_options: DisplayOptions) -> SessionRenderOptions {
-        SessionRenderOptions {
-            display_options,
-            hide_project_docs_autodump: self.hide_project_docs_autodump,
-        }
+        SessionRenderOptions::new(display_options)
     }
 }
 
@@ -727,10 +708,7 @@ pub(crate) fn collect_message_rows(
     scope: MessageJumpScope,
     display_options: DisplayOptions,
 ) -> Vec<usize> {
-    let options = SessionRenderOptions {
-        display_options,
-        ..SessionRenderOptions::default()
-    };
+    let options = SessionRenderOptions::new(display_options);
     collect_message_rows_with_options(session, summary, theme, width, scope, options)
 }
 
@@ -1282,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    fn viewer_hides_project_docs_autodump_by_default_and_can_toggle_visible() {
+    fn viewer_honors_project_docs_autodump_display_option() {
         let session = project_docs_session();
         let area = Rect::new(0, 0, 80, 20);
         let theme = Theme::default();
@@ -1302,19 +1280,13 @@ mod tests {
         )
         .join("\n");
 
-        assert!(state.hide_project_docs_autodump());
         assert!(!hidden_text.contains("AGENTS.md instructions"));
         assert!(hidden_text.contains("real request"));
 
-        state.handle_key(
-            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
-            area,
-            Some(&session),
-            None,
-            &theme,
-            ThemeName::Lazygit,
-            DisplayOptions::default(),
-        );
+        let visible_options = DisplayOptions {
+            hide_project_docs_autodump: false,
+            ..DisplayOptions::default()
+        };
 
         let visible_text = rendered_lines(
             &state
@@ -1324,13 +1296,12 @@ mod tests {
                     None,
                     &theme,
                     ThemeName::Lazygit,
-                    DisplayOptions::default(),
+                    visible_options,
                 )
                 .text,
         )
         .join("\n");
 
-        assert!(!state.hide_project_docs_autodump());
         assert!(visible_text.contains("AGENTS.md instructions"));
         assert!(visible_text.contains("real request"));
     }

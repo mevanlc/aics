@@ -28,10 +28,25 @@ pub struct DisplayDocument {
     pub sticky_markers: Vec<StickyLineMarker>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct SessionRenderOptions {
     pub display_options: DisplayOptions,
     pub hide_project_docs_autodump: bool,
+}
+
+impl SessionRenderOptions {
+    pub fn new(display_options: DisplayOptions) -> Self {
+        Self {
+            display_options,
+            hide_project_docs_autodump: display_options.hide_project_docs_autodump,
+        }
+    }
+}
+
+impl Default for SessionRenderOptions {
+    fn default() -> Self {
+        Self::new(DisplayOptions::default())
+    }
 }
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
@@ -116,10 +131,7 @@ pub fn render_session_text_with_options(
         session,
         theme,
         highlight_query,
-        SessionRenderOptions {
-            display_options,
-            ..SessionRenderOptions::default()
-        },
+        SessionRenderOptions::new(display_options),
     )
     .text
 }
@@ -432,10 +444,7 @@ pub fn render_session_section_document_with_options(
             session,
             theme,
             highlight_query,
-            SessionRenderOptions {
-                display_options,
-                ..SessionRenderOptions::default()
-            },
+            SessionRenderOptions::new(display_options),
         )
     } else {
         DisplayDocument {
@@ -1837,6 +1846,51 @@ mod tests {
     }
 
     #[test]
+    fn preview_section_honors_project_docs_autodump_display_option() {
+        let theme = Theme::default();
+        let session = empty_session(
+            Agent::Codex,
+            vec![
+                SessionCell::Message {
+                    role: MessageRole::User,
+                    content: "# CLAUDE.md instructions for /tmp/demo\nUse cargo test.".to_owned(),
+                    timestamp: None,
+                },
+                SessionCell::Message {
+                    role: MessageRole::User,
+                    content: "real request".to_owned(),
+                    timestamp: None,
+                },
+            ],
+        );
+
+        let hidden = super::render_session_section_document_with_options(
+            Some(&session),
+            &theme,
+            None,
+            DisplayOptions::default(),
+        );
+        let hidden_text = rendered_lines(&hidden.text).join("\n");
+
+        assert!(!hidden_text.contains("CLAUDE.md instructions"));
+        assert!(hidden_text.contains("real request"));
+
+        let visible = super::render_session_section_document_with_options(
+            Some(&session),
+            &theme,
+            None,
+            DisplayOptions {
+                hide_project_docs_autodump: false,
+                ..DisplayOptions::default()
+            },
+        );
+        let visible_text = rendered_lines(&visible.text).join("\n");
+
+        assert!(visible_text.contains("CLAUDE.md instructions"));
+        assert!(visible_text.contains("real request"));
+    }
+
+    #[test]
     fn render_cells_emits_exec_patch_plan_websearch_markers() {
         let theme = Theme::default();
         let cells = vec![
@@ -1983,6 +2037,7 @@ mod tests {
                     hide_tool_results: true,
                     hide_agent_replies: true,
                     hide_user_messages: true,
+                    ..DisplayOptions::default()
                 },
                 ..SessionRenderOptions::default()
             },
@@ -2025,6 +2080,7 @@ mod tests {
                     hide_tool_results: true,
                     hide_agent_replies: false,
                     hide_user_messages: false,
+                    ..DisplayOptions::default()
                 },
                 ..SessionRenderOptions::default()
             },

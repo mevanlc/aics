@@ -63,7 +63,7 @@ pub struct Settings {
     pub display_options: DisplayOptions,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplayOptions {
     #[serde(default)]
     pub hide_tool_calls: bool,
@@ -73,6 +73,20 @@ pub struct DisplayOptions {
     pub hide_agent_replies: bool,
     #[serde(default)]
     pub hide_user_messages: bool,
+    #[serde(default = "default_hide_project_docs_autodump")]
+    pub hide_project_docs_autodump: bool,
+}
+
+impl Default for DisplayOptions {
+    fn default() -> Self {
+        Self {
+            hide_tool_calls: false,
+            hide_tool_results: false,
+            hide_agent_replies: false,
+            hide_user_messages: false,
+            hide_project_docs_autodump: default_hide_project_docs_autodump(),
+        }
+    }
 }
 
 fn default_claude_command() -> String {
@@ -105,6 +119,10 @@ fn default_session_separator() -> String {
 
 fn default_snippet_line_count() -> usize {
     3
+}
+
+fn default_hide_project_docs_autodump() -> bool {
+    true
 }
 
 fn default_summarize_prompt() -> String {
@@ -231,6 +249,15 @@ mod tests {
         assert!(parsed.show_preview);
         assert_eq!(parsed.preview_width_pct, 40);
         assert_eq!(parsed.display_options, DisplayOptions::default());
+        assert!(parsed.display_options.hide_project_docs_autodump);
+    }
+
+    #[test]
+    fn display_options_default_missing_project_docs_to_hidden() {
+        let parsed: DisplayOptions = serde_json::from_str(r#"{"hide_tool_calls":true}"#).unwrap();
+
+        assert!(parsed.hide_tool_calls);
+        assert!(parsed.hide_project_docs_autodump);
     }
 
     #[test]

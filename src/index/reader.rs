@@ -680,7 +680,7 @@ fn strip_leading_global_boilerplate(mut text: &str) -> &str {
 }
 
 fn strip_one_leading_boilerplate_block(text: &str) -> &str {
-    if let Some(rest) = strip_agents_header_line(text) {
+    if let Some(rest) = strip_project_docs_header_line(text) {
         return rest;
     }
 
@@ -698,10 +698,12 @@ fn strip_one_leading_boilerplate_block(text: &str) -> &str {
     text
 }
 
-fn strip_agents_header_line(text: &str) -> Option<&str> {
+fn strip_project_docs_header_line(text: &str) -> Option<&str> {
     let header = [
         "AGENTS.md instructions for ",
         "# AGENTS.md instructions for ",
+        "CLAUDE.md instructions for ",
+        "# CLAUDE.md instructions for ",
     ]
     .into_iter()
     .find(|header| text.starts_with(header))?;
@@ -922,6 +924,15 @@ mod tests {
         );
 
         assert_eq!(snippet, "Implement the Codex resume preview logic.");
+    }
+
+    #[test]
+    fn snippet_display_text_skips_leading_claude_instructions_block() {
+        let snippet = snippet_display_text(
+            "# CLAUDE.md instructions for /repo\n\n<INSTRUCTIONS>Use cargo test.</INSTRUCTIONS>\n\nFix the preview panel.",
+        );
+
+        assert_eq!(snippet, "Fix the preview panel.");
     }
 
     #[test]

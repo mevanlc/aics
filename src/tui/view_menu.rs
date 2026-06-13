@@ -13,6 +13,7 @@ use crate::tui::{keymap_hint, layout};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewField {
+    ProjectDocsAutodump,
     ToolCalls,
     ToolResults,
     AgentReplies,
@@ -22,6 +23,7 @@ enum ViewField {
 impl ViewField {
     fn label(self) -> &'static str {
         match self {
+            Self::ProjectDocsAutodump => "Hide AGENTS.md/CLAUDE.md",
             Self::ToolCalls => "Hide Tool Calls",
             Self::ToolResults => "Hide Tool Results",
             Self::AgentReplies => "Hide Agent Replies",
@@ -46,7 +48,7 @@ pub enum ViewMenuOutcome {
 impl ViewMenuState {
     pub fn new(options: DisplayOptions) -> Self {
         Self {
-            selected: view_field_cursor(ViewField::ToolCalls),
+            selected: view_field_cursor(ViewField::ProjectDocsAutodump),
             options,
         }
     }
@@ -133,6 +135,7 @@ impl ViewMenuState {
 
     fn option_for(&self, field: ViewField) -> bool {
         match field {
+            ViewField::ProjectDocsAutodump => self.options.hide_project_docs_autodump,
             ViewField::ToolCalls => self.options.hide_tool_calls,
             ViewField::ToolResults => self.options.hide_tool_results,
             ViewField::AgentReplies => self.options.hide_agent_replies,
@@ -142,6 +145,9 @@ impl ViewMenuState {
 
     fn toggle_current(&mut self) {
         match *self.selected.current() {
+            ViewField::ProjectDocsAutodump => {
+                self.options.hide_project_docs_autodump = !self.options.hide_project_docs_autodump;
+            }
             ViewField::ToolCalls => {
                 self.options.hide_tool_calls = !self.options.hide_tool_calls;
             }
@@ -158,8 +164,9 @@ impl ViewMenuState {
     }
 }
 
-fn view_fields() -> [ViewField; 4] {
+fn view_fields() -> [ViewField; 5] {
     [
+        ViewField::ProjectDocsAutodump,
         ViewField::ToolCalls,
         ViewField::ToolResults,
         ViewField::AgentReplies,
@@ -175,4 +182,39 @@ fn view_field_cursor(selected: ViewField) -> RingCursor<ViewField> {
 
 fn popup_area(area: Rect) -> Rect {
     layout::centered_rect_fixed_width(area, 42, 36)
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::{ViewField, ViewMenuOutcome, ViewMenuState};
+    use crate::settings::DisplayOptions;
+
+    #[test]
+    fn project_docs_autodump_row_is_first_and_enabled_by_default() {
+        let state = ViewMenuState::new(DisplayOptions::default());
+
+        assert_eq!(*state.selected.current(), ViewField::ProjectDocsAutodump);
+        assert!(state.option_for(ViewField::ProjectDocsAutodump));
+        assert_eq!(
+            ViewField::ProjectDocsAutodump.label(),
+            "Hide AGENTS.md/CLAUDE.md"
+        );
+    }
+
+    #[test]
+    fn toggles_project_docs_autodump_option() {
+        let mut state = ViewMenuState::new(DisplayOptions::default());
+
+        let outcome = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            outcome,
+            ViewMenuOutcome::Update(DisplayOptions {
+                hide_project_docs_autodump: false,
+                ..DisplayOptions::default()
+            })
+        );
+    }
 }
