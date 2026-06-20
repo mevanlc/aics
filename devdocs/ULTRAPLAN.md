@@ -41,7 +41,6 @@ Two completely different JSONL formats must be parsed:
 - `SnippetGenerator` requires field to be `STORED`; generates HTML with `<b>` tags
 - `BoostQuery` for phrase boosting; `TopDocs::tweak_score()` for recency decay via fast fields
 - `QueryParser::parse_query_lenient()` for forgiving user input
-- Can read indices from 0.21+, so reusing the existing `~/.cctools/search-index/` is technically possible — but building our own gives us control over schema and avoids coupling
 
 ### Ratatui + Crossterm
 
@@ -115,11 +114,8 @@ This is a starting point, not a rigid prescription. Modules may merge or split a
 
 ### Index Strategy
 
-**Own index, own location, clean break.** No compatibility with the Python tool's `~/.cctools/search-index/` and no migration path — the index builds fast enough that rebuilding from scratch isn't a pain point.
-
-Use the `directories` crate (Rust equivalent of Python's `platformdirs`) for cross-platform cache/data paths. Index and state go in the platform-appropriate cache directory:
-- Linux/macOS: `~/.cache/aics/index/` and `~/.cache/aics/index_state.json`
-- Windows: `{FOLDERPATH_LOCAL_APP_DATA}/aics/cache/`
+Use a hard home-relative cache path for index and state. No automatic migration or dual-location support is provided:
+- `{userhome}/.cache/aics/index/` and `{userhome}/.cache/aics/index_state.json`
 
 Track file path → (mtime, size) in `index_state.json` for incremental updates.
 
@@ -211,7 +207,7 @@ The MVP story: user runs `aics -g`, sees all conversations sorted by last-modifi
 
 6. **Tantivy schema** — Define the index schema. `content` as `TEXT | STORED` for full-text search + snippets. Metadata fields as `STRING | STORED`. `modified_ts` as `u64 | FAST | STORED` for recency scoring and time-based sorting. A unique identifier field for delete-by-term during updates.
 
-7. **Index writer** — Incremental indexing engine. On startup: load state from `~/.cache/aics/index_state.json`, scan filesystem, diff to find new/modified/deleted files, parse and index changed files, prune deleted, commit, save updated state. Handle first-run (full build) gracefully. Index stored at `~/.cache/aics/index/`. Sub-agent sessions excluded from the index by default.
+7. **Index writer** — Incremental indexing engine. On startup: load state from `{userhome}/.cache/aics/index_state.json`, scan filesystem, diff to find new/modified/deleted files, parse and index changed files, prune deleted, commit, save updated state. Handle first-run (full build) gracefully. Index stored at `{userhome}/.cache/aics/index/`. Sub-agent sessions excluded from the index by default.
 
 8. **Search engine** — Query the index. Lenient query parsing via `QueryParser::parse_query_lenient()`. Phrase boost (5x via `BoostQuery` when query has 2+ words and the user is not using explicit boolean operators). Time ordering is the default, with `--sort-by relevance` and the filter modal able to switch to relevance ordering when desired. Recency decay is applied to relevance scores. Snippet generation should eventually use `SnippetGenerator` as the primary path with a manual fallback. Return ranked results.
 
@@ -314,7 +310,7 @@ Tests should include, but not be limited to:
 
 ## Resolved Design Decisions
 
-- **Index location**: `~/.cache/aics/` via `directories` crate (platformdirs equivalent). Cross-platform.
+- **Index location**: `{userhome}/.cache/aics/`.
 - **Index compatibility**: Clean break. No reuse of `~/.cctools/search-index/`, no migration path. Rebuilding from scratch is fast and painless.
 - **Sub-agent sessions**: Hidden by default (excluded from index). Numerous and usually noise.
 - **`--claude-home` / `--codex-home`**: Roadmapped, not in initial implementation.
@@ -340,7 +336,7 @@ Tests should include, but not be limited to:
 - **`file-history-snapshot`-only sessions**: Some Claude JSONL files contain no conversation at all — just file tracking snapshots. The parser must detect these early (check if any `user`/`assistant` entries exist) and skip them rather than creating an empty index entry.
 
 - **Cross-platform considerations**: Target platforms are macOS, Linux, Windows, and Termux.
-  - **Filesystem paths**: The `directories` crate handles platform-appropriate cache/config dirs. Session file locations (`~/.claude/`, `~/.codex/`) should resolve correctly on all platforms since Claude Code and Codex CLI use the same conventions.
+  - **Filesystem paths**: AICS config/cache paths are hard home-relative paths under `.config/aics` and `.cache/aics`. Session file locations (`~/.claude/`, `~/.codex/`) should resolve correctly on all platforms since Claude Code and Codex CLI use the same conventions.
   - **Termux**: Runs on Android with a Linux-like userspace. Crossterm + ratatui should work. Termux terminals may have limited width and non-standard font metrics — test that the layout degrades gracefully on narrow screens (e.g., 80 columns on a phone). Termux also lacks `/proc` in the normal sense, which affects live session detection (post-MVP).
   - **Windows**: Path separators, home directory resolution, and terminal behavior (Windows Terminal vs conhost) differ. Crossterm abstracts most of this. The session directory path encoding (`-Users-em-p-my-foo`) will use backslashes on Windows — the project-path decoder needs to handle both separators.
   - **Tantivy**: Pure Rust, cross-platform. No platform-specific concerns.

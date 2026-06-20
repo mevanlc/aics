@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
+use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -382,9 +382,12 @@ pub fn config_dir() -> Result<PathBuf> {
     if let Ok(val) = std::env::var("AICS_CONFIG_ROOT") {
         return Ok(PathBuf::from(val));
     }
-    let project_dirs =
-        ProjectDirs::from("", "", "aics").context("failed to locate config directory")?;
-    Ok(project_dirs.config_dir().to_owned())
+    let base_dirs = BaseDirs::new().context("failed to locate home directory")?;
+    Ok(default_config_dir(base_dirs.home_dir()))
+}
+
+fn default_config_dir(home: &Path) -> PathBuf {
+    home.join(".config").join("aics")
 }
 
 #[cfg(test)]
@@ -402,6 +405,18 @@ mod tests {
         assert!(
             settings.show_preview,
             "default settings must enable the preview pane on first run"
+        );
+    }
+
+    #[test]
+    fn default_config_dir_is_home_relative_dot_config() {
+        let home = PathBuf::from("home").join("alice");
+        assert_eq!(
+            default_config_dir(&home),
+            PathBuf::from("home")
+                .join("alice")
+                .join(".config")
+                .join("aics")
         );
     }
 

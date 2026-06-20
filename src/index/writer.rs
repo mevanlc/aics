@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
+use directories::BaseDirs;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -161,10 +161,9 @@ impl IndexPaths {
         if let Some(cache_root) = env_override("AICS_CACHE_ROOT") {
             return Ok(Self::from_cache_root_and_roots(cache_root, roots));
         }
-        let project_dirs =
-            ProjectDirs::from("", "", "aics").context("failed to locate cache directory")?;
+        let base_dirs = BaseDirs::new().context("failed to locate home directory")?;
         Ok(Self::from_cache_root_and_roots(
-            project_dirs.cache_dir(),
+            default_cache_dir(base_dirs.home_dir()),
             roots,
         ))
     }
@@ -628,6 +627,10 @@ fn profile_id_from_roots(roots: &SessionRoots) -> String {
     output
 }
 
+fn default_cache_dir(home: &Path) -> PathBuf {
+    home.join(".cache").join("aics")
+}
+
 fn env_override(name: &str) -> Option<PathBuf> {
     env::var_os(name)
         .filter(|value| !value.is_empty())
@@ -641,4 +644,21 @@ fn is_lock_busy_error(error: &anyhow::Error) -> bool {
             Some(TantivyError::LockFailure(LockError::LockBusy, _))
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_cache_dir_is_home_relative_dot_cache() {
+        let home = PathBuf::from("home").join("alice");
+        assert_eq!(
+            default_cache_dir(&home),
+            PathBuf::from("home")
+                .join("alice")
+                .join(".cache")
+                .join("aics")
+        );
+    }
 }

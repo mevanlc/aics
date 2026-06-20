@@ -82,11 +82,9 @@ Session data is indexed from:
 - `~/.claude/projects/` (Claude Code)
 - `~/.codex/sessions/` (Codex CLI)
 
-By default, index data is stored under the platform cache dir, with one profile per discovered session-root set:
+By default, index data is stored under the user's home-relative cache dir, with one profile per discovered session-root set:
 
-- Linux: `~/.cache/aics/profiles/<profile-id>/`
-- macOS: `~/Library/Caches/aics/profiles/<profile-id>/`
-- Windows: `%LOCALAPPDATA%\aics\cache\profiles\<profile-id>\`
+- `{userhome}/.cache/aics/profiles/<profile-id>/`
 
 Each profile stores:
 
@@ -99,11 +97,9 @@ Override the index/cache root with `AICS_CACHE_ROOT`.
 
 ## Configuration file
 
-Settings are stored in `settings.json` under the platform config dir:
+Settings are stored in `settings.json` under the user's home-relative config dir:
 
-- Linux: `~/.config/aics/settings.json`
-- macOS: `~/Library/Application Support/aics/settings.json`
-- Windows: `%APPDATA%\aics\config\settings.json`
+- `{userhome}/.config/aics/settings.json`
 
 Override the config root with `AICS_CONFIG_ROOT`.
 
