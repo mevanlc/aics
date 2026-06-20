@@ -394,15 +394,42 @@ pub fn is_project_docs_autodump(role: MessageRole, content: &str) -> bool {
         return false;
     }
 
+    strip_project_docs_autodump_preamble(content).is_some()
+}
+
+pub fn strip_project_docs_autodump_preamble(content: &str) -> Option<&str> {
     let trimmed = content.trim_start();
+    strip_project_docs_header_line(trimmed).or_else(|| strip_bare_instructions_block(trimmed))
+}
+
+fn strip_project_docs_header_line(text: &str) -> Option<&str> {
+    let (line, rest) = match text.split_once('\n') {
+        Some((line, rest)) => (line.trim_end(), rest),
+        None => (text.trim_end(), ""),
+    };
+
+    if is_project_docs_header_line(line) {
+        Some(rest)
+    } else {
+        None
+    }
+}
+
+fn is_project_docs_header_line(line: &str) -> bool {
     [
-        "AGENTS.md instructions for ",
-        "# AGENTS.md instructions for ",
-        "CLAUDE.md instructions for ",
-        "# CLAUDE.md instructions for ",
+        "AGENTS.md instructions",
+        "# AGENTS.md instructions",
+        "CLAUDE.md instructions",
+        "# CLAUDE.md instructions",
     ]
     .into_iter()
-    .any(|header| trimmed.starts_with(header))
+    .any(|header| line == header || line.starts_with(&format!("{header} for ")))
+}
+
+fn strip_bare_instructions_block(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("<INSTRUCTIONS>")?;
+    let end = rest.find("</INSTRUCTIONS>")?;
+    Some(&rest[end + "</INSTRUCTIONS>".len()..])
 }
 
 pub fn parse_timestamp_str(raw: &str) -> Option<DateTime<Utc>> {
@@ -710,7 +737,8 @@ pub fn system_time_or_epoch(timestamp: Option<SystemTime>) -> SystemTime {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_claude_project_dir, is_project_docs_autodump, normalize_session_path, MessageRole,
+        decode_claude_project_dir, is_project_docs_autodump, normalize_session_path,
+        strip_project_docs_autodump_preamble, MessageRole,
     };
 
     #[test]
@@ -740,6 +768,14 @@ mod tests {
             MessageRole::System,
             "CLAUDE.md instructions for /repo\nFollow local rules.",
         ));
+        assert!(is_project_docs_autodump(
+            MessageRole::User,
+            "AGENTS.md instructions\n\n<INSTRUCTIONS>Use cargo test</INSTRUCTIONS>",
+        ));
+        assert!(is_project_docs_autodump(
+            MessageRole::User,
+            "<INSTRUCTIONS># Using `lat` to examine files\nPrefer lat.\n</INSTRUCTIONS>",
+        ));
         assert!(!is_project_docs_autodump(
             MessageRole::User,
             "Please update AGENTS.md with the new commands.",
@@ -748,5 +784,21 @@ mod tests {
             MessageRole::Assistant,
             "# AGENTS.md instructions for /repo\nThis is quoted back to the user.",
         ));
+    }
+
+    #[test]
+    fn strips_project_docs_autodump_preamble_variants() {
+        assert_eq!(
+            strip_project_docs_autodump_preamble(
+                "AGENTS.md instructions\n\n<INSTRUCTIONS>Use cargo test.</INSTRUCTIONS>\n\nreal request",
+            ),
+            Some("\n<INSTRUCTIONS>Use cargo test.</INSTRUCTIONS>\n\nreal request")
+        );
+        assert_eq!(
+            strip_project_docs_autodump_preamble(
+                "<INSTRUCTIONS># Using `lat` to examine files\nPrefer lat.\n</INSTRUCTIONS>\n\nreal request",
+            ),
+            Some("\n\nreal request")
+        );
     }
 }

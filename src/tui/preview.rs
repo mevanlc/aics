@@ -1858,6 +1858,13 @@ mod tests {
                 },
                 SessionCell::Message {
                     role: MessageRole::User,
+                    content:
+                        "<INSTRUCTIONS># Using `lat` to examine files\nPrefer lat.\n</INSTRUCTIONS>"
+                            .to_owned(),
+                    timestamp: None,
+                },
+                SessionCell::Message {
+                    role: MessageRole::User,
                     content: "real request".to_owned(),
                     timestamp: None,
                 },
@@ -1873,6 +1880,7 @@ mod tests {
         let hidden_text = rendered_lines(&hidden.text).join("\n");
 
         assert!(!hidden_text.contains("CLAUDE.md instructions"));
+        assert!(!hidden_text.contains("Prefer lat."));
         assert!(hidden_text.contains("real request"));
 
         let visible = super::render_session_section_document_with_options(
@@ -1887,6 +1895,7 @@ mod tests {
         let visible_text = rendered_lines(&visible.text).join("\n");
 
         assert!(visible_text.contains("CLAUDE.md instructions"));
+        assert!(visible_text.contains("Prefer lat."));
         assert!(visible_text.contains("real request"));
     }
 

@@ -14,7 +14,7 @@ use tantivy::{DocAddress, Index, IndexReader, Order, ReloadPolicy, TantivyDocume
 use crate::index::schema::IndexSchema;
 use crate::index::writer::{IndexPaths, StoredSession};
 use crate::live::LiveSessionTracker;
-use crate::parse::{Agent, DerivationType};
+use crate::parse::{strip_project_docs_autodump_preamble, Agent, DerivationType};
 use crate::search_query::{extract_highlight_terms, has_explicit_boolean_operators};
 
 #[derive(Debug, Clone)]
@@ -680,7 +680,7 @@ fn strip_leading_global_boilerplate(mut text: &str) -> &str {
 }
 
 fn strip_one_leading_boilerplate_block(text: &str) -> &str {
-    if let Some(rest) = strip_project_docs_header_line(text) {
+    if let Some(rest) = strip_project_docs_autodump_preamble(text) {
         return rest;
     }
 
@@ -696,22 +696,6 @@ fn strip_one_leading_boilerplate_block(text: &str) -> &str {
     }
 
     text
-}
-
-fn strip_project_docs_header_line(text: &str) -> Option<&str> {
-    let header = [
-        "AGENTS.md instructions for ",
-        "# AGENTS.md instructions for ",
-        "CLAUDE.md instructions for ",
-        "# CLAUDE.md instructions for ",
-    ]
-    .into_iter()
-    .find(|header| text.starts_with(header))?;
-    let rest = &text[header.len()..];
-    match rest.find('\n') {
-        Some(newline) => Some(&rest[newline + 1..]),
-        None => Some(""),
-    }
 }
 
 fn strip_tag_block<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
@@ -930,6 +914,24 @@ mod tests {
     fn snippet_display_text_skips_leading_claude_instructions_block() {
         let snippet = snippet_display_text(
             "# CLAUDE.md instructions for /repo\n\n<INSTRUCTIONS>Use cargo test.</INSTRUCTIONS>\n\nFix the preview panel.",
+        );
+
+        assert_eq!(snippet, "Fix the preview panel.");
+    }
+
+    #[test]
+    fn snippet_display_text_skips_global_agents_instructions_wrapper() {
+        let snippet = snippet_display_text(
+            "<INSTRUCTIONS># Using `lat` to examine files\nPrefer lat.\n</INSTRUCTIONS>\n\nFix the preview panel.",
+        );
+
+        assert_eq!(snippet, "Fix the preview panel.");
+    }
+
+    #[test]
+    fn snippet_display_text_skips_project_docs_header_without_path() {
+        let snippet = snippet_display_text(
+            "AGENTS.md instructions\n\n<INSTRUCTIONS>Use cargo test.</INSTRUCTIONS>\n\nFix the preview panel.",
         );
 
         assert_eq!(snippet, "Fix the preview panel.");
