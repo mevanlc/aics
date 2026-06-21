@@ -15,6 +15,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Multiple themes (lazygit, aics, sunset, late.sh), configurable via settings modal
 - Configurable claude/codex launch commands so `aics` can hand off to resume a session
 - `--json` mode for scripting
+- JavaScript rules for previewing or applying batch session cleanup actions
 - Cross-platform: Linux, macOS, Windows (path matching handles symlinks and Windows case-insensitivity)
 
 ## Install
@@ -43,6 +44,8 @@ aics
 aics -g
 # Emit JSONL instead of launching the TUI
 aics --json -g "vector db"
+# Preview JavaScript cleanup rules from ~/.config/aics/rules.js
+aics --preview-rules -g
 # Delete or rebuild the index
 aics <--rebuild-index|--delete-index>
 ```
@@ -56,6 +59,21 @@ By default, searches are scoped to the current working directory. Use `-g` / `--
 ### Date filters
 
 `--after` and `--before` accept `YYYY-MM-DD` or RFC3339 timestamps.
+
+### JavaScript rules
+
+Rules live at `~/.config/aics/rules.js` by default. Use `--preview-rules` to print proposed actions without changing files, or `--apply-rules` to apply supported actions. Use `--rules PATH` to test another rules file.
+
+```js
+rule("trash short commit helper sessions", ({ turns, re }) => {
+  return turns.user.length === 2 &&
+    re(String.raw`\s*[/$](gdf-)?commit\b`, "m").test(turns.user[0].text)
+    ? trash("commit helper")
+    : nothing();
+});
+```
+
+For the first implementation, rules can return `nothing()` or `trash(reason)`. Rules mode honors the usual scope/filter flags such as `-g`, `--dir`, `--agent`, `--after`, `--before`, `--min-lines`, and `--sub-agent`, but it does not accept a text search query yet.
 
 ## Keybindings (TUI)
 

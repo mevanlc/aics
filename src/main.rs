@@ -16,6 +16,7 @@ use aics::index::{
 };
 use aics::live::LiveSessionTracker;
 use aics::parse::Agent;
+use aics::rules::{default_rules_path, print_report, run_rules, RulesMode, RulesOptions};
 use aics::scan::ResolvedPaths;
 use aics::settings::{config_dir, Settings};
 use aics::tui::run_app;
@@ -108,9 +109,27 @@ struct Cli {
     trashed: CliTrashFilter,
     #[arg(
         long = "json",
-        help = "Print JSONL hits to stdout instead of launching the interactive TUI"
+        help = "Print JSONL hits or rule records to stdout instead of launching the interactive TUI"
     )]
     json: bool,
+    #[arg(
+        long = "preview-rules",
+        conflicts_with = "apply_rules",
+        help = "Evaluate JavaScript rules and print proposed actions without changing files"
+    )]
+    preview_rules: bool,
+    #[arg(
+        long = "apply-rules",
+        conflicts_with = "preview_rules",
+        help = "Evaluate JavaScript rules and apply supported actions"
+    )]
+    apply_rules: bool,
+    #[arg(
+        long = "rules",
+        value_name = "PATH",
+        help = "Override the JavaScript rules file used by --preview-rules or --apply-rules"
+    )]
+    rules: Option<PathBuf>,
     #[arg(
         long = "sort-by",
         value_enum,
@@ -239,6 +258,29 @@ fn main() -> Result<()> {
         SyncOutcome::Completed(_) | SyncOutcome::Busy => {}
     }
     let request = build_request(&cli)?;
+
+    if let Some(mode) = rules_mode(&cli) {
+        let rules_path = match cli.rules.clone() {
+            Some(path) => path,
+            None => default_rules_path()?,
+        };
+        let report = run_rules(
+            &resolved_paths.roots,
+            &RulesOptions {
+                rules_path,
+                mode,
+                json: cli.json,
+                scope: request.scope,
+                filters: request.filters,
+            },
+        )?;
+        print_report(&report, cli.json, mode)?;
+        if mode == RulesMode::Apply && !report.applied.is_empty() {
+            manager.sync_with_roots_best_effort(&resolved_paths.roots, false)?;
+        }
+        return Ok(());
+    }
+
     let search_engine = manager.open_search_engine_with_live_sessions(
         LiveSessionTracker::from_claude_sessions_dir(resolved_paths.claude_sessions.clone()),
     )?;
@@ -265,11 +307,37 @@ fn validate_terminal_mode(cli: &Cli) -> Result<()> {
         bail!("--progress out conflicts with --json because stdout is reserved for JSON output");
     }
 
-    if !cli.delete_index && !cli.json && !std::io::stdout().is_terminal() {
+    if cli.rules.is_some() && rules_mode(cli).is_none() {
+        bail!("--rules requires --preview-rules or --apply-rules");
+    }
+
+    if rules_mode(cli).is_some() && cli.query.is_some() {
+        bail!("rules mode does not support a search query yet");
+    }
+
+    if rules_mode(cli).is_some() && cli.live {
+        bail!("rules mode does not support --live yet");
+    }
+
+    if !cli.delete_index
+        && !cli.json
+        && rules_mode(cli).is_none()
+        && !std::io::stdout().is_terminal()
+    {
         bail!("stdout is not a terminal; use --json for non-interactive output");
     }
 
     Ok(())
+}
+
+fn rules_mode(cli: &Cli) -> Option<RulesMode> {
+    if cli.preview_rules {
+        Some(RulesMode::Preview)
+    } else if cli.apply_rules {
+        Some(RulesMode::Apply)
+    } else {
+        None
+    }
 }
 
 fn progress_draw_target(mode: CliProgress, json_mode: bool) -> Option<ProgressDrawTarget> {
@@ -662,10 +730,11 @@ mod tests {
 
     use super::{
         build_request, palette_pairs, parse_after_date, parse_before_date, parse_dir_arg,
-        render_palettes, validate_terminal_mode, Cli, CliProgress,
+        render_palettes, rules_mode, validate_terminal_mode, Cli, CliProgress,
     };
     use aics::index::{Scope, SortMode};
     use aics::parse::Agent;
+    use aics::rules::RulesMode;
     use aics::tui::theme::Theme;
 
     #[test]
@@ -753,6 +822,46 @@ mod tests {
         assert!(error
             .to_string()
             .contains("--progress out conflicts with --json"));
+    }
+
+    #[test]
+    fn parses_rules_mode_flags() {
+        let preview = Cli::parse_from(["aics", "--preview-rules"]);
+        assert_eq!(rules_mode(&preview), Some(RulesMode::Preview));
+
+        let apply = Cli::parse_from(["aics", "--apply-rules", "--rules", "rules.js"]);
+        assert_eq!(rules_mode(&apply), Some(RulesMode::Apply));
+        assert_eq!(
+            apply.rules.as_deref(),
+            Some(std::path::Path::new("rules.js"))
+        );
+    }
+
+    #[test]
+    fn rejects_rules_path_without_rules_mode() {
+        let cli = Cli::parse_from(["aics", "--rules", "rules.js"]);
+        let error = validate_terminal_mode(&cli).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("--rules requires --preview-rules or --apply-rules"));
+    }
+
+    #[test]
+    fn rejects_query_in_rules_mode() {
+        let cli = Cli::parse_from(["aics", "--preview-rules", "deploy"]);
+        let error = validate_terminal_mode(&cli).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("rules mode does not support a search query yet"));
+    }
+
+    #[test]
+    fn rejects_live_filter_in_rules_mode() {
+        let cli = Cli::parse_from(["aics", "--preview-rules", "--live"]);
+        let error = validate_terminal_mode(&cli).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("rules mode does not support --live yet"));
     }
 
     #[test]

@@ -1,0 +1,157 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::Result;
+use tempfile::TempDir;
+
+#[test]
+fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let rules = write_rules(
+        &temp,
+        r#"
+        rule("trash claude basic", ({ session }) => {
+          return session.agent === "claude" && session.id === "c0d1e2f3-a4b5-4c6d-8e7f-9a0b1c2d3e4f"
+            ? trash("matched fixture")
+            : nothing();
+        });
+        "#,
+    )?;
+    let cache_root = temp.path().join("cache");
+    let data_root = temp.path().join("data");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_aics"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CACHE_ROOT", &cache_root)
+        .env("AICS_DATA_ROOT", &data_root)
+        .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
+        .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .args([
+            "--preview-rules",
+            "--rules",
+            rules.to_str().unwrap(),
+            "--json",
+            "--progress",
+            "none",
+            "-g",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:#?}");
+    assert!(roots.claude_session.exists());
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    let value: serde_json::Value = serde_json::from_str(lines[0])?;
+    assert_eq!(value["rule"], "trash claude basic");
+    assert_eq!(value["action"], "trash");
+    assert_eq!(value["reason"], "matched fixture");
+    assert_eq!(value["agent"], "claude");
+    Ok(())
+}
+
+#[test]
+fn apply_rules_moves_matching_session_to_trash() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let rules = write_rules(
+        &temp,
+        r#"
+        rule("trash claude basic", ({ session }) => {
+          return session.agent === "claude" ? trash("cleanup") : nothing();
+        });
+        "#,
+    )?;
+    let cache_root = temp.path().join("cache");
+    let data_root = temp.path().join("data");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_aics"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CACHE_ROOT", &cache_root)
+        .env("AICS_DATA_ROOT", &data_root)
+        .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
+        .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .args([
+            "--apply-rules",
+            "--rules",
+            rules.to_str().unwrap(),
+            "--json",
+            "--progress",
+            "none",
+            "-g",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:#?}");
+    assert!(!roots.claude_session.exists());
+
+    let trash_dir = data_root.join("trash");
+    let trash_entries = fs::read_dir(&trash_dir)?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(trash_entries.len(), 1);
+
+    let metadata = fs::read_to_string(data_root.join("trash.jsonl"))?;
+    assert!(metadata.contains("basic_session.jsonl"));
+    assert!(metadata.contains("\"tn\":\"claude\""));
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    let value: serde_json::Value = serde_json::from_str(lines[0])?;
+    assert_eq!(value["action"], "trash");
+    assert_eq!(value["reason"], "cleanup");
+    Ok(())
+}
+
+fn write_rules(temp: &TempDir, source: &str) -> Result<PathBuf> {
+    let path = temp.path().join("rules.js");
+    fs::write(&path, source)?;
+    Ok(path)
+}
+
+struct FixtureRoots {
+    claude_projects: PathBuf,
+    codex_sessions: PathBuf,
+    claude_session: PathBuf,
+}
+
+fn fixture_roots(temp: &TempDir) -> Result<FixtureRoots> {
+    let claude_session = copy_fixture(
+        temp,
+        "tests/fixtures/sessions/claude/basic_session.jsonl",
+        ".claude/projects/-Users-testuser-projects-myapp/basic_session.jsonl",
+    )?;
+    copy_fixture(
+        temp,
+        "tests/fixtures/sessions/codex/new_format.jsonl",
+        ".codex/sessions/2025/12/10/rollout-new.jsonl",
+    )?;
+
+    Ok(FixtureRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        claude_session,
+    })
+}
+
+fn copy_fixture(temp: &TempDir, from: &str, to: &str) -> Result<PathBuf> {
+    let source = fixture_path(from);
+    let destination = temp.path().join(to);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(source, &destination)?;
+    Ok(destination)
+}
+
+fn fixture_path(relative: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+}
