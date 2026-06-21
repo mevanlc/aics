@@ -74,7 +74,7 @@ rule("trash short spark commit sessions", ({ session, turns, re }) => {
   if (turns.agent.length < 2 || turns.agent.length > 3) {
     return nothing();
   }
-  if (!re(String.raw`\s*[/$](gdf-)?commit\b`, "m").test(turns.user[0].text)) {
+  if (!re(String.raw`\s*[/$](gdf-)?commit\b`, "m").test(turns.user[0].text(4096))) {
     return nothing();
   }
 
@@ -124,18 +124,15 @@ Suggested shape:
     modelProvider,
     approvalPolicy,
     sandboxMode,
-    firstUserText,
-    firstText,
-    lastText,
     trashed
   },
   turns: {
-    user: [{ index, text, timestamp }],
-    agent: [{ index, text, timestamp }],
-    system: [{ index, text, timestamp }],
+    user: [{ index, timestamp }],
+    agent: [{ index, timestamp }],
+    system: [{ index, timestamp }],
     toolCalls: [{ index, tool, summary, timestamp }],
-    toolResults: [{ index, tool, text, isError, timestamp }],
-    exec: [{ index, command, cwd, stdout, stderr, exitCode, timestamp }],
+    toolResults: [{ index, tool, isError, timestamp }],
+    exec: [{ index, command, cwd, exitCode, timestamp }],
     patches: [{ index, files, success, timestamp }]
   }
 }
@@ -145,7 +142,8 @@ Implementation note:
 
 - `StoredSession` already carries cheap list/search metadata.
 - Full `turns` requires reparsing the selected session file with `parse_session_file`.
-- In preview/apply mode, load full parsed sessions lazily only after cheap metadata filters have been evaluated if we introduce a two-stage API later. For v1, full parse for each candidate is acceptable if rules mode is explicitly invoked.
+- The data-heavy fields are message bodies, tool-result output, exec stdout/stderr, and patch file content. These values stay in a Rust-side detail map for the current session and are retrieved only when a rule calls `text(limit)`, `stdout(limit)`, `stderr(limit)`, or `content(limit)`. The limit argument is optional; the current stress-test default is effectively unbounded, but normal rules should pass explicit limits.
+- In preview/apply mode, parse full sessions only after cheap metadata filters have been evaluated. A later two-stage API can avoid parsing sessions that only need indexed metadata.
 
 ## Runtime Safety
 

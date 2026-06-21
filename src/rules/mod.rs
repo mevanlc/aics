@@ -1,11 +1,13 @@
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use log::warn;
-use rquickjs::{CatchResultExt, Context as JsContext, Runtime};
+use rquickjs::{prelude::Func, CatchResultExt, Context as JsContext, Runtime};
 use serde::{Deserialize, Serialize};
 
 use crate::index::{Scope, SearchFilters, TrashFilter};
@@ -16,9 +18,10 @@ use crate::scan::{scan_session_files, SessionFile, SessionRoots};
 use crate::settings::config_dir;
 use crate::trash::TrashStore;
 
-const RULE_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+const RULE_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 const RULE_STACK_LIMIT: usize = 512 * 1024;
 const RULE_EVAL_TIMEOUT: Duration = Duration::from_millis(250);
+const TRUNCATED_SUFFIX: &str = "\n... [truncated for rules]";
 
 const RULES_HARNESS: &str = r#"
 const __aicsRules = [];
@@ -53,11 +56,59 @@ globalThis.__aicsRuleNames = function() {
   return JSON.stringify(__aicsRules.map((entry) => entry.name));
 };
 
+function __aicsNormalizeLimit(limit) {
+  if (limit == null) {
+    return 1000000000;
+  }
+  const n = Number(limit);
+  if (!Number.isFinite(n) || n < 0) {
+    throw new TypeError("rule text limit must be a non-negative finite number");
+  }
+  return Math.floor(n);
+}
+
 globalThis.__aicsRunRules = function(contextJson) {
   const context = JSON.parse(contextJson);
   context.re = function(pattern, flags) {
     return new RegExp(pattern, flags);
   };
+  context.text = function(kind, index, field, limit) {
+    return globalThis.__aicsFetchText(String(kind), Number(index), field == null ? "text" : String(field), __aicsNormalizeLimit(limit));
+  };
+  context.turnText = context.text;
+  context.session.firstUserText = function(limit) {
+    return globalThis.__aicsFetchText("session", 0, "firstUserText", __aicsNormalizeLimit(limit));
+  };
+  context.session.firstText = function(limit) {
+    return globalThis.__aicsFetchText("session", 0, "firstText", __aicsNormalizeLimit(limit));
+  };
+  context.session.lastText = function(limit) {
+    return globalThis.__aicsFetchText("session", 0, "lastText", __aicsNormalizeLimit(limit));
+  };
+
+  for (const kind of ["user", "agent", "system", "toolResults"]) {
+    for (const turn of context.turns[kind] || []) {
+      const fetchKind = kind === "toolResults" ? "tool_result" : kind;
+      turn.text = function(limit) {
+        return globalThis.__aicsFetchText(fetchKind, Number(turn.index), "text", __aicsNormalizeLimit(limit));
+      };
+    }
+  }
+  for (const turn of context.turns.exec || []) {
+    turn.stdout = function(limit) {
+      return globalThis.__aicsFetchText("exec", Number(turn.index), "stdout", __aicsNormalizeLimit(limit));
+    };
+    turn.stderr = function(limit) {
+      return globalThis.__aicsFetchText("exec", Number(turn.index), "stderr", __aicsNormalizeLimit(limit));
+    };
+  }
+  for (const turn of context.turns.patches || []) {
+    for (const [fileIndex, file] of (turn.files || []).entries()) {
+      file.content = function(limit) {
+        return globalThis.__aicsFetchText("patch", Number(turn.index), String(fileIndex), __aicsNormalizeLimit(limit));
+      };
+    }
+  }
 
   const outcomes = [];
   for (const entry of __aicsRules) {
@@ -194,7 +245,8 @@ pub fn run_rules(roots: &SessionRoots, options: &RulesOptions) -> Result<RulesRe
         }
 
         let input = RuleInput::from_session(&parsed, &file);
-        match engine.evaluate(&input) {
+        let details = RuleDetails::from_session(&parsed);
+        match engine.evaluate(&input, details) {
             Ok(outcomes) => collect_outcomes(&mut report, &parsed, &file, outcomes),
             Err(error) => report.errors.push(RuleEvaluationError {
                 rule: None,
@@ -299,6 +351,7 @@ fn file_label(path: &Path) -> String {
 struct JsRuleEngine {
     runtime: Runtime,
     context: JsContext,
+    details: Rc<RefCell<Option<RuleDetails>>>,
 }
 
 impl JsRuleEngine {
@@ -307,13 +360,36 @@ impl JsRuleEngine {
         runtime.set_memory_limit(RULE_MEMORY_LIMIT);
         runtime.set_max_stack_size(RULE_STACK_LIMIT);
         let context = JsContext::full(&runtime).context("failed to create QuickJS context")?;
+        let details = Rc::new(RefCell::new(None));
 
         let source = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let engine = Self { runtime, context };
+        let engine = Self {
+            runtime,
+            context,
+            details,
+        };
         engine
             .with_timeout(|| {
                 engine.context.with(|ctx| -> Result<()> {
+                    let details = Rc::clone(&engine.details);
+                    ctx.globals()
+                        .set(
+                            "__aicsFetchText",
+                            Func::new(
+                                move |kind: String, index: usize, field: String, limit: usize| {
+                                    details
+                                        .borrow()
+                                        .as_ref()
+                                        .and_then(|details| {
+                                            details.fetch(&kind, index, &field, limit)
+                                        })
+                                        .unwrap_or_default()
+                                },
+                            ),
+                        )
+                        .catch(&ctx)
+                        .map_err(|error| anyhow!("{error}"))?;
                     ctx.eval::<(), _>(RULES_HARNESS)
                         .catch(&ctx)
                         .map_err(|error| anyhow!("{error}"))?;
@@ -340,18 +416,21 @@ impl JsRuleEngine {
         serde_json::from_str(&json).context("rules runtime returned invalid rule-name JSON")
     }
 
-    fn evaluate(&self, input: &RuleInput) -> Result<Vec<RawRuleOutcome>> {
+    fn evaluate(&self, input: &RuleInput, details: RuleDetails) -> Result<Vec<RawRuleOutcome>> {
         let input_json = serde_json::to_string(input).context("failed to serialize rule input")?;
         let input_literal =
             serde_json::to_string(&input_json).context("failed to quote rule input")?;
         let script = format!("globalThis.__aicsRunRules({input_literal})");
+        *self.details.borrow_mut() = Some(details);
         let output_json = self.with_timeout(|| {
             self.context.with(|ctx| -> Result<String> {
                 ctx.eval(script)
                     .catch(&ctx)
                     .map_err(|error| anyhow!("{error}"))
             })
-        })?;
+        });
+        *self.details.borrow_mut() = None;
+        let output_json = output_json?;
         serde_json::from_str(&output_json).context("rules runtime returned invalid action JSON")
     }
 
@@ -596,6 +675,92 @@ impl RuleInput {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct RuleDetails {
+    values: BTreeMap<(String, usize, String), String>,
+}
+
+impl RuleDetails {
+    fn from_session(session: &Session) -> Self {
+        let mut details = Self::default();
+        details.insert(
+            "session",
+            0,
+            "firstUserText",
+            &session.first_user_msg_content,
+        );
+        details.insert("session", 0, "firstText", &session.first_msg_content);
+        details.insert("session", 0, "lastText", &session.last_msg_content);
+
+        let cells = rule_cells(session);
+        for (index, cell) in cells.iter().enumerate() {
+            match cell {
+                SessionCell::Message { role, content, .. } => match role {
+                    MessageRole::User => details.insert("user", index, "text", content),
+                    MessageRole::Assistant => details.insert("agent", index, "text", content),
+                    MessageRole::System | MessageRole::Summary => {
+                        details.insert("system", index, "text", content);
+                    }
+                    MessageRole::ToolCall | MessageRole::ToolResult => {}
+                },
+                SessionCell::Reasoning { header, body, .. } => {
+                    let text = header
+                        .as_ref()
+                        .map(|header| format!("{header}\n{body}"))
+                        .unwrap_or_else(|| body.clone());
+                    details.insert("agent", index, "text", text);
+                }
+                SessionCell::ToolResult { output, .. } => {
+                    details.insert("tool_result", index, "text", output);
+                }
+                SessionCell::Exec { stdout, stderr, .. } => {
+                    details.insert("exec", index, "stdout", stdout);
+                    details.insert("exec", index, "stderr", stderr);
+                }
+                SessionCell::Patch { files, .. } => {
+                    for (file_index, file) in files.iter().enumerate() {
+                        if let Some(content) = &file.content {
+                            details.insert("patch", index, file_index.to_string(), content);
+                        }
+                    }
+                }
+                SessionCell::ToolCall { .. }
+                | SessionCell::WebSearch { .. }
+                | SessionCell::Plan { .. }
+                | SessionCell::SessionInfo(_)
+                | SessionCell::Metrics(_) => {}
+            }
+        }
+
+        details
+    }
+
+    fn fetch(&self, kind: &str, index: usize, field: &str, limit: usize) -> Option<String> {
+        self.values
+            .get(&(kind.to_owned(), index, field.to_owned()))
+            .map(|text| RuleText::limit(text, limit).text)
+    }
+
+    fn insert(
+        &mut self,
+        kind: impl Into<String>,
+        index: usize,
+        field: impl Into<String>,
+        text: impl AsRef<str>,
+    ) {
+        self.values
+            .insert((kind.into(), index, field.into()), text.as_ref().to_owned());
+    }
+}
+
+fn rule_cells(session: &Session) -> Vec<SessionCell> {
+    if session.cells.is_empty() {
+        crate::parse::session::cells_from_messages(&session.messages)
+    } else {
+        session.cells.clone()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuleSession {
@@ -614,9 +779,6 @@ struct RuleSession {
     model_provider: Option<String>,
     approval_policy: Option<String>,
     sandbox_mode: Option<String>,
-    first_user_text: String,
-    first_text: String,
-    last_text: String,
     trashed: bool,
 }
 
@@ -639,9 +801,6 @@ impl RuleSession {
             model_provider: info.and_then(|info| info.model_provider.clone()),
             approval_policy: info.and_then(|info| info.approval_policy.clone()),
             sandbox_mode: info.and_then(|info| info.sandbox_mode.clone()),
-            first_user_text: session.first_user_msg_content.clone(),
-            first_text: session.first_msg_content.clone(),
-            last_text: session.last_msg_content.clone(),
             trashed: file.trashed,
         }
     }
@@ -662,11 +821,7 @@ struct RuleTurns {
 impl RuleTurns {
     fn from_session(session: &Session) -> Self {
         let mut turns = Self::default();
-        let cells = if session.cells.is_empty() {
-            crate::parse::session::cells_from_messages(&session.messages)
-        } else {
-            session.cells.clone()
-        };
+        let cells = rule_cells(session);
 
         for (index, cell) in cells.iter().enumerate() {
             match cell {
@@ -688,14 +843,13 @@ impl RuleTurns {
                     header,
                     body,
                     timestamp,
-                } => turns.agent.push(TextTurn {
-                    index,
-                    text: header
+                } => {
+                    let text = header
                         .as_ref()
                         .map(|header| format!("{header}\n{body}"))
-                        .unwrap_or_else(|| body.clone()),
-                    timestamp: timestamp.map(|timestamp| timestamp.to_rfc3339()),
-                }),
+                        .unwrap_or_else(|| body.clone());
+                    turns.agent.push(TextTurn::new(index, &text, timestamp));
+                }
                 SessionCell::ToolCall {
                     tool,
                     summary,
@@ -709,34 +863,35 @@ impl RuleTurns {
                 }),
                 SessionCell::ToolResult {
                     tool,
-                    output,
+                    output: _,
                     is_error,
                     timestamp,
                     ..
-                } => turns.tool_results.push(ToolResultTurn {
-                    index,
-                    tool: tool.clone(),
-                    text: output.clone(),
-                    is_error: *is_error,
-                    timestamp: timestamp.map(|timestamp| timestamp.to_rfc3339()),
-                }),
+                } => {
+                    turns.tool_results.push(ToolResultTurn {
+                        index,
+                        tool: tool.clone(),
+                        is_error: *is_error,
+                        timestamp: timestamp.map(|timestamp| timestamp.to_rfc3339()),
+                    });
+                }
                 SessionCell::Exec {
                     command,
                     cwd,
-                    stdout,
-                    stderr,
+                    stdout: _,
+                    stderr: _,
                     exit_code,
                     timestamp,
                     ..
-                } => turns.exec.push(ExecTurn {
-                    index,
-                    command: command.clone(),
-                    cwd: cwd.clone(),
-                    stdout: stdout.clone(),
-                    stderr: stderr.clone(),
-                    exit_code: *exit_code,
-                    timestamp: timestamp.map(|timestamp| timestamp.to_rfc3339()),
-                }),
+                } => {
+                    turns.exec.push(ExecTurn {
+                        index,
+                        command: command.clone(),
+                        cwd: cwd.clone(),
+                        exit_code: *exit_code,
+                        timestamp: timestamp.map(|timestamp| timestamp.to_rfc3339()),
+                    });
+                }
                 SessionCell::Patch {
                     files,
                     success,
@@ -744,7 +899,7 @@ impl RuleTurns {
                     ..
                 } => turns.patches.push(PatchTurn {
                     index,
-                    files: files.clone(),
+                    files: preview_patch_files(files),
                     success: *success,
                     timestamp: timestamp.map(|timestamp| timestamp.to_rfc3339()),
                 }),
@@ -763,18 +918,50 @@ impl RuleTurns {
 #[serde(rename_all = "camelCase")]
 struct TextTurn {
     index: usize,
-    text: String,
     timestamp: Option<String>,
 }
 
 impl TextTurn {
-    fn new(index: usize, text: &str, timestamp: &Option<chrono::DateTime<chrono::Utc>>) -> Self {
+    fn new(index: usize, _text: &str, timestamp: &Option<chrono::DateTime<chrono::Utc>>) -> Self {
         Self {
             index,
-            text: text.to_owned(),
             timestamp: timestamp.map(|timestamp| timestamp.to_rfc3339()),
         }
     }
+}
+
+struct RuleText {
+    text: String,
+}
+
+impl RuleText {
+    fn limit(text: &str, limit: usize) -> Self {
+        if text.len() <= limit {
+            return Self {
+                text: text.to_owned(),
+            };
+        }
+
+        let mut end = limit.min(text.len());
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut preview = text[..end].to_owned();
+        preview.push_str(TRUNCATED_SUFFIX);
+        Self { text: preview }
+    }
+}
+
+fn preview_patch_files(files: &[PatchFile]) -> Vec<RulePatchFile> {
+    files
+        .iter()
+        .map(|file| RulePatchFile {
+            path: file.path.clone(),
+            op: file.op.clone(),
+            additions: file.additions,
+            deletions: file.deletions,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -791,7 +978,6 @@ struct ToolCallTurn {
 struct ToolResultTurn {
     index: usize,
     tool: Option<String>,
-    text: String,
     is_error: bool,
     timestamp: Option<String>,
 }
@@ -802,8 +988,6 @@ struct ExecTurn {
     index: usize,
     command: Vec<String>,
     cwd: Option<String>,
-    stdout: String,
-    stderr: String,
     exit_code: Option<i32>,
     timestamp: Option<String>,
 }
@@ -812,16 +996,25 @@ struct ExecTurn {
 #[serde(rename_all = "camelCase")]
 struct PatchTurn {
     index: usize,
-    files: Vec<PatchFile>,
+    files: Vec<RulePatchFile>,
     success: bool,
     timestamp: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RulePatchFile {
+    path: String,
+    op: crate::parse::PatchOp,
+    additions: usize,
+    deletions: usize,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{JsRuleEngine, RuleInput, RuleSession, RuleTurns};
+    use super::{JsRuleEngine, RuleDetails, RuleInput, RuleSession, RuleTurns};
 
-    fn input(agent: &'static str, user_text: &str) -> RuleInput {
+    fn input(agent: &'static str, _user_text: &str) -> RuleInput {
         RuleInput {
             session: RuleSession {
                 id: "s1".to_owned(),
@@ -839,20 +1032,22 @@ mod tests {
                 model_provider: None,
                 approval_policy: None,
                 sandbox_mode: None,
-                first_user_text: user_text.to_owned(),
-                first_text: user_text.to_owned(),
-                last_text: user_text.to_owned(),
                 trashed: false,
             },
             turns: RuleTurns {
                 user: vec![super::TextTurn {
                     index: 0,
-                    text: user_text.to_owned(),
                     timestamp: None,
                 }],
                 ..RuleTurns::default()
             },
         }
+    }
+
+    fn details(user_text: &str) -> RuleDetails {
+        let mut details = RuleDetails::default();
+        details.insert("user", 0, "text", user_text);
+        details
     }
 
     #[test]
@@ -863,7 +1058,7 @@ mod tests {
             &rules,
             r#"
             rule("commit sessions", ({ turns, re }) => {
-              return re(String.raw`\s*[/$](gdf-)?commit\b`, "m").test(turns.user[0].text)
+              return re(String.raw`\s*[/$](gdf-)?commit\b`, "m").test(turns.user[0].text(4096))
                 ? trash("commit helper")
                 : nothing();
             });
@@ -873,12 +1068,41 @@ mod tests {
 
         let engine = JsRuleEngine::load(&rules).unwrap();
         let outcomes = engine
-            .evaluate(&input("codex", "$gdf-commit --all"))
+            .evaluate(
+                &input("codex", "$gdf-commit --all"),
+                details("$gdf-commit --all"),
+            )
             .unwrap();
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].rule, "commit sessions");
         assert_eq!(outcomes[0].action.as_deref(), Some("trash"));
         assert_eq!(outcomes[0].reason.as_deref(), Some("commit helper"));
+    }
+
+    #[test]
+    fn js_rule_can_fetch_full_text_on_demand() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = dir.path().join("rules.js");
+        std::fs::write(
+            &rules,
+            r#"
+            rule("lazy", ({ turns }) => {
+              return turns.user[0].text(64).includes("full-only marker")
+                ? trash("lazy text")
+                : nothing();
+            });
+            "#,
+        )
+        .unwrap();
+
+        let engine = JsRuleEngine::load(&rules).unwrap();
+        let outcomes = engine
+            .evaluate(&input("codex", "preview"), details("full-only marker"))
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].rule, "lazy");
+        assert_eq!(outcomes[0].action.as_deref(), Some("trash"));
+        assert_eq!(outcomes[0].reason.as_deref(), Some("lazy text"));
     }
 
     #[test]

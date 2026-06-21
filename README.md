@@ -67,13 +67,20 @@ Rules live at `~/.config/aics/rules.js` by default. Use `--preview-rules` to pri
 ```js
 rule("trash short commit helper sessions", ({ turns, re }) => {
   return turns.user.length === 2 &&
-    re(String.raw`\s*[/$](gdf-)?commit\b`, "m").test(turns.user[0].text)
+    re(String.raw`\s*[/$](gdf-)?commit\b`, "m").test(turns.user[0].text(4096))
     ? trash("commit helper")
     : nothing();
 });
 ```
 
 For the first implementation, rules can return `nothing()` or `trash(reason)`. Rules mode honors the usual scope/filter flags such as `-g`, `--dir`, `--agent`, `--after`, `--before`, `--min-lines`, and `--sub-agent`, but it does not accept a text search query yet.
+
+Large transcript fields are fetched from Rust only when a rule calls one of the lazy methods. The limit argument is optional; omitting it uses a practically unbounded default for stress testing, but normal rules should pass an explicit byte limit:
+
+- `session.firstUserText(limit)`, `session.firstText(limit)`, `session.lastText(limit)`
+- `turns.user[n].text(limit)`, `turns.agent[n].text(limit)`, `turns.system[n].text(limit)`, `turns.toolResults[n].text(limit)`
+- `turns.exec[n].stdout(limit)`, `turns.exec[n].stderr(limit)`
+- `turns.patches[n].files[m].content(limit)`
 
 ## Keybindings (TUI)
 
