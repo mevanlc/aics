@@ -66,6 +66,12 @@ struct Cli {
     )]
     agent: Option<String>,
     #[arg(
+        long = "session",
+        value_name = "SESSIONID",
+        help = "Only include the session with this exact session id"
+    )]
+    session: Option<String>,
+    #[arg(
         long = "after",
         help = "Only include sessions on or after this date or timestamp"
     )]
@@ -415,6 +421,7 @@ fn build_request(cli: &Cli) -> Result<SearchRequest> {
         sort: cli.sort_by.into(),
         filters: SearchFilters {
             agent: cli.agent.as_deref().and_then(parse_agent_arg),
+            session_id: cli.session.as_deref().and_then(optional_cli_string),
             branch,
             after_ts: cli.after.as_deref().map(parse_after_date).transpose()?,
             before_ts: cli.before.as_deref().map(parse_before_date).transpose()?,
@@ -448,6 +455,11 @@ fn parse_agent_arg(raw: &str) -> Option<Agent> {
         "codex" => Some(Agent::Codex),
         _ => None,
     }
+}
+
+fn optional_cli_string(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
 fn parse_dir_arg(raw: &str) -> (PathBuf, Option<String>) {
@@ -764,6 +776,7 @@ mod tests {
         assert_eq!(request.query, "deploy");
         assert_eq!(request.sort, SortMode::Time);
         assert_eq!(request.filters.agent, Some(Agent::Claude));
+        assert_eq!(request.filters.session_id, None);
         assert_eq!(request.filters.branch.as_deref(), Some("main"));
         assert_eq!(request.filters.min_lines, Some(12));
         assert!(!request.filters.include_trimmed);
@@ -771,6 +784,16 @@ mod tests {
         assert!(request.filters.live_only);
         assert!(request.filters.after_ts.is_some());
         assert!(request.filters.before_ts.is_some());
+    }
+
+    #[test]
+    fn parses_session_filter() {
+        let cli = Cli::parse_from(["aics", "--session", " session-123 ", "deploy"]);
+
+        let request = build_request(&cli).unwrap();
+
+        assert_eq!(request.query, "deploy");
+        assert_eq!(request.filters.session_id.as_deref(), Some("session-123"));
     }
 
     #[test]

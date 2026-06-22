@@ -58,6 +58,7 @@ impl TrashFilter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchFilters {
     pub agent: Option<Agent>,
+    pub session_id: Option<String>,
     pub branch: Option<String>,
     pub after_ts: Option<u64>,
     pub before_ts: Option<u64>,
@@ -74,6 +75,7 @@ impl Default for SearchFilters {
     fn default() -> Self {
         Self {
             agent: None,
+            session_id: None,
             branch: None,
             after_ts: None,
             before_ts: None,
@@ -91,6 +93,7 @@ impl Default for SearchFilters {
 impl SearchFilters {
     pub fn active_count(&self) -> usize {
         usize::from(self.agent.is_some())
+            + usize::from(self.session_id.is_some())
             + usize::from(self.branch.is_some())
             + usize::from(self.after_ts.is_some())
             + usize::from(self.before_ts.is_some())
@@ -566,6 +569,12 @@ fn matches_request(request: &SearchRequest, session: &StoredSession, is_live: bo
 fn matches_filters(filters: &SearchFilters, session: &StoredSession, is_live: bool) -> bool {
     if let Some(agent) = filters.agent {
         if session.agent != agent {
+            return false;
+        }
+    }
+
+    if let Some(session_id) = filters.session_id.as_deref() {
+        if session.session_id != session_id {
             return false;
         }
     }

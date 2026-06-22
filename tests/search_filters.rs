@@ -69,6 +69,47 @@ fn search_filters_respect_agent_date_and_min_lines() -> Result<()> {
 }
 
 #[test]
+fn search_filters_respect_session_id() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let cache_root = temp.path().join("cache");
+    let manager = IndexManager::with_paths(IndexPaths::from_root(&cache_root));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+
+    let hits = engine.search(&SearchRequest {
+        query: String::new(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Time,
+        filters: SearchFilters {
+            session_id: Some("c0d1e2f3-a4b5-4c6d-8e7f-9a0b1c2d3e4f".to_owned()),
+            ..SearchFilters::default()
+        },
+    })?;
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(
+        hits[0].session.session_id,
+        "c0d1e2f3-a4b5-4c6d-8e7f-9a0b1c2d3e4f"
+    );
+
+    let misses = engine.search(&SearchRequest {
+        query: String::new(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Time,
+        filters: SearchFilters {
+            session_id: Some("missing-session".to_owned()),
+            ..SearchFilters::default()
+        },
+    })?;
+
+    assert!(misses.is_empty());
+    Ok(())
+}
+
+#[test]
 fn sub_agent_sessions_are_hidden_unless_requested() -> Result<()> {
     let temp = TempDir::new()?;
     let original = copy_fixture(

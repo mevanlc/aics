@@ -587,6 +587,12 @@ fn session_matches_scope(scope: &Scope, session: &Session) -> bool {
 }
 
 fn session_matches_filters(session: &Session, file: &SessionFile, filters: &SearchFilters) -> bool {
+    if let Some(session_id) = filters.session_id.as_deref() {
+        if session.session_id != session_id {
+            return false;
+        }
+    }
+
     if let Some(branch) = filters.branch.as_deref() {
         if session.branch.as_deref() != Some(branch) {
             return false;

@@ -17,9 +17,10 @@ use crate::tui::layout;
 use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
 
-const FIELD_ORDER: [FilterField; 13] = [
+const FIELD_ORDER: [FilterField; 14] = [
     FilterField::Scope,
     FilterField::Agent,
+    FilterField::Session,
     FilterField::Branch,
     FilterField::After,
     FilterField::Before,
@@ -37,6 +38,7 @@ const FIELD_ORDER: [FilterField; 13] = [
 pub enum FilterField {
     Scope,
     Agent,
+    Session,
     Branch,
     After,
     Before,
@@ -55,6 +57,7 @@ pub struct FilterModalState {
     pub selected: RingCursor<FilterField>,
     scope_global: bool,
     agent: Option<Agent>,
+    session_id: Input,
     branch: Input,
     after: Input,
     before: Input,
@@ -88,6 +91,7 @@ impl FilterModalState {
             selected: filter_field_cursor(FilterField::Scope),
             scope_global: matches!(scope, Scope::Global),
             agent: filters.agent,
+            session_id: Input::default().with_value(filters.session_id.clone().unwrap_or_default()),
             branch: Input::default().with_value(filters.branch.clone().unwrap_or_default()),
             after: Input::default().with_value(format_optional_date(filters.after_ts)),
             before: Input::default().with_value(format_optional_date(filters.before_ts)),
@@ -268,6 +272,7 @@ impl FilterModalState {
             sort: self.sort,
             filters: SearchFilters {
                 agent: self.agent,
+                session_id: optional_string(self.session_id.value()),
                 branch: optional_string(self.branch.value()),
                 after_ts: parse_optional_date(self.after.value(), false)?,
                 before_ts: parse_optional_date(self.before.value(), true)?,
@@ -284,6 +289,7 @@ impl FilterModalState {
 
     fn current_input_mut(&mut self) -> Option<&mut Input> {
         match *self.selected.current() {
+            FilterField::Session => Some(&mut self.session_id),
             FilterField::Branch => Some(&mut self.branch),
             FilterField::After => Some(&mut self.after),
             FilterField::Before => Some(&mut self.before),
@@ -352,6 +358,7 @@ impl FilterModalState {
             .iter()
             .position(|field| self.selected == *field)? as u16;
         let input = match *self.selected.current() {
+            FilterField::Session => &self.session_id,
             FilterField::Branch => &self.branch,
             FilterField::After => &self.after,
             FilterField::Before => &self.before,
@@ -373,7 +380,11 @@ impl FilterField {
     fn is_text(self) -> bool {
         matches!(
             self,
-            FilterField::Branch | FilterField::After | FilterField::Before | FilterField::MinLines
+            FilterField::Branch
+                | FilterField::After
+                | FilterField::Before
+                | FilterField::MinLines
+                | FilterField::Session
         )
     }
 
@@ -381,6 +392,7 @@ impl FilterField {
         match self {
             FilterField::Scope => "Scope",
             FilterField::Agent => "Agent",
+            FilterField::Session => "Session",
             FilterField::Branch => "Branch",
             FilterField::After => "After",
             FilterField::Before => "Before",
@@ -399,6 +411,7 @@ impl FilterField {
         match self {
             FilterField::Scope => 's',
             FilterField::Agent => 'a',
+            FilterField::Session => 'i',
             FilterField::Branch => 'b',
             FilterField::After => 'f',
             FilterField::Before => 'e',
@@ -422,6 +435,7 @@ impl FilterField {
         match self {
             FilterField::Scope => "Limit results to sessions from the launch directory or search globally across all sessions.",
             FilterField::Agent => "Filter by agent type: Claude, Codex, or all. Use Left/Right to cycle.",
+            FilterField::Session => "Filter to one exact session id. Leave empty to show all sessions.",
             FilterField::Branch => "Filter sessions by git branch name. Leave empty to show all branches.",
             FilterField::After => "Only show sessions modified after this date. Use YYYY-MM-DD or RFC3339 format.",
             FilterField::Before => "Only show sessions modified before this date. Use YYYY-MM-DD or RFC3339 format.",
@@ -449,6 +463,7 @@ impl FilterField {
                 .agent
                 .map(|agent| agent.to_string())
                 .unwrap_or_else(|| "all".to_owned()),
+            FilterField::Session => state.session_id.value().to_owned(),
             FilterField::Branch => state.branch.value().to_owned(),
             FilterField::After => state.after.value().to_owned(),
             FilterField::Before => state.before.value().to_owned(),
@@ -555,6 +570,23 @@ mod tests {
 
         let update = state.build_update(&scope).unwrap();
         assert_eq!(update.sort, SortMode::Time);
+    }
+
+    #[test]
+    fn preserves_session_filter_in_update() {
+        let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
+        let state = FilterModalState::new(
+            &scope,
+            &SearchFilters {
+                session_id: Some("session-123".to_owned()),
+                ..SearchFilters::default()
+            },
+            SortMode::Time,
+        );
+
+        let update = state.build_update(&scope).unwrap();
+
+        assert_eq!(update.filters.session_id.as_deref(), Some("session-123"));
     }
 
     #[test]
