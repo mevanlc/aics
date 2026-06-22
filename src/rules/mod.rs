@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::index::{Scope, SearchFilters, TrashFilter};
 use crate::parse::{
-    parse_session_file, Agent, DerivationType, MessageRole, PatchFile, Session, SessionCell,
+    is_contextual_user_message_content, parse_session_file, Agent, DerivationType, MessageRole,
+    PatchFile, Session, SessionCell,
 };
 use crate::scan::{scan_session_files, SessionFile, SessionRoots};
 use crate::settings::config_dir;
@@ -86,9 +87,12 @@ globalThis.__aicsRunRules = function(contextJson) {
     return globalThis.__aicsFetchText("session", 0, "lastText", __aicsNormalizeLimit(limit));
   };
 
-  for (const kind of ["user", "agent", "system", "toolResults"]) {
+  for (const kind of ["user", "contextualUser", "agent", "system", "toolResults"]) {
     for (const turn of context.turns[kind] || []) {
-      const fetchKind = kind === "toolResults" ? "tool_result" : kind;
+      const fetchKind =
+        kind === "toolResults" ? "tool_result" :
+        kind === "contextualUser" ? "contextual_user" :
+        kind;
       turn.text = function(limit) {
         return globalThis.__aicsFetchText(fetchKind, Number(turn.index), "text", __aicsNormalizeLimit(limit));
       };
@@ -702,6 +706,9 @@ impl RuleDetails {
         for (index, cell) in cells.iter().enumerate() {
             match cell {
                 SessionCell::Message { role, content, .. } => match role {
+                    MessageRole::User if is_contextual_user_message_content(*role, content) => {
+                        details.insert("contextual_user", index, "text", content);
+                    }
                     MessageRole::User => details.insert("user", index, "text", content),
                     MessageRole::Assistant => details.insert("agent", index, "text", content),
                     MessageRole::System | MessageRole::Summary => {
@@ -816,6 +823,7 @@ impl RuleSession {
 #[serde(rename_all = "camelCase")]
 struct RuleTurns {
     user: Vec<TextTurn>,
+    contextual_user: Vec<TextTurn>,
     agent: Vec<TextTurn>,
     system: Vec<TextTurn>,
     tool_calls: Vec<ToolCallTurn>,
@@ -836,6 +844,11 @@ impl RuleTurns {
                     content,
                     timestamp,
                 } => match role {
+                    MessageRole::User if is_contextual_user_message_content(*role, content) => {
+                        turns
+                            .contextual_user
+                            .push(TextTurn::new(index, content, timestamp));
+                    }
                     MessageRole::User => turns.user.push(TextTurn::new(index, content, timestamp)),
                     MessageRole::Assistant => {
                         turns.agent.push(TextTurn::new(index, content, timestamp));
@@ -1019,6 +1032,8 @@ struct RulePatchFile {
 #[cfg(test)]
 mod tests {
     use super::{JsRuleEngine, RuleDetails, RuleInput, RuleSession, RuleTurns};
+    use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionCell};
+    use std::path::PathBuf;
 
     fn input(agent: &'static str, _user_text: &str) -> RuleInput {
         RuleInput {
@@ -1056,6 +1071,68 @@ mod tests {
         details
     }
 
+    fn message(role: MessageRole, content: &str) -> SessionCell {
+        SessionCell::Message {
+            role,
+            content: content.to_owned(),
+            timestamp: None,
+        }
+    }
+
+    fn session_with_cells(cells: Vec<SessionCell>) -> Session {
+        Session {
+            session_id: "s1".to_owned(),
+            agent: Agent::Codex,
+            project: "/tmp/project".to_owned(),
+            branch: None,
+            cwd: Some("/tmp/project".to_owned()),
+            created: None,
+            modified: None,
+            modified_ts: 0,
+            lines: cells.len(),
+            file_path: PathBuf::from("/tmp/session.jsonl"),
+            first_msg_role: None,
+            first_msg_content: String::new(),
+            last_msg_role: None,
+            last_msg_content: String::new(),
+            first_user_msg_content: String::new(),
+            derivation_type: DerivationType::Original,
+            is_sidechain: false,
+            custom_title: None,
+            messages: Vec::new(),
+            content: String::new(),
+            cells,
+            session_info: None,
+        }
+    }
+
+    #[test]
+    fn rule_turns_split_contextual_user_messages_from_real_user_messages() {
+        let docs = "# AGENTS.md instructions for /tmp/project\n\n<INSTRUCTIONS>\nMemory mentions $commit.\n</INSTRUCTIONS>";
+        let request = "$commit --all";
+        let session = session_with_cells(vec![
+            message(MessageRole::User, docs),
+            message(MessageRole::User, request),
+        ]);
+
+        let turns = RuleTurns::from_session(&session);
+        assert_eq!(turns.contextual_user.len(), 1);
+        assert_eq!(turns.user.len(), 1);
+        assert_eq!(turns.contextual_user[0].index, 0);
+        assert_eq!(turns.user[0].index, 1);
+
+        let details = RuleDetails::from_session(&session);
+        assert_eq!(
+            details.fetch("contextual_user", 0, "text", usize::MAX),
+            Some(docs.to_owned())
+        );
+        assert_eq!(
+            details.fetch("user", 1, "text", usize::MAX),
+            Some(request.to_owned())
+        );
+        assert_eq!(details.fetch("user", 0, "text", usize::MAX), None);
+    }
+
     #[test]
     fn js_rule_returns_trash_action() {
         let dir = tempfile::tempdir().unwrap();
@@ -1083,6 +1160,79 @@ mod tests {
         assert_eq!(outcomes[0].rule, "commit sessions");
         assert_eq!(outcomes[0].action.as_deref(), Some("trash"));
         assert_eq!(outcomes[0].reason.as_deref(), Some("commit helper"));
+    }
+
+    #[test]
+    fn js_rule_first_user_text_ignores_contextual_user_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = dir.path().join("rules.js");
+        std::fs::write(
+            &rules,
+            r#"
+            rule("commit sessions", ({ turns, re }) => {
+              return turns.user.length > 0 &&
+                re(String.raw`\s*[/$](gdf-)?commit\b`, "m").test(turns.user[0].text(4096))
+                ? trash("commit helper")
+                : nothing();
+            });
+
+            rule("context available", ({ turns }) => {
+              return turns.contextualUser.length === 1 &&
+                turns.contextualUser[0].text(4096).includes("memory mentions $commit")
+                ? trash("context was split")
+                : nothing();
+            });
+            "#,
+        )
+        .unwrap();
+
+        let input = RuleInput {
+            session: RuleSession {
+                id: "s1".to_owned(),
+                agent: "codex",
+                project: "/tmp/project".to_owned(),
+                cwd: Some("/tmp/project".to_owned()),
+                branch: None,
+                path: "/tmp/session.jsonl".to_owned(),
+                modified_ts: 0,
+                lines: 2,
+                derivation_type: "original",
+                is_sidechain: false,
+                custom_title: None,
+                model: Some("test-spark".to_owned()),
+                model_provider: None,
+                approval_policy: None,
+                sandbox_mode: None,
+                trashed: false,
+            },
+            turns: RuleTurns {
+                user: vec![super::TextTurn {
+                    index: 1,
+                    timestamp: None,
+                }],
+                contextual_user: vec![super::TextTurn {
+                    index: 0,
+                    timestamp: None,
+                }],
+                ..RuleTurns::default()
+            },
+        };
+        let mut details = RuleDetails::default();
+        details.insert(
+            "contextual_user",
+            0,
+            "text",
+            "# AGENTS.md instructions\n\n<INSTRUCTIONS>memory mentions $commit</INSTRUCTIONS>",
+        );
+        details.insert("user", 1, "text", "real first user request");
+
+        let engine = JsRuleEngine::load(&rules).unwrap();
+        let outcomes = engine.evaluate(&input, details).unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].rule, "context available");
+        assert_eq!(outcomes[0].action.as_deref(), Some("trash"));
+        assert_eq!(outcomes[0].reason.as_deref(), Some("context was split"));
     }
 
     #[test]

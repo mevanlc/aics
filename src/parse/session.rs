@@ -397,6 +397,73 @@ pub fn is_project_docs_autodump(role: MessageRole, content: &str) -> bool {
     strip_project_docs_autodump_preamble(content).is_some()
 }
 
+pub fn is_contextual_user_message_content(role: MessageRole, content: &str) -> bool {
+    role == MessageRole::User && is_contextual_user_message_text(content)
+}
+
+pub fn is_contextual_user_message_text(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    is_project_docs_contextual_user_text(trimmed)
+        || is_dynamic_external_context(trimmed)
+        || is_legacy_contextual_user_text(trimmed)
+        || CONTEXTUAL_USER_MARKERS
+            .iter()
+            .any(|(start, end)| starts_with_marked_block(start, end, trimmed))
+}
+
+const CONTEXTUAL_USER_MARKERS: &[(&str, &str)] = &[
+    ("<environment_context>", "</environment_context>"),
+    ("<skill>", "</skill>"),
+    ("<user_shell_command>", "</user_shell_command>"),
+    ("<turn_aborted>", "</turn_aborted>"),
+    ("<subagent_notification>", "</subagent_notification>"),
+    ("<recommended_plugins>", "</recommended_plugins>"),
+    ("<codex_internal_context", "</codex_internal_context>"),
+    ("<goal_context>", "</goal_context>"),
+];
+
+fn is_project_docs_contextual_user_text(text: &str) -> bool {
+    strip_project_docs_header_line(text)
+        .map(str::trim_start)
+        .unwrap_or(text)
+        .strip_prefix("<INSTRUCTIONS>")
+        .is_some_and(|rest| contains_ignore_ascii_case(rest, "</INSTRUCTIONS>"))
+}
+
+fn starts_with_marked_block(start_marker: &str, end_marker: &str, text: &str) -> bool {
+    text.get(..start_marker.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(start_marker))
+        && contains_ignore_ascii_case(text, end_marker)
+}
+
+fn is_dynamic_external_context(text: &str) -> bool {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("<external_") else {
+        return false;
+    };
+    let Some((key, value_and_close)) = rest.split_once('>') else {
+        return false;
+    };
+    contains_ignore_ascii_case(value_and_close, &format!("</external_{key}>"))
+}
+
+fn is_legacy_contextual_user_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed
+        .starts_with("Warning: The maximum number of unified exec processes you can keep open is")
+        || trimmed.starts_with(
+            "Warning: Your account was flagged for potentially high-risk cyber activity",
+        )
+        || (trimmed.starts_with("Warning: apply_patch was requested via ")
+            && trimmed.ends_with("Use the apply_patch tool instead of exec_command."))
+}
+
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    haystack
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
+}
+
 pub fn strip_project_docs_autodump_preamble(content: &str) -> Option<&str> {
     let trimmed = content.trim_start();
     strip_project_docs_header_line(trimmed).or_else(|| strip_bare_instructions_block(trimmed))
@@ -737,8 +804,8 @@ pub fn system_time_or_epoch(timestamp: Option<SystemTime>) -> SystemTime {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_claude_project_dir, is_project_docs_autodump, normalize_session_path,
-        strip_project_docs_autodump_preamble, MessageRole,
+        decode_claude_project_dir, is_contextual_user_message_content, is_project_docs_autodump,
+        normalize_session_path, strip_project_docs_autodump_preamble, MessageRole,
     };
 
     #[test]
@@ -800,5 +867,33 @@ mod tests {
             ),
             Some("\n\nreal request")
         );
+    }
+
+    #[test]
+    fn detects_contextual_user_messages_without_matching_normal_mentions() {
+        assert!(is_contextual_user_message_content(
+            MessageRole::User,
+            "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>Use cargo test.</INSTRUCTIONS>",
+        ));
+        assert!(is_contextual_user_message_content(
+            MessageRole::User,
+            "<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>",
+        ));
+        assert!(is_contextual_user_message_content(
+            MessageRole::User,
+            "<external_memory>stored context</external_memory>",
+        ));
+        assert!(!is_contextual_user_message_content(
+            MessageRole::User,
+            "Please update AGENTS.md with the new commands.",
+        ));
+        assert!(!is_contextual_user_message_content(
+            MessageRole::Assistant,
+            "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>quoted</INSTRUCTIONS>",
+        ));
+        assert!(!is_contextual_user_message_content(
+            MessageRole::User,
+            "# AGENTS.md instructions for /repo\nThis is quoted text, not a contextual wrapper.",
+        ));
     }
 }

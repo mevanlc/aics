@@ -310,6 +310,28 @@ fn codex_without_real_user_preview_stays_parseable_but_is_not_resume_eligible() 
 }
 
 #[test]
+fn codex_response_item_preview_skips_agents_contextual_user_message() -> Result<()> {
+    let temp = TempDir::new()?;
+    let path = temp
+        .path()
+        .join(".codex/sessions/2026/04/08/rollout-agents-first.jsonl");
+    write_text_file(
+        &path,
+        concat!(
+            "{\"timestamp\":\"2026-04-08T12:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"agents-first-session\",\"timestamp\":\"2026-04-08T12:00:00.000Z\",\"cwd\":\"/work/demo\"}}\n",
+            "{\"timestamp\":\"2026-04-08T12:00:00.100Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions for /work/demo\\n\\n<INSTRUCTIONS>Memory mentions $commit.\\n</INSTRUCTIONS>\"}]}}\n",
+            "{\"timestamp\":\"2026-04-08T12:00:00.200Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"$commit --all\"}]}}\n",
+            "{\"timestamp\":\"2026-04-08T12:00:00.300Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n"
+        ),
+    )?;
+
+    let session = parse_codex_session_file(&path)?.expect("expected Codex session");
+    assert_eq!(session.first_user_msg_content, "$commit --all");
+    assert!(session.has_resume_preview());
+    Ok(())
+}
+
+#[test]
 fn parses_codex_latest_format_and_custom_tool_calls() -> Result<()> {
     let temp = TempDir::new()?;
     copy_fixture(

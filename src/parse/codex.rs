@@ -12,10 +12,10 @@ use serde_json::{Map, Value};
 
 use super::session::{
     earliest_timestamp, fallback_session_id, first_message_fields, infer_derivation_type,
-    last_message_fields, latest_timestamp, metadata_created, metadata_modified, modified_ts,
-    push_tool_message, push_unique_chunk, push_unique_message, Agent, ExecStatus, MessageRole,
-    PatchFile, PatchOp, PlanItem, PlanItemStatus, RuntimeMetrics, Session, SessionCell,
-    SessionInfo, ToolStatus,
+    is_contextual_user_message_content, last_message_fields, latest_timestamp, metadata_created,
+    metadata_modified, modified_ts, push_tool_message, push_unique_chunk, push_unique_message,
+    Agent, ExecStatus, MessageRole, PatchFile, PatchOp, PlanItem, PlanItemStatus, RuntimeMetrics,
+    Session, SessionCell, SessionInfo, ToolStatus,
 };
 use super::tool_format;
 
@@ -1537,7 +1537,10 @@ struct SessionIndexEntry {
 }
 
 fn maybe_capture_event_preview(raw: &str, preview: &mut Option<String>) {
-    if preview.is_some() || should_skip_display_message("user", raw) {
+    if preview.is_some()
+        || should_skip_display_message("user", raw)
+        || is_contextual_user_message_content(MessageRole::User, raw)
+    {
         return;
     }
 
@@ -1545,7 +1548,11 @@ fn maybe_capture_event_preview(raw: &str, preview: &mut Option<String>) {
 }
 
 fn maybe_capture_response_item_preview(role: &str, raw: &str, preview: &mut Option<String>) {
-    if preview.is_some() || role != "user" || should_skip_display_message(role, raw) {
+    if preview.is_some()
+        || role != "user"
+        || should_skip_display_message(role, raw)
+        || is_contextual_user_message_content(MessageRole::User, raw)
+    {
         return;
     }
 

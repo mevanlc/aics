@@ -78,9 +78,11 @@ For the first implementation, rules can return `nothing()` or `trash(reason)`. R
 Large transcript fields are fetched from Rust only when a rule calls one of the lazy methods. The limit argument is optional; omitting it uses a practically unbounded default for stress testing, but normal rules should pass an explicit byte limit:
 
 - `session.firstUserText(limit)`, `session.firstText(limit)`, `session.lastText(limit)`
-- `turns.user[n].text(limit)`, `turns.agent[n].text(limit)`, `turns.system[n].text(limit)`, `turns.toolResults[n].text(limit)`
+- `turns.user[n].text(limit)`, `turns.contextualUser[n].text(limit)`, `turns.agent[n].text(limit)`, `turns.system[n].text(limit)`, `turns.toolResults[n].text(limit)`
 - `turns.exec[n].stdout(limit)`, `turns.exec[n].stderr(limit)`
 - `turns.patches[n].files[m].content(limit)`
+
+`turns.user` excludes Codex contextual user fragments such as automatically injected AGENTS.md content. Those entries are exposed separately as `turns.contextualUser`.
 
 ## Keybindings (TUI)
 
