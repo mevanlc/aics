@@ -16,7 +16,9 @@ use aics::index::{
 };
 use aics::live::LiveSessionTracker;
 use aics::parse::Agent;
-use aics::rules::{default_rules_path, print_report, run_rules, RulesMode, RulesOptions};
+use aics::rules::{
+    default_rules_path, print_report, run_rules, write_default_rules_dts, RulesMode, RulesOptions,
+};
 use aics::scan::ResolvedPaths;
 use aics::settings::{config_dir, Settings};
 use aics::tui::run_app;
@@ -137,6 +139,11 @@ struct Cli {
     )]
     rules: Option<PathBuf>,
     #[arg(
+        long = "write-rules-dts",
+        help = "Write JavaScript rules TypeScript declarations to ~/.config/aics/rules.d.ts and exit"
+    )]
+    write_rules_dts: bool,
+    #[arg(
         long = "sort-by",
         value_enum,
         default_value_t = CliSort::Time,
@@ -234,6 +241,11 @@ fn main() -> Result<()> {
     init_logging(&cli);
     if cli.print_palettes {
         print!("{}", render_palettes());
+        return Ok(());
+    }
+    if cli.write_rules_dts {
+        let path = write_default_rules_dts()?;
+        println!("{}", path.display());
         return Ok(());
     }
     let resolved_paths =
@@ -858,6 +870,12 @@ mod tests {
             apply.rules.as_deref(),
             Some(std::path::Path::new("rules.js"))
         );
+    }
+
+    #[test]
+    fn parses_write_rules_dts_flag() {
+        let cli = Cli::parse_from(["aics", "--write-rules-dts"]);
+        assert!(cli.write_rules_dts);
     }
 
     #[test]

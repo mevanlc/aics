@@ -46,6 +46,8 @@ aics -g
 aics --json -g "vector db"
 # Preview JavaScript cleanup rules from ~/.config/aics/rules.js
 aics --preview-rules -g
+# Write TypeScript declarations for JavaScript cleanup rules
+aics --write-rules-dts
 # Delete or rebuild the index
 aics <--rebuild-index|--delete-index>
 ```
@@ -62,7 +64,7 @@ By default, searches are scoped to the current working directory. Use `-g` / `--
 
 ### JavaScript rules
 
-Rules live at `~/.config/aics/rules.js` by default. Use `--preview-rules` to print proposed actions without changing files, or `--apply-rules` to apply supported actions. Use `--rules PATH` to test another rules file.
+Rules live at `~/.config/aics/rules.js` by default. Use `--preview-rules` to print proposed actions without changing files, or `--apply-rules` to apply supported actions. Use `--rules PATH` to test another rules file. Run `aics --write-rules-dts` to write TypeScript declarations for the rules API to `~/.config/aics/rules.d.ts`.
 
 ```js
 rule("trash short commit helper sessions", ({ turns, re }) => {

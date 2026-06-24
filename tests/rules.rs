@@ -6,6 +6,31 @@ use anyhow::Result;
 use tempfile::TempDir;
 
 #[test]
+fn write_rules_dts_creates_default_config_file() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config_root = temp.path().join("config");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_aics"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CONFIG_ROOT", &config_root)
+        .args(["--write-rules-dts"])
+        .output()?;
+
+    assert!(output.status.success(), "{output:#?}");
+
+    let rules_dts = config_root.join("rules.d.ts");
+    assert!(rules_dts.exists());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert_eq!(stdout.trim(), rules_dts.display().to_string());
+
+    let contents = fs::read_to_string(rules_dts)?;
+    assert!(contents.contains("interface AicsRuleSession"));
+    assert!(contents.contains("declare function rule("));
+    assert!(contents.contains("declare function trash(reason?: string): AicsTrashAction;"));
+    Ok(())
+}
+
+#[test]
 fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
