@@ -497,7 +497,7 @@ fn file_label(path: &Path) -> String {
 
 enum JsRuleEngine {
     QuickJs(QuickJsRuleEngine),
-    Boa(BoaRuleEngine),
+    Boa(Box<BoaRuleEngine>),
 }
 
 impl JsRuleEngine {
@@ -509,7 +509,9 @@ impl JsRuleEngine {
     fn load_with_engine(engine: RuleEngineKind, path: &Path) -> Result<Self> {
         match engine {
             RuleEngineKind::QuickJs => QuickJsRuleEngine::load(path).map(Self::QuickJs),
-            RuleEngineKind::Boa => BoaRuleEngine::load(path).map(Self::Boa),
+            RuleEngineKind::Boa => {
+                BoaRuleEngine::load(path).map(|engine| Self::Boa(Box::new(engine)))
+            }
         }
     }
 
