@@ -6,6 +6,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use boa_engine::{
+    js_string, Context as BoaContext, JsArgs, JsNativeError, JsResult as BoaJsResult, JsString,
+    JsValue, NativeFunction, Source,
+};
 use log::warn;
 use rquickjs::{prelude::Func, CatchResultExt, Context as JsContext, Runtime};
 use serde::{Deserialize, Serialize};
@@ -22,7 +26,13 @@ use crate::trash::TrashStore;
 const RULE_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 const RULE_STACK_LIMIT: usize = 512 * 1024;
 const RULE_EVAL_TIMEOUT: Duration = Duration::from_millis(250);
+const BOA_RULE_LOOP_ITERATION_LIMIT: u64 = 10_000_000;
+const BOA_RULE_RECURSION_LIMIT: usize = 512;
 const TRUNCATED_SUFFIX: &str = "\n... [truncated for rules]";
+
+thread_local! {
+    static BOA_RULE_DETAILS: RefCell<Option<RuleDetails>> = const { RefCell::new(None) };
+}
 
 const RULES_HARNESS: &str = r#"
 const __aicsRules = [];
@@ -258,10 +268,17 @@ pub enum RulesMode {
     Apply,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleEngineKind {
+    QuickJs,
+    Boa,
+}
+
 #[derive(Debug, Clone)]
 pub struct RulesOptions {
     pub rules_path: PathBuf,
     pub mode: RulesMode,
+    pub engine: RuleEngineKind,
     pub json: bool,
     pub scope: Scope,
     pub filters: SearchFilters,
@@ -348,7 +365,7 @@ pub fn run_rules(roots: &SessionRoots, options: &RulesOptions) -> Result<RulesRe
         );
     }
 
-    let engine = JsRuleEngine::load(&options.rules_path)?;
+    let engine = JsRuleEngine::load_with_engine(options.engine, &options.rules_path)?;
     let files = scan_session_files(roots)?;
     let mut report = RulesReport::default();
 
@@ -478,13 +495,39 @@ fn file_label(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
-struct JsRuleEngine {
+enum JsRuleEngine {
+    QuickJs(QuickJsRuleEngine),
+    Boa(BoaRuleEngine),
+}
+
+impl JsRuleEngine {
+    #[cfg(test)]
+    fn load(path: &Path) -> Result<Self> {
+        Self::load_with_engine(RuleEngineKind::QuickJs, path)
+    }
+
+    fn load_with_engine(engine: RuleEngineKind, path: &Path) -> Result<Self> {
+        match engine {
+            RuleEngineKind::QuickJs => QuickJsRuleEngine::load(path).map(Self::QuickJs),
+            RuleEngineKind::Boa => BoaRuleEngine::load(path).map(Self::Boa),
+        }
+    }
+
+    fn evaluate(&self, input: &RuleInput, details: RuleDetails) -> Result<Vec<RawRuleOutcome>> {
+        match self {
+            Self::QuickJs(engine) => engine.evaluate(input, details),
+            Self::Boa(engine) => engine.evaluate(input, details),
+        }
+    }
+}
+
+struct QuickJsRuleEngine {
     runtime: Runtime,
     context: JsContext,
     details: Rc<RefCell<Option<RuleDetails>>>,
 }
 
-impl JsRuleEngine {
+impl QuickJsRuleEngine {
     fn load(path: &Path) -> Result<Self> {
         let runtime = Runtime::new().context("failed to create QuickJS runtime")?;
         runtime.set_memory_limit(RULE_MEMORY_LIMIT);
@@ -575,6 +618,128 @@ impl JsRuleEngine {
         self.runtime.set_interrupt_handler(None);
         result
     }
+}
+
+struct BoaRuleEngine {
+    context: RefCell<BoaContext>,
+}
+
+impl BoaRuleEngine {
+    fn load(path: &Path) -> Result<Self> {
+        let source = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let mut context = BoaContext::default();
+        context
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(BOA_RULE_LOOP_ITERATION_LIMIT);
+        context
+            .runtime_limits_mut()
+            .set_stack_size_limit(RULE_STACK_LIMIT);
+        context
+            .runtime_limits_mut()
+            .set_recursion_limit(BOA_RULE_RECURSION_LIMIT);
+        context
+            .register_global_builtin_callable(
+                js_string!("__aicsFetchText"),
+                4,
+                NativeFunction::from_fn_ptr(boa_fetch_text),
+            )
+            .map_err(boa_error)
+            .context("failed to install Boa rules runtime")?;
+
+        let engine = Self {
+            context: RefCell::new(context),
+        };
+        engine
+            .eval_ignore_result(RULES_HARNESS)
+            .and_then(|_| engine.eval_ignore_result(&source))
+            .with_context(|| format!("failed to load rules from {}", path.display()))?;
+        engine.rule_names()?;
+        Ok(engine)
+    }
+
+    fn rule_names(&self) -> Result<Vec<String>> {
+        let json = self.eval_string("globalThis.__aicsRuleNames()")?;
+        serde_json::from_str(&json).context("rules runtime returned invalid rule-name JSON")
+    }
+
+    fn evaluate(&self, input: &RuleInput, details: RuleDetails) -> Result<Vec<RawRuleOutcome>> {
+        let input_json = serde_json::to_string(input).context("failed to serialize rule input")?;
+        let input_literal =
+            serde_json::to_string(&input_json).context("failed to quote rule input")?;
+        let script = format!("globalThis.__aicsRunRules({input_literal})");
+        BOA_RULE_DETAILS.with(|slot| {
+            *slot.borrow_mut() = Some(details);
+        });
+        let output_json = self.eval_string(&script);
+        BOA_RULE_DETAILS.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+        let output_json = output_json?;
+        serde_json::from_str(&output_json).context("rules runtime returned invalid action JSON")
+    }
+
+    fn eval_ignore_result(&self, source: &str) -> Result<()> {
+        self.context
+            .borrow_mut()
+            .eval(Source::from_bytes(source))
+            .map(|_| ())
+            .map_err(boa_error)
+    }
+
+    fn eval_string(&self, source: &str) -> Result<String> {
+        let mut context = self.context.borrow_mut();
+        let value = context
+            .eval(Source::from_bytes(source))
+            .map_err(boa_error)?;
+        Ok(value
+            .to_string(&mut context)
+            .map_err(boa_error)?
+            .to_std_string_lossy())
+    }
+}
+
+fn boa_fetch_text(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut BoaContext,
+) -> BoaJsResult<JsValue> {
+    let kind = boa_arg_string(args, 0, context)?;
+    let index = boa_arg_usize(args, 1, context)?;
+    let field = boa_arg_string(args, 2, context)?;
+    let limit = boa_arg_usize(args, 3, context)?;
+    let text = BOA_RULE_DETAILS.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(|details| details.fetch(&kind, index, &field, limit))
+            .unwrap_or_default()
+    });
+    Ok(JsValue::from(JsString::from(text)))
+}
+
+fn boa_arg_string(args: &[JsValue], index: usize, context: &mut BoaContext) -> BoaJsResult<String> {
+    Ok(args
+        .get_or_undefined(index)
+        .to_string(context)?
+        .to_std_string_lossy())
+}
+
+fn boa_arg_usize(args: &[JsValue], index: usize, context: &mut BoaContext) -> BoaJsResult<usize> {
+    let value = args.get_or_undefined(index).to_number(context)?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(JsNativeError::typ()
+            .with_message("rule text limit must be a non-negative finite number")
+            .into());
+    }
+    Ok(if value >= usize::MAX as f64 {
+        usize::MAX
+    } else {
+        value.floor() as usize
+    })
+}
+
+fn boa_error(error: boa_engine::JsError) -> anyhow::Error {
+    anyhow!("{error}")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1157,7 +1322,7 @@ struct RulePatchFile {
 
 #[cfg(test)]
 mod tests {
-    use super::{JsRuleEngine, RuleDetails, RuleInput, RuleSession, RuleTurns};
+    use super::{JsRuleEngine, RuleDetails, RuleEngineKind, RuleInput, RuleSession, RuleTurns};
     use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionCell};
     use std::path::PathBuf;
 
@@ -1276,6 +1441,35 @@ mod tests {
         .unwrap();
 
         let engine = JsRuleEngine::load(&rules).unwrap();
+        let outcomes = engine
+            .evaluate(
+                &input("codex", "$gdf-commit --all"),
+                details("$gdf-commit --all"),
+            )
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].rule, "commit sessions");
+        assert_eq!(outcomes[0].action.as_deref(), Some("trash"));
+        assert_eq!(outcomes[0].reason.as_deref(), Some("commit helper"));
+    }
+
+    #[test]
+    fn boa_rule_returns_trash_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = dir.path().join("rules.js");
+        std::fs::write(
+            &rules,
+            r#"
+            rule("commit sessions", ({ turns, re }) => {
+              return re(String.raw`\s*[/$](gdf-)?commit\b`, "m").test(turns.user[0].text(4096))
+                ? trash("commit helper")
+                : nothing();
+            });
+            "#,
+        )
+        .unwrap();
+
+        let engine = JsRuleEngine::load_with_engine(RuleEngineKind::Boa, &rules).unwrap();
         let outcomes = engine
             .evaluate(
                 &input("codex", "$gdf-commit --all"),
