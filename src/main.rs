@@ -17,13 +17,12 @@ use aics::index::{
 use aics::live::LiveSessionTracker;
 use aics::parse::Agent;
 use aics::rules::{
-    default_rules_path, print_report, run_rules, write_default_rules_dts, RuleEngineKind,
-    RulesMode, RulesOptions,
+    default_rules_path, print_report, run_rules, write_default_rules_dts, RulesMode, RulesOptions,
 };
 use aics::scan::ResolvedPaths;
 use aics::settings::{config_dir, Settings};
-use aics::tui::run_app;
 use aics::tui::theme::{PaletteEntry, Theme};
+use aics::tui::{run_app, run_rules_preview_app};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -124,7 +123,7 @@ struct Cli {
     #[arg(
         long = "preview-rules",
         conflicts_with = "apply_rules",
-        help = "Evaluate JavaScript rules and print proposed actions without changing files"
+        help = "Evaluate JavaScript rules and review proposed actions without changing files"
     )]
     preview_rules: bool,
     #[arg(
@@ -139,13 +138,6 @@ struct Cli {
         help = "Override the JavaScript rules file used by --preview-rules or --apply-rules"
     )]
     rules: Option<PathBuf>,
-    #[arg(
-        long = "rules-engine",
-        value_enum,
-        default_value_t = CliRuleEngine::Quickjs,
-        help = "JavaScript engine for --preview-rules or --apply-rules"
-    )]
-    rules_engine: CliRuleEngine,
     #[arg(
         long = "write-rules-dts",
         help = "Write JavaScript rules TypeScript declarations to ~/.config/aics/rules.d.ts and exit"
@@ -203,26 +195,11 @@ enum CliTrashFilter {
     Both,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum CliRuleEngine {
-    Quickjs,
-    Boa,
-}
-
 impl From<CliSort> for SortMode {
     fn from(value: CliSort) -> Self {
         match value {
             CliSort::Time => SortMode::Time,
             CliSort::Relevance => SortMode::Relevance,
-        }
-    }
-}
-
-impl From<CliRuleEngine> for RuleEngineKind {
-    fn from(value: CliRuleEngine) -> Self {
-        match value {
-            CliRuleEngine::Quickjs => RuleEngineKind::QuickJs,
-            CliRuleEngine::Boa => RuleEngineKind::Boa,
         }
     }
 }
@@ -305,17 +282,36 @@ fn main() -> Result<()> {
             Some(path) => path,
             None => default_rules_path()?,
         };
+        let rules_scope = request.scope.clone();
+        let rules_filters = request.filters.clone();
         let report = run_rules(
             &resolved_paths.roots,
             &RulesOptions {
                 rules_path,
                 mode,
-                engine: cli.rules_engine.into(),
                 json: cli.json,
-                scope: request.scope,
-                filters: request.filters,
+                scope: rules_scope.clone(),
+                filters: rules_filters.clone(),
             },
         )?;
+        if mode == RulesMode::Preview && !cli.json {
+            let initial_request = SearchRequest {
+                query: String::new(),
+                scope: rules_scope,
+                limit: report.preview_matches.len().max(1),
+                sort: request.sort,
+                filters: rules_filters,
+            };
+            return run_rules_preview_app(
+                manager,
+                report,
+                initial_request,
+                settings,
+                resolved_paths.homes,
+                resolved_paths.roots,
+            );
+        }
+
         print_report(&report, cli.json, mode)?;
         if mode == RulesMode::Apply && !report.applied.is_empty() {
             manager.sync_with_roots_best_effort(&resolved_paths.roots, false)?;
@@ -351,10 +347,6 @@ fn validate_terminal_mode(cli: &Cli) -> Result<()> {
 
     if cli.rules.is_some() && rules_mode(cli).is_none() {
         bail!("--rules requires --preview-rules or --apply-rules");
-    }
-
-    if cli.rules_engine != CliRuleEngine::Quickjs && rules_mode(cli).is_none() {
-        bail!("--rules-engine requires --preview-rules or --apply-rules");
     }
 
     if rules_mode(cli).is_some() && cli.query.is_some() {
@@ -782,7 +774,7 @@ mod tests {
 
     use super::{
         build_request, palette_pairs, parse_after_date, parse_before_date, parse_dir_arg,
-        render_palettes, rules_mode, validate_terminal_mode, Cli, CliProgress, CliRuleEngine,
+        render_palettes, rules_mode, validate_terminal_mode, Cli, CliProgress,
     };
     use aics::index::{Scope, SortMode};
     use aics::parse::Agent;
@@ -891,18 +883,9 @@ mod tests {
     fn parses_rules_mode_flags() {
         let preview = Cli::parse_from(["aics", "--preview-rules"]);
         assert_eq!(rules_mode(&preview), Some(RulesMode::Preview));
-        assert_eq!(preview.rules_engine, CliRuleEngine::Quickjs);
 
-        let apply = Cli::parse_from([
-            "aics",
-            "--apply-rules",
-            "--rules",
-            "rules.js",
-            "--rules-engine",
-            "boa",
-        ]);
+        let apply = Cli::parse_from(["aics", "--apply-rules", "--rules", "rules.js"]);
         assert_eq!(rules_mode(&apply), Some(RulesMode::Apply));
-        assert_eq!(apply.rules_engine, CliRuleEngine::Boa);
         assert_eq!(
             apply.rules.as_deref(),
             Some(std::path::Path::new("rules.js"))
@@ -922,15 +905,6 @@ mod tests {
         assert!(error
             .to_string()
             .contains("--rules requires --preview-rules or --apply-rules"));
-    }
-
-    #[test]
-    fn rejects_boa_rules_engine_without_rules_mode() {
-        let cli = Cli::parse_from(["aics", "--rules-engine", "boa"]);
-        let error = validate_terminal_mode(&cli).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("--rules-engine requires --preview-rules or --apply-rules"));
     }
 
     #[test]

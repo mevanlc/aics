@@ -13,20 +13,25 @@ use crate::tui::util::{
     truncate_plain,
 };
 
-fn card_height(snippet_line_count: usize, separator: &str) -> usize {
+fn card_height(snippet_line_count: usize, separator: &str, extra_row_count: usize) -> usize {
     let body = if snippet_line_count == 0 {
         0
     } else {
         snippet_line_count
     };
     let sep = if separator.is_empty() { 0 } else { 1 };
-    1 + body + sep // header + snippet + separator
+    1 + body + extra_row_count + sep // header + snippet + extra rows + separator
 }
 
 /// Use compact 1-line items when the content area can't fit a single card.
-fn effective_item_height(area: Rect, snippet_line_count: usize, separator: &str) -> usize {
+fn effective_item_height(
+    area: Rect,
+    snippet_line_count: usize,
+    separator: &str,
+    extra_row_count: usize,
+) -> usize {
     let content_height = area.height.saturating_sub(2) as usize;
-    let full = card_height(snippet_line_count, separator);
+    let full = card_height(snippet_line_count, separator, extra_row_count);
     if content_height >= full {
         full
     } else {
@@ -41,6 +46,7 @@ pub fn render(
     theme: &Theme,
     separator: &str,
     snippet_line_count: usize,
+    extra_row_count: usize,
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -60,7 +66,7 @@ pub fn render(
             Span::styled(" select", Style::default().fg(theme.muted)),
         ])));
 
-    let compact = effective_item_height(area, snippet_line_count, separator) == 1;
+    let compact = effective_item_height(area, snippet_line_count, separator, extra_row_count) == 1;
     let items = if app.results.is_empty() {
         let empty_state = if app.is_searching() {
             "Searching..."
@@ -72,7 +78,7 @@ pub fn render(
             Style::default().fg(theme.muted),
         )))]
     } else {
-        let visible_slots = visible_slots(area, snippet_line_count, separator);
+        let visible_slots = visible_slots(area, snippet_line_count, separator, extra_row_count);
         let (visible_hits, selected_within) = app.list_window(visible_slots);
         let visible_hits = visible_hits.to_vec();
         let content_width = area.width.saturating_sub(3) as usize;
@@ -95,15 +101,15 @@ pub fn render(
                         separator
                     };
                     let snippet = app.list_snippet_line(hit, theme);
-                    render_item(
-                        hit,
-                        snippet,
+                    let extra_line = app.list_rule_line(hit, theme);
+                    let render_ctx = RenderItemContext {
                         theme,
-                        content_width,
-                        selected_within == Some(i),
-                        item_separator,
+                        width: content_width,
+                        selected: selected_within == Some(i),
+                        separator: item_separator,
                         snippet_line_count,
-                    )
+                    };
+                    render_item(hit, snippet, extra_line, &render_ctx)
                 })
                 .collect::<Vec<_>>()
         }
@@ -116,7 +122,7 @@ pub fn render(
     let selected = if app.results.is_empty() {
         None
     } else {
-        let visible_slots = visible_slots(area, snippet_line_count, separator);
+        let visible_slots = visible_slots(area, snippet_line_count, separator, extra_row_count);
         let (_, selected) = app.list_window(visible_slots);
         selected
     };
@@ -125,9 +131,14 @@ pub fn render(
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-pub fn visible_slots(area: Rect, snippet_line_count: usize, separator: &str) -> usize {
+pub fn visible_slots(
+    area: Rect,
+    snippet_line_count: usize,
+    separator: &str,
+    extra_row_count: usize,
+) -> usize {
     let content_height = area.height.saturating_sub(2) as usize;
-    let ih = effective_item_height(area, snippet_line_count, separator);
+    let ih = effective_item_height(area, snippet_line_count, separator, extra_row_count);
     if ih == 1 {
         return content_height.max(1);
     }
@@ -145,6 +156,7 @@ pub fn slot_at_row(
     row: u16,
     snippet_line_count: usize,
     separator: &str,
+    extra_row_count: usize,
 ) -> Option<usize> {
     let inner_top = area.y.saturating_add(1);
     let inner_bottom = area.bottom().saturating_sub(1);
@@ -152,13 +164,13 @@ pub fn slot_at_row(
         return None;
     }
 
-    let ih = effective_item_height(area, snippet_line_count, separator);
+    let ih = effective_item_height(area, snippet_line_count, separator, extra_row_count);
     let inner_row = (row - inner_top) as usize;
     if ih == 1 {
         return Some(inner_row);
     }
 
-    let slots = visible_slots(area, snippet_line_count, separator);
+    let slots = visible_slots(area, snippet_line_count, separator, extra_row_count);
     let max_rows_used = if separator.is_empty() {
         slots.saturating_mul(ih)
     } else {
@@ -172,22 +184,28 @@ pub fn slot_at_row(
     (slot < slots).then_some(slot)
 }
 
+#[derive(Clone, Copy)]
+struct RenderItemContext<'a> {
+    theme: &'a Theme,
+    width: usize,
+    selected: bool,
+    separator: &'a str,
+    snippet_line_count: usize,
+}
+
 fn render_item(
     hit: &SearchHit,
     snippet: Line<'static>,
-    theme: &Theme,
-    width: usize,
-    selected: bool,
-    separator: &str,
-    snippet_line_count: usize,
+    extra_line: Option<Line<'static>>,
+    render_ctx: &RenderItemContext<'_>,
 ) -> ListItem<'static> {
-    let chevron = if selected { "⟩" } else { " " };
+    let chevron = if render_ctx.selected { "⟩" } else { " " };
     let chevron_style = Style::default()
-        .fg(theme.accent)
+        .fg(render_ctx.theme.accent)
         .add_modifier(Modifier::BOLD);
-    let item_width = width.saturating_sub(1); // 1 for chevron
+    let item_width = render_ctx.width.saturating_sub(1); // 1 for chevron
 
-    let (badge, badge_color) = agent_badge(hit.session.agent, theme);
+    let (badge, badge_color) = agent_badge(hit.session.agent, render_ctx.theme);
     let meta_prefix = format!("{{{badge}}}");
     let mut meta_suffix = format!(
         " · {} · {}",
@@ -210,11 +228,15 @@ fn render_item(
     let title_text = truncate_with_ellipsis(&list_title(hit), title_budget);
     let title_width = UnicodeWidthStr::width(title_text.as_str());
     let padding = " ".repeat(item_width.saturating_sub(meta_width + title_width).max(1));
-    let header_fg = if selected { theme.accent } else { theme.text };
-    let header_bg = if selected {
-        theme.selected_list_header_bg()
+    let header_fg = if render_ctx.selected {
+        render_ctx.theme.accent
     } else {
-        theme.list_header_bg
+        render_ctx.theme.text
+    };
+    let header_bg = if render_ctx.selected {
+        render_ctx.theme.selected_list_header_bg()
+    } else {
+        render_ctx.theme.list_header_bg
     };
     let header = Line::from(vec![
         Span::styled(chevron, chevron_style),
@@ -226,22 +248,26 @@ fn render_item(
         ),
         Span::styled(
             meta_suffix,
-            Style::default().fg(if selected { theme.accent } else { theme.muted }),
+            Style::default().fg(if render_ctx.selected {
+                render_ctx.theme.accent
+            } else {
+                render_ctx.theme.muted
+            }),
         ),
         Span::raw(padding),
         Span::styled(title_text, Style::default().fg(header_fg)),
     ])
     .patch_style(Style::default().bg(header_bg));
 
-    let mut snippet_rows = wrap_line(snippet, item_width, snippet_line_count);
+    let mut snippet_rows = wrap_line(snippet, item_width, render_ctx.snippet_line_count);
 
-    let body_style = Style::default().bg(if selected {
-        theme.selected_list_body_bg()
+    let body_style = Style::default().bg(if render_ctx.selected {
+        render_ctx.theme.selected_list_body_bg()
     } else {
-        theme.list_body_bg
+        render_ctx.theme.list_body_bg
     });
-    let separator_style = Style::default().bg(theme.list_body_bg);
-    while snippet_rows.len() < snippet_line_count {
+    let separator_style = Style::default().bg(render_ctx.theme.list_body_bg);
+    while snippet_rows.len() < render_ctx.snippet_line_count {
         snippet_rows.push(Line::styled(" ".repeat(item_width), body_style));
     }
 
@@ -255,9 +281,16 @@ fn render_item(
             })
             .map(|line| line.patch_style(body_style)),
     );
-    if !separator.is_empty() {
+    if let Some(extra_line) = extra_line {
+        let mut extra_rows = wrap_line(extra_line, item_width, 1);
+        let mut line = extra_rows.pop().unwrap_or_default();
+        line.spans.insert(0, Span::raw(" "));
+        lines.push(line.patch_style(body_style));
+    }
+    if !render_ctx.separator.is_empty() {
         lines.push(
-            build_separator_line(separator, item_width + 1, theme).patch_style(separator_style),
+            build_separator_line(render_ctx.separator, item_width + 1, render_ctx.theme)
+                .patch_style(separator_style),
         );
     }
     ListItem::new(lines)
@@ -465,7 +498,7 @@ mod tests {
 
     use super::{
         build_separator_line, format_line_count, render_item, slot_at_row, truncate_with_ellipsis,
-        visible_slots, wrap_line,
+        visible_slots, wrap_line, RenderItemContext,
     };
     use crate::index::{SearchHit, StoredSession};
     use crate::parse::{Agent, DerivationType};
@@ -523,42 +556,52 @@ mod tests {
     fn slot_at_row_tracks_five_row_cards() {
         let area = Rect::new(0, 4, 72, 20);
 
-        assert_eq!(slot_at_row(area, 4, 3, " "), None);
-        assert_eq!(slot_at_row(area, 5, 3, " "), Some(0));
-        assert_eq!(slot_at_row(area, 9, 3, " "), Some(0));
-        assert_eq!(slot_at_row(area, 10, 3, " "), Some(1));
-        assert_eq!(slot_at_row(area, 14, 3, " "), Some(1));
-        assert_eq!(slot_at_row(area, 15, 3, " "), Some(2));
+        assert_eq!(slot_at_row(area, 4, 3, " ", 0), None);
+        assert_eq!(slot_at_row(area, 5, 3, " ", 0), Some(0));
+        assert_eq!(slot_at_row(area, 9, 3, " ", 0), Some(0));
+        assert_eq!(slot_at_row(area, 10, 3, " ", 0), Some(1));
+        assert_eq!(slot_at_row(area, 14, 3, " ", 0), Some(1));
+        assert_eq!(slot_at_row(area, 15, 3, " ", 0), Some(2));
     }
 
     #[test]
     fn slot_at_row_without_separator() {
         let area = Rect::new(0, 4, 72, 20);
 
-        assert_eq!(slot_at_row(area, 4, 3, ""), None);
-        assert_eq!(slot_at_row(area, 5, 3, ""), Some(0));
-        assert_eq!(slot_at_row(area, 8, 3, ""), Some(0));
-        assert_eq!(slot_at_row(area, 9, 3, ""), Some(1));
-        assert_eq!(slot_at_row(area, 12, 3, ""), Some(1));
-        assert_eq!(slot_at_row(area, 13, 3, ""), Some(2));
+        assert_eq!(slot_at_row(area, 4, 3, "", 0), None);
+        assert_eq!(slot_at_row(area, 5, 3, "", 0), Some(0));
+        assert_eq!(slot_at_row(area, 8, 3, "", 0), Some(0));
+        assert_eq!(slot_at_row(area, 9, 3, "", 0), Some(1));
+        assert_eq!(slot_at_row(area, 12, 3, "", 0), Some(1));
+        assert_eq!(slot_at_row(area, 13, 3, "", 0), Some(2));
     }
 
     #[test]
     fn slot_at_row_with_fewer_snippet_line_count() {
         let area = Rect::new(0, 4, 72, 20);
         // 1 snippet line + separator = 3 rows per card
-        assert_eq!(slot_at_row(area, 5, 1, " "), Some(0));
-        assert_eq!(slot_at_row(area, 7, 1, " "), Some(0));
-        assert_eq!(slot_at_row(area, 8, 1, " "), Some(1));
+        assert_eq!(slot_at_row(area, 5, 1, " ", 0), Some(0));
+        assert_eq!(slot_at_row(area, 7, 1, " ", 0), Some(0));
+        assert_eq!(slot_at_row(area, 8, 1, " ", 0), Some(1));
+    }
+
+    #[test]
+    fn extra_rule_row_affects_geometry_without_changing_snippet_count() {
+        let area = Rect::new(0, 4, 72, 20);
+        // 1 snippet line + 1 rule row + separator = 4 rows per card
+        assert_eq!(slot_at_row(area, 5, 1, " ", 1), Some(0));
+        assert_eq!(slot_at_row(area, 8, 1, " ", 1), Some(0));
+        assert_eq!(slot_at_row(area, 9, 1, " ", 1), Some(1));
+        assert_eq!(visible_slots(area, 1, " ", 1), 4);
     }
 
     #[test]
     fn slot_at_row_zero_snippet_line_count() {
         let area = Rect::new(0, 4, 72, 20);
         // 0 snippet lines + separator = 2 rows per card (header + sep)
-        assert_eq!(slot_at_row(area, 5, 0, " "), Some(0));
-        assert_eq!(slot_at_row(area, 6, 0, " "), Some(0));
-        assert_eq!(slot_at_row(area, 7, 0, " "), Some(1));
+        assert_eq!(slot_at_row(area, 5, 0, " ", 0), Some(0));
+        assert_eq!(slot_at_row(area, 6, 0, " ", 0), Some(0));
+        assert_eq!(slot_at_row(area, 7, 0, " ", 0), Some(1));
     }
 
     #[test]
@@ -567,7 +610,7 @@ mod tests {
         // full card height with 3 snippet lines + separator = 5 rows
         // two full cards would be 10 rows, but two cards with no trailing separator is 9 rows.
         let area = Rect::new(0, 0, 72, 11);
-        assert_eq!(visible_slots(area, 3, " "), 2);
+        assert_eq!(visible_slots(area, 3, " ", 0), 2);
     }
 
     #[test]
@@ -575,11 +618,11 @@ mod tests {
         // content height = 12 rows. With 5-row cards and last separator omitted,
         // only 9 rows are used for two cards, so bottom rows are blank.
         let area = Rect::new(0, 4, 72, 14);
-        assert_eq!(visible_slots(area, 3, " "), 2);
-        assert_eq!(slot_at_row(area, 5, 3, " "), Some(0));
-        assert_eq!(slot_at_row(area, 13, 3, " "), Some(1));
-        assert_eq!(slot_at_row(area, 14, 3, " "), None);
-        assert_eq!(slot_at_row(area, 15, 3, " "), None);
+        assert_eq!(visible_slots(area, 3, " ", 0), 2);
+        assert_eq!(slot_at_row(area, 5, 3, " ", 0), Some(0));
+        assert_eq!(slot_at_row(area, 13, 3, " ", 0), Some(1));
+        assert_eq!(slot_at_row(area, 14, 3, " ", 0), None);
+        assert_eq!(slot_at_row(area, 15, 3, " ", 0), None);
     }
 
     #[test]
@@ -628,7 +671,14 @@ mod tests {
             is_live: false,
         };
 
-        let item = render_item(&hit, plain_snippet(""), &theme, 32, false, "·", 0);
+        let render_ctx = RenderItemContext {
+            theme: &theme,
+            width: 32,
+            selected: false,
+            separator: "·",
+            snippet_line_count: 0,
+        };
+        let item = render_item(&hit, plain_snippet(""), None, &render_ctx);
         let backend = TestBackend::new(32, 2);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = ListState::default();
@@ -677,7 +727,14 @@ mod tests {
             is_live: false,
         };
 
-        let item = render_item(&hit, plain_snippet(""), &theme, 32, true, "·", 0);
+        let render_ctx = RenderItemContext {
+            theme: &theme,
+            width: 32,
+            selected: true,
+            separator: "·",
+            snippet_line_count: 0,
+        };
+        let item = render_item(&hit, plain_snippet(""), None, &render_ctx);
         let backend = TestBackend::new(32, 2);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = ListState::default();

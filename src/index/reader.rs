@@ -650,7 +650,7 @@ fn render_snippet_html(snippet: &Snippet, query: &str) -> String {
     emphasize_terms(snippet.fragment(), query)
 }
 
-fn fallback_snippet(session: &StoredSession, query: &str) -> String {
+pub(crate) fn fallback_snippet(session: &StoredSession, query: &str) -> String {
     let base = if !session.first_user_msg_content.is_empty() {
         &session.first_user_msg_content
     } else if !session.first_msg_content.is_empty() {

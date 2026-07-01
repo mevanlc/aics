@@ -57,8 +57,6 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
             "--preview-rules",
             "--rules",
             rules.to_str().unwrap(),
-            "--rules-engine",
-            "boa",
             "--json",
             "--progress",
             "none",

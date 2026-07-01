@@ -2,8 +2,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
-use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use boa_engine::{
@@ -11,10 +9,10 @@ use boa_engine::{
     JsValue, NativeFunction, Source,
 };
 use log::warn;
-use rquickjs::{prelude::Func, CatchResultExt, Context as JsContext, Runtime};
 use serde::{Deserialize, Serialize};
 
-use crate::index::{Scope, SearchFilters, TrashFilter};
+use crate::index::reader::fallback_snippet;
+use crate::index::{Scope, SearchFilters, SearchHit, StoredSession, TrashFilter};
 use crate::parse::{
     is_contextual_user_message_content, parse_session_file, Agent, DerivationType, MessageRole,
     PatchFile, Session, SessionCell,
@@ -23,9 +21,7 @@ use crate::scan::{scan_session_files, SessionFile, SessionRoots};
 use crate::settings::config_dir;
 use crate::trash::TrashStore;
 
-const RULE_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 const RULE_STACK_LIMIT: usize = 512 * 1024;
-const RULE_EVAL_TIMEOUT: Duration = Duration::from_millis(250);
 const BOA_RULE_LOOP_ITERATION_LIMIT: u64 = 10_000_000;
 const BOA_RULE_RECURSION_LIMIT: usize = 512;
 const TRUNCATED_SUFFIX: &str = "\n... [truncated for rules]";
@@ -268,17 +264,10 @@ pub enum RulesMode {
     Apply,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuleEngineKind {
-    QuickJs,
-    Boa,
-}
-
 #[derive(Debug, Clone)]
 pub struct RulesOptions {
     pub rules_path: PathBuf,
     pub mode: RulesMode,
-    pub engine: RuleEngineKind,
     pub json: bool,
     pub scope: Scope,
     pub filters: SearchFilters,
@@ -286,10 +275,17 @@ pub struct RulesOptions {
 
 #[derive(Debug, Clone, Default)]
 pub struct RulesReport {
+    pub preview_matches: Vec<RulePreviewMatch>,
     pub proposals: Vec<RuleProposal>,
     pub applied: Vec<AppliedRuleAction>,
     pub skipped: Vec<SkippedRuleAction>,
     pub errors: Vec<RuleEvaluationError>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RulePreviewMatch {
+    pub proposal: RuleProposal,
+    pub hit: SearchHit,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -365,7 +361,7 @@ pub fn run_rules(roots: &SessionRoots, options: &RulesOptions) -> Result<RulesRe
         );
     }
 
-    let engine = JsRuleEngine::load_with_engine(options.engine, &options.rules_path)?;
+    let engine = JsRuleEngine::load(&options.rules_path)?;
     let files = scan_session_files(roots)?;
     let mut report = RulesReport::default();
 
@@ -403,7 +399,12 @@ pub fn run_rules(roots: &SessionRoots, options: &RulesOptions) -> Result<RulesRe
         }
     }
 
-    report.proposals = dedupe_proposals(std::mem::take(&mut report.proposals));
+    report.preview_matches = dedupe_preview_matches(std::mem::take(&mut report.preview_matches));
+    report.proposals = report
+        .preview_matches
+        .iter()
+        .map(|matched| matched.proposal.clone())
+        .collect();
 
     if matches!(options.mode, RulesMode::Apply) {
         apply_proposals(roots, &mut report);
@@ -495,138 +496,11 @@ fn file_label(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
-enum JsRuleEngine {
-    QuickJs(QuickJsRuleEngine),
-    Boa(Box<BoaRuleEngine>),
-}
-
-impl JsRuleEngine {
-    #[cfg(test)]
-    fn load(path: &Path) -> Result<Self> {
-        Self::load_with_engine(RuleEngineKind::QuickJs, path)
-    }
-
-    fn load_with_engine(engine: RuleEngineKind, path: &Path) -> Result<Self> {
-        match engine {
-            RuleEngineKind::QuickJs => QuickJsRuleEngine::load(path).map(Self::QuickJs),
-            RuleEngineKind::Boa => {
-                BoaRuleEngine::load(path).map(|engine| Self::Boa(Box::new(engine)))
-            }
-        }
-    }
-
-    fn evaluate(&self, input: &RuleInput, details: RuleDetails) -> Result<Vec<RawRuleOutcome>> {
-        match self {
-            Self::QuickJs(engine) => engine.evaluate(input, details),
-            Self::Boa(engine) => engine.evaluate(input, details),
-        }
-    }
-}
-
-struct QuickJsRuleEngine {
-    runtime: Runtime,
-    context: JsContext,
-    details: Rc<RefCell<Option<RuleDetails>>>,
-}
-
-impl QuickJsRuleEngine {
-    fn load(path: &Path) -> Result<Self> {
-        let runtime = Runtime::new().context("failed to create QuickJS runtime")?;
-        runtime.set_memory_limit(RULE_MEMORY_LIMIT);
-        runtime.set_max_stack_size(RULE_STACK_LIMIT);
-        let context = JsContext::full(&runtime).context("failed to create QuickJS context")?;
-        let details = Rc::new(RefCell::new(None));
-
-        let source = fs::read_to_string(path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        let engine = Self {
-            runtime,
-            context,
-            details,
-        };
-        engine
-            .with_timeout(|| {
-                engine.context.with(|ctx| -> Result<()> {
-                    let details = Rc::clone(&engine.details);
-                    ctx.globals()
-                        .set(
-                            "__aicsFetchText",
-                            Func::new(
-                                move |kind: String, index: usize, field: String, limit: usize| {
-                                    details
-                                        .borrow()
-                                        .as_ref()
-                                        .and_then(|details| {
-                                            details.fetch(&kind, index, &field, limit)
-                                        })
-                                        .unwrap_or_default()
-                                },
-                            ),
-                        )
-                        .catch(&ctx)
-                        .map_err(|error| anyhow!("{error}"))?;
-                    ctx.eval::<(), _>(RULES_HARNESS)
-                        .catch(&ctx)
-                        .map_err(|error| anyhow!("{error}"))?;
-                    ctx.eval::<(), _>(source.clone())
-                        .catch(&ctx)
-                        .map_err(|error| anyhow!("{error}"))?;
-                    Ok(())
-                })
-            })
-            .with_context(|| format!("failed to load rules from {}", path.display()))?;
-
-        engine.rule_names()?;
-        Ok(engine)
-    }
-
-    fn rule_names(&self) -> Result<Vec<String>> {
-        let json = self.with_timeout(|| {
-            self.context.with(|ctx| -> Result<String> {
-                ctx.eval("globalThis.__aicsRuleNames()")
-                    .catch(&ctx)
-                    .map_err(|error| anyhow!("{error}"))
-            })
-        })?;
-        serde_json::from_str(&json).context("rules runtime returned invalid rule-name JSON")
-    }
-
-    fn evaluate(&self, input: &RuleInput, details: RuleDetails) -> Result<Vec<RawRuleOutcome>> {
-        let input_json = serde_json::to_string(input).context("failed to serialize rule input")?;
-        let input_literal =
-            serde_json::to_string(&input_json).context("failed to quote rule input")?;
-        let script = format!("globalThis.__aicsRunRules({input_literal})");
-        *self.details.borrow_mut() = Some(details);
-        let output_json = self.with_timeout(|| {
-            self.context.with(|ctx| -> Result<String> {
-                ctx.eval(script)
-                    .catch(&ctx)
-                    .map_err(|error| anyhow!("{error}"))
-            })
-        });
-        *self.details.borrow_mut() = None;
-        let output_json = output_json?;
-        serde_json::from_str(&output_json).context("rules runtime returned invalid action JSON")
-    }
-
-    fn with_timeout<F, T>(&self, f: F) -> Result<T>
-    where
-        F: FnOnce() -> Result<T>,
-    {
-        let start = Instant::now();
-        self.runtime
-            .set_interrupt_handler(Some(Box::new(move || start.elapsed() >= RULE_EVAL_TIMEOUT)));
-        let result = f();
-        self.runtime.set_interrupt_handler(None);
-        result
-    }
-}
-
-struct BoaRuleEngine {
+struct JsRuleEngine {
     context: RefCell<BoaContext>,
 }
 
-impl BoaRuleEngine {
+impl JsRuleEngine {
     fn load(path: &Path) -> Result<Self> {
         let source = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
@@ -769,15 +643,21 @@ fn collect_outcomes(
         }
 
         match outcome.action.as_deref() {
-            Some("trash") => report.proposals.push(RuleProposal {
-                rule: outcome.rule,
-                session_id: session.session_id.clone(),
-                path: file.path.clone(),
-                agent: file.agent,
-                action: RuleAction::Trash {
-                    reason: outcome.reason,
-                },
-            }),
+            Some("trash") => {
+                let proposal = RuleProposal {
+                    rule: outcome.rule,
+                    session_id: session.session_id.clone(),
+                    path: file.path.clone(),
+                    agent: file.agent,
+                    action: RuleAction::Trash {
+                        reason: outcome.reason,
+                    },
+                };
+                report.preview_matches.push(RulePreviewMatch {
+                    proposal,
+                    hit: rule_search_hit(session, file),
+                });
+            }
             Some(action) => report.errors.push(RuleEvaluationError {
                 rule: Some(outcome.rule),
                 path: file.path.clone(),
@@ -788,21 +668,48 @@ fn collect_outcomes(
     }
 }
 
-fn dedupe_proposals(proposals: Vec<RuleProposal>) -> Vec<RuleProposal> {
+fn rule_search_hit(session: &Session, file: &SessionFile) -> SearchHit {
+    let mut stored = StoredSession::from(session);
+    stored.trashed = file.trashed;
+    stored.original_path = file.original_path.clone();
+    let snippet_html = fallback_snippet(&stored, "");
+    SearchHit {
+        score: stored.modified_ts as f32,
+        is_live: false,
+        session: stored,
+        snippet_html,
+    }
+}
+
+fn dedupe_preview_matches(matches: Vec<RulePreviewMatch>) -> Vec<RulePreviewMatch> {
     let mut seen = BTreeSet::new();
     let mut deduped = Vec::new();
-    for proposal in proposals {
-        if seen.insert((proposal.path.clone(), proposal.action.label())) {
-            deduped.push(proposal);
+    for matched in matches {
+        if seen.insert((
+            matched.proposal.path.clone(),
+            matched.proposal.action.label(),
+        )) {
+            deduped.push(matched);
         }
     }
     deduped
 }
 
 fn apply_proposals(roots: &SessionRoots, report: &mut RulesReport) {
+    let (applied, skipped) = apply_rule_proposals(roots, &report.proposals);
+    report.applied.extend(applied);
+    report.skipped.extend(skipped);
+}
+
+pub fn apply_rule_proposals(
+    roots: &SessionRoots,
+    proposals: &[RuleProposal],
+) -> (Vec<AppliedRuleAction>, Vec<SkippedRuleAction>) {
+    let mut applied = Vec::new();
+    let mut skipped = Vec::new();
     let Some(paths) = roots.trash.clone() else {
-        for proposal in &report.proposals {
-            report.skipped.push(SkippedRuleAction {
+        for proposal in proposals {
+            skipped.push(SkippedRuleAction {
                 rule: proposal.rule.clone(),
                 session_id: proposal.session_id.clone(),
                 path: proposal.path.clone(),
@@ -811,15 +718,15 @@ fn apply_proposals(roots: &SessionRoots, report: &mut RulesReport) {
                 skip_reason: "trash store is unavailable".to_owned(),
             });
         }
-        return;
+        return (applied, skipped);
     };
 
     let store = TrashStore::new(paths);
-    for proposal in &report.proposals {
+    for proposal in proposals {
         match &proposal.action {
             RuleAction::Trash { .. } => {
                 if proposal.path.starts_with(store.paths().trash_dir.as_path()) {
-                    report.skipped.push(SkippedRuleAction {
+                    skipped.push(SkippedRuleAction {
                         rule: proposal.rule.clone(),
                         session_id: proposal.session_id.clone(),
                         path: proposal.path.clone(),
@@ -830,14 +737,14 @@ fn apply_proposals(roots: &SessionRoots, report: &mut RulesReport) {
                     continue;
                 }
                 match store.trash_file(&proposal.path, proposal.agent) {
-                    Ok(_) => report.applied.push(AppliedRuleAction {
+                    Ok(_) => applied.push(AppliedRuleAction {
                         rule: proposal.rule.clone(),
                         session_id: proposal.session_id.clone(),
                         path: proposal.path.clone(),
                         agent: proposal.agent,
                         action: proposal.action.clone(),
                     }),
-                    Err(error) => report.skipped.push(SkippedRuleAction {
+                    Err(error) => skipped.push(SkippedRuleAction {
                         rule: proposal.rule.clone(),
                         session_id: proposal.session_id.clone(),
                         path: proposal.path.clone(),
@@ -849,6 +756,7 @@ fn apply_proposals(roots: &SessionRoots, report: &mut RulesReport) {
             }
         }
     }
+    (applied, skipped)
 }
 
 fn file_matches_filters(file: &SessionFile, filters: &SearchFilters) -> bool {
@@ -950,13 +858,13 @@ fn paths_equal(a: &str, b: &str) -> bool {
 }
 
 impl RuleAction {
-    fn label(&self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             Self::Trash { .. } => "trash",
         }
     }
 
-    fn reason(&self) -> Option<&str> {
+    pub fn reason(&self) -> Option<&str> {
         match self {
             Self::Trash { reason } => reason.as_deref(),
         }
@@ -1324,7 +1232,7 @@ struct RulePatchFile {
 
 #[cfg(test)]
 mod tests {
-    use super::{JsRuleEngine, RuleDetails, RuleEngineKind, RuleInput, RuleSession, RuleTurns};
+    use super::{JsRuleEngine, RuleDetails, RuleInput, RuleSession, RuleTurns};
     use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionCell};
     use std::path::PathBuf;
 
@@ -1443,35 +1351,6 @@ mod tests {
         .unwrap();
 
         let engine = JsRuleEngine::load(&rules).unwrap();
-        let outcomes = engine
-            .evaluate(
-                &input("codex", "$gdf-commit --all"),
-                details("$gdf-commit --all"),
-            )
-            .unwrap();
-        assert_eq!(outcomes.len(), 1);
-        assert_eq!(outcomes[0].rule, "commit sessions");
-        assert_eq!(outcomes[0].action.as_deref(), Some("trash"));
-        assert_eq!(outcomes[0].reason.as_deref(), Some("commit helper"));
-    }
-
-    #[test]
-    fn boa_rule_returns_trash_action() {
-        let dir = tempfile::tempdir().unwrap();
-        let rules = dir.path().join("rules.js");
-        std::fs::write(
-            &rules,
-            r#"
-            rule("commit sessions", ({ turns, re }) => {
-              return re(String.raw`\s*[/$](gdf-)?commit\b`, "m").test(turns.user[0].text(4096))
-                ? trash("commit helper")
-                : nothing();
-            });
-            "#,
-        )
-        .unwrap();
-
-        let engine = JsRuleEngine::load_with_engine(RuleEngineKind::Boa, &rules).unwrap();
         let outcomes = engine
             .evaluate(
                 &input("codex", "$gdf-commit --all"),

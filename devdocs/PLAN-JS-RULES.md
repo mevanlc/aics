@@ -16,7 +16,7 @@ Default rules file:
 
 Planned flags:
 
-- `--preview-rules` evaluates the rules and prints proposed actions without changing files.
+- `--preview-rules` evaluates the rules and opens an interactive TUI preview without changing files.
 - `--apply-rules` evaluates the rules and applies supported actions.
 - `--rules PATH` overrides the rules file path for this run.
 
@@ -28,7 +28,7 @@ Initial CLI behavior:
 2. `aics --apply-rules` uses `~/.config/aics/rules.js`.
 3. `aics --preview-rules --rules ./rules.js` uses `./rules.js`.
 4. `--preview-rules` and `--apply-rules` conflict.
-5. Rules mode is headless and must not launch the TUI.
+5. `--preview-rules --json` stays headless and scriptable; plain `--preview-rules` launches the TUI.
 
 Open decision:
 
@@ -46,7 +46,7 @@ The KDL rule sketch is readable for simple AND-only criteria, but it becomes a l
 - rule-local explanations,
 - action composition.
 
-Use `rquickjs` for an embedded JavaScript runtime, but keep IO and mutations in Rust. JavaScript decides whether a session matches and returns action descriptions. Rust validates and performs those actions.
+Use Boa for an embedded JavaScript runtime, but keep IO and mutations in Rust. JavaScript decides whether a session matches and returns action descriptions. Rust validates and performs those actions.
 
 ## Non-Goals
 
@@ -147,14 +147,13 @@ Implementation note:
 
 ## Runtime Safety
 
-Configure the QuickJS runtime defensively:
+Configure the Boa runtime defensively:
 
-1. Set a memory limit.
-2. Set a max stack size.
-3. Use an interrupt handler or equivalent timeout guard to stop infinite loops.
-4. Do not install module loaders unless needed.
-5. Do not expose Rust functions that perform IO directly from JavaScript.
-6. Treat thrown JS exceptions as rule failures, report them with rule name and file path, and continue unless a strict mode is added later.
+1. Set loop iteration, recursion, and stack limits.
+2. Add a wall-clock timeout guard if Boa exposes an interrupt-style hook or if rule evaluation moves behind a cancellable worker boundary.
+3. Do not install module loaders unless needed.
+4. Do not expose Rust functions that perform IO directly from JavaScript.
+5. Treat thrown JS exceptions as rule failures, report them with rule name and file path, and continue unless a strict mode is added later.
 
 Default behavior should be defensive and batch-friendly:
 
@@ -196,11 +195,9 @@ Conflict policy for v1:
 
 ## Output
 
-Preview mode should be scriptable first and readable second.
+Preview mode has two surfaces:
 
-Start with line-oriented text on stderr/stdout only if it does not collide with existing `--json` semantics. Prefer adding `--json` compatibility:
-
-- `aics --preview-rules` prints a table-like text summary.
+- `aics --preview-rules` opens a TUI review surface for interactive inspection, marking, and confirmation.
 - `aics --preview-rules --json` prints JSONL proposals.
 - `aics --apply-rules --json` prints JSONL applied-action records.
 
@@ -210,24 +207,21 @@ Suggested JSONL preview record:
 {"rule":"trash short spark commit sessions","action":"trash","reason":"short commit-helper session","session_id":"...","path":"...","agent":"codex"}
 ```
 
-Suggested text summary:
+Suggested TUI rule row under each matching session:
 
 ```text
-trash  codex  rollout-2026-06-20T12-00-00.jsonl  trash short spark commit sessions  short commit-helper session
-
-3 proposed actions
-0 applied
+[x] rule trash short spark commit sessions => trash · short commit-helper session
 ```
 
 ## Target Files
 
 Likely implementation files:
 
-- `Cargo.toml` - add `rquickjs`.
+- `Cargo.toml` - add `boa_engine`.
 - `src/main.rs` - add `--preview-rules`, `--apply-rules`, and `--rules`.
 - `src/lib.rs` - export a new automation module.
 - `src/rules/mod.rs` - rule runtime, public entry points.
-- `src/rules/js.rs` - QuickJS setup and JS API binding.
+- `src/rules/js.rs` - Boa setup and JS API binding.
 - `src/rules/projection.rs` - convert `StoredSession` / `Session` / `SessionCell` to JS-facing data.
 - `src/rules/actions.rs` - action proposal types and application logic.
 - `src/trash.rs` - reuse `TrashStore::trash_file`; avoid duplicating trash semantics.
@@ -240,7 +234,7 @@ Likely implementation files:
 
 1. Add CLI flags and conflicts.
 2. Resolve default rules path to `config_dir()?.join("rules.js")` or equivalent.
-3. Add a rules-mode branch before TUI launch.
+3. Add a rules-mode branch before normal TUI launch.
 4. Load missing default file as a clear error:
    - `rules file not found: ~/.config/aics/rules.js`
 5. Add tests for flag parsing and conflicts.
@@ -248,12 +242,12 @@ Likely implementation files:
 Acceptance:
 
 - `cargo test` passes.
-- `aics --preview-rules --rules missing.js` fails before launching TUI.
+- `aics --preview-rules --rules missing.js` fails before launching the preview TUI.
 
 ### Phase 2: JS Rule Registration
 
-1. Add `rquickjs`.
-2. Create a runtime with memory/stack/timeout limits.
+1. Add `boa_engine`.
+2. Create a runtime with loop/recursion/stack limits.
 3. Expose `rule`, `nothing`, and `trash`.
 4. Evaluate the rules file once and collect registered callbacks.
 5. Validate duplicate rule names as errors.
@@ -270,7 +264,7 @@ Acceptance:
 2. Parse each candidate session file and build the JS-facing context.
 3. Invoke each rule callback.
 4. Convert returned actions into `RuleProposal`.
-5. Print preview output.
+5. Populate preview records for both the interactive TUI and JSONL output.
 
 Acceptance:
 

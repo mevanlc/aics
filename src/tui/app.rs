@@ -35,10 +35,13 @@ use crate::fs_safename::{
 };
 use crate::index::{
     IndexManager, Scope, SearchEngine, SearchFilters, SearchHit, SearchRequest, SortMode,
-    SyncOutcome,
+    SyncOutcome, TrashFilter,
 };
 use crate::parse::claude::read_claude_autosummaries;
 use crate::parse::{parse_session_file, Agent, MessageRole, Session};
+use crate::rules::{
+    apply_rule_proposals, RuleEvaluationError, RulePreviewMatch, RuleProposal, RulesReport,
+};
 use crate::scan::{AgentHomes, SessionRoots};
 use crate::settings::{DisplayOptions, Settings, SettingsPatch, ThemeName};
 use crate::summary::sidecar::sidecar_path;
@@ -53,6 +56,7 @@ use crate::tui::ansi::strip_terminal_escapes;
 use crate::tui::filter::{FilterModalState, FilterOutcome};
 use crate::tui::help::{HelpModalState, HelpOutcome, HelpTab};
 use crate::tui::profile;
+use crate::tui::rules_actions::{self, RulesAction, RulesActionMenuState, RulesActionOutcome};
 use crate::tui::settings::{SettingsModalState, SettingsOutcome};
 use crate::tui::statusline;
 use crate::tui::theme::Theme;
@@ -97,10 +101,12 @@ enum Overlay {
     None,
     Filters(FilterModalState),
     Actions(ActionMenuState),
+    RulesActions(RulesActionMenuState),
     View(ViewMenuState, Option<ViewerState>),
     Viewer(ViewerState),
     Settings(SettingsModalState),
     ConfirmDelete(DeleteMode),
+    ConfirmRulesProcess(RulesProcessSummary),
     ConfirmRestore(RestorePrompt),
     RestoreBlocked(RestoreBlockedDialog),
     ConfirmExit,
@@ -130,6 +136,88 @@ struct ExternalCommand {
     args: Vec<String>,
     cwd: Option<PathBuf>,
     env: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+struct RulesPreviewState {
+    matches: Vec<RulePreviewMatch>,
+    marked_paths: HashSet<PathBuf>,
+    errors: Vec<RuleEvaluationError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RulesProcessSummary {
+    marked: usize,
+    displayed: usize,
+    hidden_by_search_or_filter: usize,
+    offscreen: usize,
+}
+
+impl RulesPreviewState {
+    fn from_report(report: RulesReport) -> Self {
+        let marked_paths = report
+            .preview_matches
+            .iter()
+            .map(|matched| matched.proposal.path.clone())
+            .collect();
+        Self {
+            matches: report.preview_matches,
+            marked_paths,
+            errors: report.errors,
+        }
+    }
+
+    fn total(&self) -> usize {
+        self.matches.len()
+    }
+
+    fn marked_count(&self) -> usize {
+        self.marked_paths.len()
+    }
+
+    fn is_marked(&self, path: &Path) -> bool {
+        self.marked_paths.contains(path)
+    }
+
+    fn set_marked(&mut self, path: &Path, marked: bool) {
+        if marked {
+            self.marked_paths.insert(path.to_path_buf());
+        } else {
+            self.marked_paths.remove(path);
+        }
+    }
+
+    fn set_all_marked(&mut self, marked: bool) {
+        self.marked_paths.clear();
+        if marked {
+            self.marked_paths.extend(
+                self.matches
+                    .iter()
+                    .map(|matched| matched.proposal.path.clone()),
+            );
+        }
+    }
+
+    fn proposal_for_path(&self, path: &Path) -> Option<&RuleProposal> {
+        self.matches
+            .iter()
+            .find(|matched| matched.proposal.path == path)
+            .map(|matched| &matched.proposal)
+    }
+
+    fn marked_proposals(&self) -> Vec<RuleProposal> {
+        self.matches
+            .iter()
+            .filter(|matched| self.marked_paths.contains(&matched.proposal.path))
+            .map(|matched| matched.proposal.clone())
+            .collect()
+    }
+
+    fn remove_paths(&mut self, paths: &HashSet<PathBuf>) {
+        self.matches
+            .retain(|matched| !paths.contains(&matched.proposal.path));
+        self.marked_paths.retain(|path| !paths.contains(path));
+    }
 }
 
 struct PreviewRenderCache {
@@ -219,6 +307,30 @@ pub fn run_app(
     }
 }
 
+pub fn run_rules_preview_app(
+    manager: IndexManager,
+    report: RulesReport,
+    initial_request: SearchRequest,
+    settings: Settings,
+    homes: AgentHomes,
+    roots: SessionRoots,
+) -> Result<()> {
+    let summary_worker = SummaryWorker::spawn()?;
+    let mut app = App::new_rules_preview(
+        manager,
+        summary_worker,
+        report,
+        initial_request,
+        settings,
+        homes,
+        roots,
+    );
+    match app.run()? {
+        AppExit::Normal => Ok(()),
+        AppExit::Handoff(command) => execute_handoff(command),
+    }
+}
+
 struct SearchWorker {
     request_tx: Sender<SearchCommand>,
     response_rx: Receiver<SearchResponse>,
@@ -251,6 +363,15 @@ impl SearchWorker {
             response_rx,
         })
     }
+
+    fn disconnected() -> Self {
+        let (request_tx, _request_rx) = mpsc::channel();
+        let (_response_tx, response_rx) = mpsc::channel();
+        Self {
+            request_tx,
+            response_rx,
+        }
+    }
 }
 
 pub struct App {
@@ -259,7 +380,7 @@ pub struct App {
     pub results: Vec<SearchHit>,
     pub preview_scroll: usize,
     manager: IndexManager,
-    worker: SearchWorker,
+    worker: Option<SearchWorker>,
     summary_worker: SummaryWorker,
     summary_cache: HashMap<PathBuf, SummarySources>,
     summary_inflight: HashSet<PathBuf>,
@@ -295,6 +416,7 @@ pub struct App {
     theme: Theme,
     homes: AgentHomes,
     roots: SessionRoots,
+    rules_preview: Option<RulesPreviewState>,
     pending_list_click: Option<PendingListClick>,
     pending_action_menu_click: Option<PendingListClick>,
     preview_resize_drag: Option<PreviewResizeDrag>,
@@ -309,6 +431,15 @@ impl App {
         keymap_hint::KeymapHint::new("^S", "settings"),
         keymap_hint::KeymapHint::new("^N/^P", "matches"),
         keymap_hint::KeymapHint::new("Esc", "back"),
+        keymap_hint::KeymapHint::new("^C", "quit"),
+    ];
+    const RULES_HINTS: [keymap_hint::KeymapHint; 7] = [
+        keymap_hint::KeymapHint::new("⏎", "rule actions"),
+        keymap_hint::KeymapHint::new("^X", "view menu"),
+        keymap_hint::KeymapHint::new("^F", "filters"),
+        keymap_hint::KeymapHint::new("^N/^P", "matches"),
+        keymap_hint::KeymapHint::new("^D", "process"),
+        keymap_hint::KeymapHint::new("Esc", "quit"),
         keymap_hint::KeymapHint::new("^C", "quit"),
     ];
 
@@ -338,7 +469,7 @@ impl App {
             results: Vec::new(),
             preview_scroll: 0,
             manager,
-            worker,
+            worker: Some(worker),
             summary_worker,
             summary_cache: HashMap::new(),
             summary_inflight: HashSet::new(),
@@ -376,11 +507,44 @@ impl App {
             settings,
             homes,
             roots,
+            rules_preview: None,
             pending_list_click: None,
             pending_action_menu_click: None,
             preview_resize_drag: None,
             viewer_before_actions: None,
         }
+    }
+
+    fn new_rules_preview(
+        manager: IndexManager,
+        summary_worker: SummaryWorker,
+        report: RulesReport,
+        initial_request: SearchRequest,
+        settings: Settings,
+        homes: AgentHomes,
+        roots: SessionRoots,
+    ) -> Self {
+        let mut app = Self::new(
+            manager,
+            SearchWorker::disconnected(),
+            summary_worker,
+            initial_request,
+            settings,
+            homes,
+            roots,
+        );
+        app.worker = None;
+        let preview_state = RulesPreviewState::from_report(report);
+        if !preview_state.errors.is_empty() {
+            app.statusline = Some(statusline::Entry::failed(format!(
+                "{} rule errors",
+                preview_state.errors.len()
+            )));
+        }
+        app.result_limit = preview_state.total().max(1);
+        app.rules_preview = Some(preview_state);
+        app.pending_search = true;
+        app
     }
 
     fn run(&mut self) -> Result<AppExit> {
@@ -441,6 +605,9 @@ impl App {
     }
 
     pub fn scope_label(&self) -> String {
+        if self.rules_preview.is_some() {
+            return "Rules Preview".to_owned();
+        }
         match &self.scope {
             Scope::Global => "Global".to_owned(),
             Scope::CurrentDir(path, _) => path
@@ -460,11 +627,29 @@ impl App {
     }
 
     pub fn title_status_text(&self) -> String {
-        let truncated = self.results.len() >= self.result_limit;
-        let mut text = if truncated {
-            format!("{}+ results", self.results.len())
+        let mut text = if let Some(state) = &self.rules_preview {
+            let hidden = state
+                .marked_count()
+                .saturating_sub(self.marked_displayed_count());
+            let mut text = format!(
+                "{} rule hits · {} marked",
+                state.total(),
+                state.marked_count()
+            );
+            if hidden > 0 {
+                text.push_str(&format!(" · {hidden} marked hidden"));
+            }
+            if !state.errors.is_empty() {
+                text.push_str(&format!(" · {} errors", state.errors.len()));
+            }
+            text
         } else {
-            format!("{} results", self.results.len())
+            let truncated = self.results.len() >= self.result_limit;
+            if truncated {
+                format!("{}+ results", self.results.len())
+            } else {
+                format!("{} results", self.results.len())
+            }
         };
         let filter_count = self.filters.active_count();
         if filter_count > 0 {
@@ -662,6 +847,45 @@ impl App {
         line
     }
 
+    pub fn list_extra_row_count(&self) -> usize {
+        usize::from(self.rules_preview.is_some())
+    }
+
+    pub fn list_rule_line(&self, hit: &SearchHit, theme: &Theme) -> Option<Line<'static>> {
+        let state = self.rules_preview.as_ref()?;
+        let proposal = state.proposal_for_path(&hit.session.file_path)?;
+        let marked = if state.is_marked(&proposal.path) {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+        let mut spans = vec![
+            Span::styled(marked, Style::default().fg(theme.accent)),
+            Span::styled(" rule ", Style::default().fg(theme.muted)),
+            Span::styled(
+                proposal.rule.clone(),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" => ", Style::default().fg(theme.muted)),
+            Span::styled(
+                proposal.action.label(),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if let Some(reason) = proposal.action.reason() {
+            if !reason.trim().is_empty() {
+                spans.push(Span::styled(" · ", Style::default().fg(theme.muted)));
+                spans.push(Span::styled(
+                    reason.trim().to_owned(),
+                    Style::default().fg(theme.muted),
+                ));
+            }
+        }
+        Some(Line::from(spans))
+    }
+
     fn active_summary_snippet_text(&mut self, hit: &SearchHit) -> Option<String> {
         let path = hit.session.file_path.clone();
         self.ensure_summary_cache(hit.session.agent, &path);
@@ -708,6 +932,7 @@ impl App {
         search::render(frame, self, areas.search, &theme);
         let session_separator = self.settings.session_separator.clone();
         let snippet_line_count = self.settings.snippet_line_count;
+        let extra_row_count = self.list_extra_row_count();
         list::render(
             frame,
             self,
@@ -715,13 +940,19 @@ impl App {
             &theme,
             &session_separator,
             snippet_line_count,
+            extra_row_count,
         );
 
         if let Some(preview_area) = areas.preview {
             preview::render(frame, self, preview_area, &theme);
         }
 
-        keymap_hint::render(frame, areas.status, &Self::MAIN_HINTS, &theme, "");
+        let hints = if self.rules_preview.is_some() {
+            &Self::RULES_HINTS
+        } else {
+            &Self::MAIN_HINTS
+        };
+        keymap_hint::render(frame, areas.status, hints, &theme, "");
 
         let local_scope_label = self.local_scope_label();
         let viewer_theme_name = self.current_frame_theme_name();
@@ -760,6 +991,9 @@ impl App {
                         );
                     }
                 }
+                action_menu.render(frame, frame.area(), &theme);
+            }
+            Overlay::RulesActions(action_menu) => {
                 action_menu.render(frame, frame.area(), &theme);
             }
             Overlay::View(view_menu, viewer_before_view) => {
@@ -809,6 +1043,9 @@ impl App {
                 results.get(selected),
                 *mode,
             ),
+            Overlay::ConfirmRulesProcess(summary) => {
+                Self::render_rules_process_confirm(frame, frame.area(), &theme, *summary)
+            }
             Overlay::ConfirmRestore(prompt) => {
                 Self::render_restore_confirm(frame, frame.area(), &theme, prompt)
             }
@@ -837,7 +1074,11 @@ impl App {
         }
 
         if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('d') {
-            self.delete_selected_session(DeleteMode::Trash)?;
+            if self.rules_preview.is_some() {
+                self.open_rules_process_confirmation();
+            } else {
+                self.delete_selected_session(DeleteMode::Trash)?;
+            }
             return Ok(());
         }
 
@@ -938,8 +1179,7 @@ impl App {
             }
             KeyCode::Enter => {
                 if self.selected_index().is_some() {
-                    self.overlay =
-                        Overlay::Actions(ActionMenuState::new(self.selected_is_trashed()));
+                    self.open_primary_action_menu();
                 }
             }
             KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
@@ -1009,7 +1249,7 @@ impl App {
             && key.code == KeyCode::Enter
             && key.modifiers.is_empty()
         {
-            self.open_actions_menu();
+            self.open_primary_action_menu();
             return Ok(());
         }
 
@@ -1049,6 +1289,17 @@ impl App {
                     if let Err(error) = self.run_action_from_actions_overlay(action) {
                         self.statusline = Some(statusline::Entry::failed(format!("{error:#}")));
                     }
+                }
+            },
+            Overlay::RulesActions(state) => match state.handle_key(key) {
+                RulesActionOutcome::Stay => {}
+                RulesActionOutcome::Close => {
+                    self.pending_action_menu_click = None;
+                    self.close_actions_overlay();
+                }
+                RulesActionOutcome::Run(action) => {
+                    self.pending_action_menu_click = None;
+                    self.run_rules_action_from_menu(action);
                 }
             },
             Overlay::View(state, viewer_before_view) => match state.handle_key(key) {
@@ -1091,6 +1342,16 @@ impl App {
                     let mode = *mode;
                     self.overlay = Overlay::None;
                     if let Err(error) = self.delete_selected_session(mode) {
+                        self.statusline = Some(statusline::Entry::failed(format!("{error:#}")));
+                    }
+                }
+                _ => {}
+            },
+            Overlay::ConfirmRulesProcess(_) => match key.code {
+                KeyCode::Esc | KeyCode::Char('n') => self.overlay = Overlay::None,
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    self.overlay = Overlay::None;
+                    if let Err(error) = self.process_marked_rules() {
                         self.statusline = Some(statusline::Entry::failed(format!("{error:#}")));
                     }
                 }
@@ -1187,7 +1448,7 @@ impl App {
                 if contains(areas.list, mouse.column, mouse.row) {
                     if let Some(index) = self.list_index_at(areas.list, mouse.row) {
                         self.select_absolute(index);
-                        self.open_actions_menu();
+                        self.open_primary_action_menu();
                     }
                 }
             }
@@ -1279,6 +1540,42 @@ impl App {
                     self.pending_action_menu_click = None;
                 }
             },
+            Overlay::RulesActions(state) => match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let mut action_to_run = None;
+                    let mut close_overlay = false;
+                    if let Some(index) =
+                        rules_actions::index_at_row(self.last_frame_area, mouse.row)
+                    {
+                        state.select_index(index);
+                        let now = Instant::now();
+                        let double_click = self.pending_action_menu_click.is_some_and(|click| {
+                            click.index == index
+                                && now.duration_since(click.at) <= LIST_DOUBLE_CLICK_THRESHOLD
+                        });
+                        if double_click {
+                            self.pending_action_menu_click = None;
+                            close_overlay = true;
+                            action_to_run = rules_actions::action_at(index);
+                        } else {
+                            self.pending_action_menu_click =
+                                Some(PendingListClick { index, at: now });
+                        }
+                    } else {
+                        self.pending_action_menu_click = None;
+                    }
+                    if close_overlay {
+                        self.close_actions_overlay();
+                    }
+                    if let Some(action) = action_to_run {
+                        self.run_rules_action_from_menu(action);
+                    }
+                }
+                MouseEventKind::Up(MouseButton::Left) => {}
+                _ => {
+                    self.pending_action_menu_click = None;
+                }
+            },
             _ => {}
         }
         Ok(())
@@ -1301,6 +1598,12 @@ impl App {
         self.next_search_id = self.next_search_id.saturating_add(1);
         self.committed_query = self.query.value().to_owned();
         self.preview_active_match = None;
+
+        if self.rules_preview.is_some() {
+            self.apply_rules_preview_filter(request_id);
+            return Ok(());
+        }
+
         debug!(
             "dispatch_search id={} query={:?} scope={:?} sort={:?} limit={} current_results={} hidden_deleted_paths={}",
             request_id,
@@ -1311,7 +1614,10 @@ impl App {
             self.results.len(),
             self.hidden_deleted_paths.len()
         );
-        self.worker
+        let Some(worker) = self.worker.as_ref() else {
+            return Err(anyhow::anyhow!("search worker is unavailable"));
+        };
+        worker
             .request_tx
             .send(SearchCommand {
                 request_id,
@@ -1332,11 +1638,58 @@ impl App {
         Ok(())
     }
 
+    fn apply_rules_preview_filter(&mut self, request_id: u64) {
+        let Some(state) = self.rules_preview.as_ref() else {
+            return;
+        };
+        let query = self.committed_query.trim().to_ascii_lowercase();
+        let mut results = state
+            .matches
+            .iter()
+            .filter(|matched| {
+                rules_preview_hit_matches(matched, &query, &self.scope, &self.filters, false)
+            })
+            .map(|matched| matched.hit.clone())
+            .collect::<Vec<_>>();
+        sort_rules_preview_results(&mut results, self.sort);
+        debug!(
+            "applied rules preview filter id={} query={:?} kept={} marked={}",
+            request_id,
+            self.committed_query,
+            results.len(),
+            state.marked_count()
+        );
+        self.results = results;
+        self.latest_search_id = Some(request_id);
+        self.search_in_flight = false;
+        self.pending_search = false;
+        self.last_edit_at = None;
+        self.preview_render_cache = None;
+        if self.results.is_empty() {
+            self.selected = 0;
+            self.list_offset = 0;
+        } else {
+            self.selected = self.selected.min(self.results.len().saturating_sub(1));
+            self.ensure_selection_visible();
+        }
+        self.preview_scroll = 0;
+    }
+
     fn collect_search_responses(&mut self) -> Result<bool> {
+        if self.worker.is_none() {
+            return Ok(false);
+        }
         let mut changed = false;
 
         loop {
-            match self.worker.response_rx.try_recv() {
+            let response = {
+                let worker = self
+                    .worker
+                    .as_ref()
+                    .expect("checked worker availability before receiving");
+                worker.response_rx.try_recv()
+            };
+            match response {
                 Ok(response) => {
                     trace!(
                         "collect_search_responses received id={} latest_search_id={:?}",
@@ -1478,8 +1831,9 @@ impl App {
     fn list_index_at(&self, area: Rect, row: u16) -> Option<usize> {
         let sep = &self.settings.session_separator;
         let snip = self.settings.snippet_line_count;
-        let slot = list::slot_at_row(area, row, snip, sep)?;
-        let visible_slots = list::visible_slots(area, snip, sep);
+        let extra = self.list_extra_row_count();
+        let slot = list::slot_at_row(area, row, snip, sep, extra)?;
+        let visible_slots = list::visible_slots(area, snip, sep, extra);
         let offset = self.list_offset(visible_slots);
         let index = offset + slot;
         (index < self.results.len()).then_some(index)
@@ -1499,6 +1853,7 @@ impl App {
                     layout.list,
                     self.settings.snippet_line_count,
                     &self.settings.session_separator,
+                    self.list_extra_row_count(),
                 )
             })
             .unwrap_or(1)
@@ -1704,6 +2059,14 @@ impl App {
         }
     }
 
+    fn open_primary_action_menu(&mut self) {
+        if self.rules_preview.is_some() {
+            self.open_rules_action_menu();
+        } else {
+            self.open_actions_menu();
+        }
+    }
+
     fn open_actions_menu(&mut self) {
         if self.selected_index().is_none() {
             return;
@@ -1721,6 +2084,23 @@ impl App {
             }
         };
         self.overlay = Overlay::Actions(ActionMenuState::new(trashed));
+    }
+
+    fn open_rules_action_menu(&mut self) {
+        if self.rules_preview.is_none() {
+            return;
+        }
+
+        self.pending_action_menu_click = None;
+        let previous_overlay = std::mem::replace(&mut self.overlay, Overlay::None);
+        self.viewer_before_actions = match previous_overlay {
+            Overlay::Viewer(state) => Some(state),
+            other => {
+                self.overlay = other;
+                None
+            }
+        };
+        self.overlay = Overlay::RulesActions(RulesActionMenuState::new());
     }
 
     fn open_view_menu(&mut self) {
@@ -1767,6 +2147,179 @@ impl App {
 
         self.close_actions_overlay();
         self.run_session_action(action)
+    }
+
+    fn run_rules_action_from_menu(&mut self, action: RulesAction) {
+        self.close_actions_overlay();
+        match action {
+            RulesAction::MarkSelected => self.set_selected_rule_marked(true),
+            RulesAction::UnmarkSelected => self.set_selected_rule_marked(false),
+            RulesAction::MarkVisible => self.set_visible_rule_marked(true),
+            RulesAction::UnmarkVisible => self.set_visible_rule_marked(false),
+            RulesAction::MarkAll => self.set_all_rule_marked(true),
+            RulesAction::UnmarkAll => self.set_all_rule_marked(false),
+            RulesAction::ProcessMarked => self.open_rules_process_confirmation(),
+            RulesAction::Quit => self.request_quit(),
+        }
+    }
+
+    fn selected_rule_path(&self) -> Option<PathBuf> {
+        let hit = self.results.get(self.selected)?;
+        self.rules_preview
+            .as_ref()?
+            .proposal_for_path(&hit.session.file_path)?;
+        Some(hit.session.file_path.clone())
+    }
+
+    fn set_selected_rule_marked(&mut self, marked: bool) {
+        let Some(path) = self.selected_rule_path() else {
+            return;
+        };
+        if let Some(state) = self.rules_preview.as_mut() {
+            state.set_marked(&path, marked);
+        }
+    }
+
+    fn set_visible_rule_marked(&mut self, marked: bool) {
+        let paths = self.visible_rule_paths();
+        if let Some(state) = self.rules_preview.as_mut() {
+            for path in paths {
+                state.set_marked(&path, marked);
+            }
+        }
+    }
+
+    fn set_all_rule_marked(&mut self, marked: bool) {
+        if let Some(state) = self.rules_preview.as_mut() {
+            state.set_all_marked(marked);
+        }
+    }
+
+    fn visible_rule_paths(&self) -> Vec<PathBuf> {
+        let Some(_state) = self.rules_preview.as_ref() else {
+            return Vec::new();
+        };
+        let (offset, end) = self.visible_list_range();
+        self.results
+            .get(offset..end)
+            .unwrap_or(&[])
+            .iter()
+            .map(|hit| hit.session.file_path.clone())
+            .collect()
+    }
+
+    fn visible_list_range(&self) -> (usize, usize) {
+        if self.results.is_empty() {
+            return (0, 0);
+        }
+        let visible_slots = self
+            .last_layout
+            .map(|layout| {
+                list::visible_slots(
+                    layout.list,
+                    self.settings.snippet_line_count,
+                    &self.settings.session_separator,
+                    self.list_extra_row_count(),
+                )
+            })
+            .unwrap_or(self.results.len())
+            .max(1);
+        let offset = self.list_offset(visible_slots);
+        let end = (offset + visible_slots).min(self.results.len());
+        (offset, end)
+    }
+
+    fn marked_displayed_count(&self) -> usize {
+        let Some(state) = self.rules_preview.as_ref() else {
+            return 0;
+        };
+        self.results
+            .iter()
+            .filter(|hit| state.is_marked(&hit.session.file_path))
+            .count()
+    }
+
+    fn marked_visible_count(&self) -> usize {
+        let Some(state) = self.rules_preview.as_ref() else {
+            return 0;
+        };
+        let (offset, end) = self.visible_list_range();
+        self.results
+            .get(offset..end)
+            .unwrap_or(&[])
+            .iter()
+            .filter(|hit| state.is_marked(&hit.session.file_path))
+            .count()
+    }
+
+    fn rules_process_summary(&self) -> Option<RulesProcessSummary> {
+        let state = self.rules_preview.as_ref()?;
+        let marked = state.marked_count();
+        let displayed = self.marked_displayed_count();
+        let visible = self.marked_visible_count();
+        Some(RulesProcessSummary {
+            marked,
+            displayed,
+            hidden_by_search_or_filter: marked.saturating_sub(displayed),
+            offscreen: displayed.saturating_sub(visible),
+        })
+    }
+
+    fn open_rules_process_confirmation(&mut self) {
+        let Some(summary) = self.rules_process_summary() else {
+            return;
+        };
+        if summary.marked == 0 {
+            self.statusline = Some(statusline::Entry::failed("no marked sessions"));
+            return;
+        }
+        self.viewer_before_actions = None;
+        self.overlay = Overlay::ConfirmRulesProcess(summary);
+    }
+
+    fn process_marked_rules(&mut self) -> Result<()> {
+        let Some(state) = self.rules_preview.as_ref() else {
+            return Ok(());
+        };
+        let proposals = state.marked_proposals();
+        if proposals.is_empty() {
+            self.statusline = Some(statusline::Entry::failed("no marked sessions"));
+            return Ok(());
+        }
+
+        let (applied, skipped) = apply_rule_proposals(&self.roots, &proposals);
+        let applied_paths = applied
+            .iter()
+            .map(|action| action.path.clone())
+            .collect::<HashSet<_>>();
+        if let Some(state) = self.rules_preview.as_mut() {
+            state.remove_paths(&applied_paths);
+        }
+        if !applied_paths.is_empty() {
+            self.results
+                .retain(|hit| !applied_paths.contains(&hit.session.file_path));
+            for path in &applied_paths {
+                self.preview_cache.remove(path);
+                self.hidden_deleted_paths.insert(path.clone());
+            }
+            self.preview_render_cache = None;
+            if self.selected >= self.results.len() {
+                self.selected = self.results.len().saturating_sub(1);
+            }
+            self.preview_scroll = 0;
+            self.cancel_pending_searches();
+            let _ = self
+                .manager
+                .sync_with_roots_best_effort(&self.roots, false)?;
+        }
+
+        self.statusline = Some(statusline::Entry::completed(format!(
+            "processed {} marked: {} applied, {} skipped",
+            proposals.len(),
+            applied.len(),
+            skipped.len()
+        )));
+        Ok(())
     }
 
     fn open_help(&mut self, tab: HelpTab) {
@@ -2343,6 +2896,88 @@ impl App {
         frame.render_widget(paragraph, popup);
     }
 
+    fn render_rules_process_confirm(
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        summary: RulesProcessSummary,
+    ) {
+        let popup = layout::centered_rect(area, 62, 24);
+        frame.render_widget(Clear, popup);
+        let noun = if summary.marked == 1 {
+            "session"
+        } else {
+            "sessions"
+        };
+        let paragraph = Paragraph::new(vec![
+            Line::from(Span::styled(
+                format!("Process {} marked {noun}?", summary.marked),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "This applies the resolved rule actions immediately. There is no batch undo from this preview.",
+                Style::default().fg(theme.muted),
+            )),
+            Line::default(),
+            Line::from(vec![
+                Span::styled(
+                    "Displayed in current list: ",
+                    Style::default().fg(theme.muted),
+                ),
+                Span::styled(
+                    summary.displayed.to_string(),
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "Hidden by search/filter: ",
+                    Style::default().fg(theme.muted),
+                ),
+                Span::styled(
+                    summary.hidden_by_search_or_filter.to_string(),
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "Off-screen in current list: ",
+                    Style::default().fg(theme.muted),
+                ),
+                Span::styled(
+                    summary.offscreen.to_string(),
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::default(),
+            Line::from(vec![
+                Span::styled("Press ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    "Enter",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" to process or ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    "Esc",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" to cancel.", Style::default().fg(theme.muted)),
+            ]),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme.border_style(true))
+                .title(block_title("Process Rules")),
+        );
+        frame.render_widget(paragraph, popup);
+    }
+
     fn render_restore_confirm(
         frame: &mut Frame,
         area: Rect,
@@ -2560,6 +3195,144 @@ fn search_worker_loop(
         {
             break;
         }
+    }
+}
+
+fn rules_preview_hit_matches(
+    matched: &RulePreviewMatch,
+    query: &str,
+    scope: &Scope,
+    filters: &SearchFilters,
+    is_live: bool,
+) -> bool {
+    let hit = &matched.hit;
+    let session = &hit.session;
+    if !rules_preview_scope_matches(scope, session) {
+        return false;
+    }
+    if let Some(agent) = filters.agent {
+        if session.agent != agent {
+            return false;
+        }
+    }
+    if let Some(session_id) = filters.session_id.as_deref() {
+        if session.session_id != session_id {
+            return false;
+        }
+    }
+    if let Some(branch) = filters.branch.as_deref() {
+        if session.branch.as_deref() != Some(branch) {
+            return false;
+        }
+    }
+    if filters
+        .after_ts
+        .is_some_and(|after_ts| session.modified_ts < after_ts)
+    {
+        return false;
+    }
+    if filters
+        .before_ts
+        .is_some_and(|before_ts| session.modified_ts > before_ts)
+    {
+        return false;
+    }
+    if filters
+        .min_lines
+        .is_some_and(|min_lines| session.lines < min_lines)
+    {
+        return false;
+    }
+    if !(match session.derivation_type {
+        crate::parse::DerivationType::Original => filters.include_original,
+        crate::parse::DerivationType::Trimmed => filters.include_trimmed,
+        crate::parse::DerivationType::Continued => filters.include_continued,
+        crate::parse::DerivationType::SubAgent => filters.include_sub_agents,
+    }) {
+        return false;
+    }
+    if filters.live_only && !is_live {
+        return false;
+    }
+    match filters.trashed {
+        TrashFilter::No if session.trashed => return false,
+        TrashFilter::Yes if !session.trashed => return false,
+        TrashFilter::No | TrashFilter::Yes | TrashFilter::Both => {}
+    }
+    if query.is_empty() {
+        return true;
+    }
+    rules_preview_search_text(matched)
+        .to_ascii_lowercase()
+        .contains(query)
+}
+
+fn rules_preview_scope_matches(scope: &Scope, session: &crate::index::StoredSession) -> bool {
+    match scope {
+        Scope::Global => true,
+        Scope::CurrentDir(original, canonical) => {
+            let stored = [Some(session.project.as_str()), session.cwd.as_deref()];
+            let original = original.to_string_lossy();
+            stored.iter().flatten().any(|candidate| {
+                preview_paths_equal(&original, candidate)
+                    || canonical.as_ref().is_some_and(|canonical| {
+                        preview_paths_equal(&canonical.to_string_lossy(), candidate)
+                    })
+            })
+        }
+    }
+}
+
+fn preview_paths_equal(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        let normalize = |path: &str| {
+            path.replace('\\', "/")
+                .trim_end_matches('/')
+                .to_ascii_lowercase()
+        };
+        normalize(a) == normalize(b)
+    } else {
+        Path::new(a) == Path::new(b)
+    }
+}
+
+fn rules_preview_search_text(matched: &RulePreviewMatch) -> String {
+    let session = &matched.hit.session;
+    let proposal = &matched.proposal;
+    [
+        session.session_id.as_str(),
+        session.project.as_str(),
+        session.cwd.as_deref().unwrap_or_default(),
+        session.branch.as_deref().unwrap_or_default(),
+        session.file_path.to_str().unwrap_or_default(),
+        session.first_user_msg_content.as_str(),
+        session.first_msg_content.as_str(),
+        session.last_msg_content.as_str(),
+        matched.hit.snippet_html.as_str(),
+        proposal.rule.as_str(),
+        proposal.action.label(),
+        proposal.action.reason().unwrap_or_default(),
+    ]
+    .join("\n")
+}
+
+fn sort_rules_preview_results(results: &mut [SearchHit], sort: SortMode) {
+    match sort {
+        SortMode::Time => results.sort_by(|left, right| {
+            right
+                .session
+                .modified_ts
+                .cmp(&left.session.modified_ts)
+                .then_with(|| left.session.file_path.cmp(&right.session.file_path))
+        }),
+        SortMode::Relevance => results.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| right.session.modified_ts.cmp(&left.session.modified_ts))
+                .then_with(|| left.session.file_path.cmp(&right.session.file_path))
+        }),
     }
 }
 
@@ -2911,6 +3684,7 @@ mod tests {
     use crate::index::SearchHit;
     use crate::index::{IndexManager, IndexPaths, Scope, SearchFilters, SearchRequest, SortMode};
     use crate::parse::{Agent, DerivationType, MessageRole};
+    use crate::rules::{RuleAction, RulePreviewMatch, RuleProposal};
     use crate::settings::{Settings, ThemeName};
     use crate::tui::help::HelpTab;
     use crate::tui::layout;
@@ -2918,8 +3692,8 @@ mod tests {
 
     use super::{
         build_fork_command, build_resume_command, export_stem_for_session, finalize_run_result,
-        write_session_export, ActionMenuState, App, AppExit, SearchResponse, SearchWorker,
-        PAGE_STEP,
+        write_session_export, ActionMenuState, App, AppExit, RulesPreviewState, SearchResponse,
+        SearchWorker, PAGE_STEP,
     };
     use crate::scan::{AgentHomes, SessionRoots};
     use crate::summary::{
@@ -3572,6 +4346,73 @@ mod tests {
         .unwrap();
 
         assert!(matches!(app.overlay, super::Overlay::Actions(_)));
+    }
+
+    #[test]
+    fn right_clicking_rule_preview_item_opens_rule_actions_menu() {
+        let mut app = test_app();
+        let matched = sample_rule_match(PathBuf::from("/tmp/demo/rule-session.jsonl"));
+        app.results = vec![matched.hit.clone()];
+        app.rules_preview = Some(RulesPreviewState {
+            matches: vec![matched],
+            marked_paths: [PathBuf::from("/tmp/demo/rule-session.jsonl")]
+                .into_iter()
+                .collect(),
+            errors: Vec::new(),
+        });
+        app.last_layout = Some(layout::AppLayout {
+            search: Rect::new(0, 0, 120, 3),
+            list: Rect::new(0, 3, 60, 20),
+            preview: Some(Rect::new(60, 3, 60, 20)),
+            status: Rect::new(0, 23, 120, 2),
+        });
+
+        let row = app.last_layout.as_ref().unwrap().list.y + 2;
+        app.handle_mouse(crossterm_mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            5,
+            row,
+        ))
+        .unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::RulesActions(_)));
+    }
+
+    #[test]
+    fn rules_process_summary_counts_hidden_and_offscreen_marked_sessions() {
+        let mut app = test_app();
+        let matches = vec![
+            sample_rule_match(PathBuf::from("/tmp/demo/rule-1.jsonl")),
+            sample_rule_match(PathBuf::from("/tmp/demo/rule-2.jsonl")),
+            sample_rule_match(PathBuf::from("/tmp/demo/rule-3.jsonl")),
+        ];
+        let marked_paths = matches
+            .iter()
+            .map(|matched| matched.proposal.path.clone())
+            .collect();
+        app.rules_preview = Some(RulesPreviewState {
+            marked_paths,
+            matches: matches.clone(),
+            errors: Vec::new(),
+        });
+        app.results = matches
+            .iter()
+            .take(2)
+            .map(|matched| matched.hit.clone())
+            .collect();
+        app.last_layout = Some(layout::AppLayout {
+            search: Rect::new(0, 0, 120, 3),
+            list: Rect::new(0, 3, 60, 8),
+            preview: Some(Rect::new(60, 3, 60, 8)),
+            status: Rect::new(0, 11, 120, 2),
+        });
+
+        let summary = app.rules_process_summary().unwrap();
+
+        assert_eq!(summary.marked, 3);
+        assert_eq!(summary.displayed, 2);
+        assert_eq!(summary.hidden_by_search_or_filter, 1);
+        assert_eq!(summary.offscreen, 1);
     }
 
     #[test]
@@ -4280,6 +5121,27 @@ mod tests {
         hit.session.trashed = true;
         hit.session.original_path = Some(original_path);
         hit
+    }
+
+    fn sample_rule_match(file_path: PathBuf) -> RulePreviewMatch {
+        let mut hit = sample_hit_with_path(Agent::Claude, file_path.clone());
+        hit.session.session_id = file_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("rule-session")
+            .to_owned();
+        RulePreviewMatch {
+            proposal: RuleProposal {
+                rule: "trash demo".to_owned(),
+                session_id: hit.session.session_id.clone(),
+                path: file_path,
+                agent: hit.session.agent,
+                action: RuleAction::Trash {
+                    reason: Some("matched fixture".to_owned()),
+                },
+            },
+            hit,
+        }
     }
 
     fn sample_session_for_export(stem: &str) -> crate::parse::Session {

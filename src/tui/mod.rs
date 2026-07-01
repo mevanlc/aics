@@ -11,6 +11,7 @@ pub mod list;
 pub mod markdown;
 pub mod preview;
 pub mod profile;
+pub mod rules_actions;
 pub mod search;
 pub mod settings;
 pub mod statusline;
@@ -19,4 +20,4 @@ pub mod util;
 pub mod view_menu;
 pub mod viewer;
 
-pub use app::run_app;
+pub use app::{run_app, run_rules_preview_app};
