@@ -133,6 +133,12 @@ struct Cli {
     )]
     apply_rules: bool,
     #[arg(
+        long = "benchmark-rules",
+        hide = true,
+        conflicts_with_all = ["preview_rules", "apply_rules"]
+    )]
+    benchmark_rules: bool,
+    #[arg(
         long = "rules",
         value_name = "PATH",
         help = "Override the JavaScript rules file used by --preview-rules or --apply-rules"
@@ -294,6 +300,9 @@ fn main() -> Result<()> {
                 filters: rules_filters.clone(),
             },
         )?;
+        if cli.benchmark_rules {
+            return Ok(());
+        }
         if mode == RulesMode::Preview && !cli.json {
             let initial_request = SearchRequest {
                 query: String::new(),
@@ -369,7 +378,7 @@ fn validate_terminal_mode(cli: &Cli) -> Result<()> {
 }
 
 fn rules_mode(cli: &Cli) -> Option<RulesMode> {
-    if cli.preview_rules {
+    if cli.preview_rules || cli.benchmark_rules {
         Some(RulesMode::Preview)
     } else if cli.apply_rules {
         Some(RulesMode::Apply)
@@ -890,6 +899,10 @@ mod tests {
             apply.rules.as_deref(),
             Some(std::path::Path::new("rules.js"))
         );
+
+        let benchmark = Cli::parse_from(["aics", "--benchmark-rules", "--rules", "rules.js"]);
+        assert_eq!(rules_mode(&benchmark), Some(RulesMode::Preview));
+        assert!(benchmark.benchmark_rules);
     }
 
     #[test]
@@ -941,6 +954,7 @@ mod tests {
         assert!(help.contains("Optional search query to run immediately"));
         assert!(help.contains("--claude-home <PATH>"));
         assert!(help.contains("--codex-home <PATH>"));
+        assert!(!help.contains("--benchmark-rules"));
         assert!(help.contains("Examples:"));
         assert!(help.contains("YYYY-MM-DD or RFC3339"));
     }

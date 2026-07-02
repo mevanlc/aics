@@ -136,6 +136,46 @@ fn apply_rules_moves_matching_session_to_trash() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn benchmark_rules_evaluates_without_output_or_applying_actions() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let rules = write_rules(
+        &temp,
+        r#"
+        rule("trash claude basic", ({ session }) => {
+          return session.agent === "claude" ? trash("cleanup") : nothing();
+        });
+        "#,
+    )?;
+    let cache_root = temp.path().join("cache");
+    let data_root = temp.path().join("data");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_aics"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CACHE_ROOT", &cache_root)
+        .env("AICS_DATA_ROOT", &data_root)
+        .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
+        .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .args([
+            "--benchmark-rules",
+            "--rules",
+            rules.to_str().unwrap(),
+            "--progress",
+            "none",
+            "-g",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:#?}");
+    assert!(output.stdout.is_empty(), "{output:#?}");
+    assert!(output.stderr.is_empty(), "{output:#?}");
+    assert!(roots.claude_session.exists());
+    assert_eq!(fs::read_to_string(data_root.join("trash.jsonl"))?, "");
+    assert_eq!(fs::read_dir(data_root.join("trash"))?.count(), 0);
+    Ok(())
+}
+
 fn write_rules(temp: &TempDir, source: &str) -> Result<PathBuf> {
     let path = temp.path().join("rules.js");
     fs::write(&path, source)?;
