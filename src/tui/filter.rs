@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
 use chrono::{Local, TimeZone, Utc};
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind,
+};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -154,6 +156,37 @@ impl FilterModalState {
                 Ok(FilterOutcome::Stay)
             }
         }
+    }
+
+    pub fn handle_mouse(
+        &mut self,
+        area: Rect,
+        kind: MouseEventKind,
+        column: u16,
+        row: u16,
+    ) -> FilterOutcome {
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(field) = field_at_position(area, column, row) {
+                    self.selected.set(&field);
+                    if !field.is_text() {
+                        self.adjust_current(true);
+                    }
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if contains(field_rows_area(area), column, row) {
+                    self.selected.move_next();
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if contains(field_rows_area(area), column, row) {
+                    self.selected.move_prev();
+                }
+            }
+            _ => {}
+        }
+        FilterOutcome::Stay
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme, scope_label: &str) {
@@ -376,6 +409,31 @@ impl FilterModalState {
     }
 }
 
+fn field_rows_area(area: Rect) -> Rect {
+    let popup = layout::centered_rect(area, 80, 72);
+    let halves =
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(popup);
+    let left_inner = halves[0].inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let left_chunks =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(left_inner);
+    left_chunks[0]
+}
+
+fn field_at_position(area: Rect, column: u16, row: u16) -> Option<FilterField> {
+    let rows = field_rows_area(area);
+    if !contains(rows, column, row) {
+        return None;
+    }
+    FIELD_ORDER.get((row - rows.y) as usize).copied()
+}
+
+fn contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
+}
+
 impl FilterField {
     fn is_text(self) -> bool {
         matches!(
@@ -548,10 +606,12 @@ fn format_optional_date(value: Option<u64>) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+    use ratatui::layout::Rect;
 
-    use super::{FilterField, FilterModalState};
+    use super::{field_rows_area, FilterField, FilterModalState};
     use crate::index::{Scope, SearchFilters, SortMode};
+    use crate::parse::Agent;
 
     #[test]
     fn ctrl_r_resets_sort_to_time() {
@@ -634,5 +694,47 @@ mod tests {
 
         assert_eq!(*state.selected.current(), FilterField::Scope);
         assert_eq!(state.branch.value(), "");
+    }
+
+    #[test]
+    fn clicking_text_filter_row_focuses_that_field() {
+        let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
+        let mut state = FilterModalState::new(&scope, &SearchFilters::default(), SortMode::Time);
+        let area = Rect::new(0, 0, 120, 40);
+        let rows = field_rows_area(area);
+
+        state.handle_mouse(
+            area,
+            MouseEventKind::Down(MouseButton::Left),
+            rows.x,
+            rows.y + 3,
+        );
+        state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+                &scope,
+            )
+            .unwrap();
+
+        assert_eq!(*state.selected.current(), FilterField::Branch);
+        assert_eq!(state.branch.value(), "z");
+    }
+
+    #[test]
+    fn clicking_non_text_filter_row_cycles_value() {
+        let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
+        let mut state = FilterModalState::new(&scope, &SearchFilters::default(), SortMode::Time);
+        let area = Rect::new(0, 0, 120, 40);
+        let rows = field_rows_area(area);
+
+        state.handle_mouse(
+            area,
+            MouseEventKind::Down(MouseButton::Left),
+            rows.x,
+            rows.y + 1,
+        );
+
+        assert_eq!(*state.selected.current(), FilterField::Agent);
+        assert_eq!(state.agent, Some(Agent::Claude));
     }
 }

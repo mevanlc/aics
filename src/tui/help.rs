@@ -1,6 +1,6 @@
 use std::fmt;
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -28,6 +28,7 @@ const QUERY_HELP_HINTS: [KeymapHint; 3] = [
 const HELP_TABS: [HelpTab; 3] = [HelpTab::SessionList, HelpTab::Viewer, HelpTab::SearchQuery];
 
 const PAGE_STEP: usize = 8;
+const MOUSE_SCROLL_STEP: isize = 3;
 const LEFT_PANEL_PREFERRED_WIDTH: u16 = 36;
 const RIGHT_PANEL_MIN_CONTENT_WIDTH: u16 = 12;
 const RIGHT_PANEL_HORIZONTAL_CHROME: u16 = 3;
@@ -373,8 +374,43 @@ impl HelpModalState {
         }
     }
 
+    pub fn handle_mouse(
+        &mut self,
+        area: Rect,
+        kind: MouseEventKind,
+        column: u16,
+        row: u16,
+    ) -> HelpOutcome {
+        if !self.tab().is_hotkey_tab() {
+            return self.handle_query_help_mouse(area, kind, column, row);
+        }
+
+        let chunks = hotkey_left_chunks(area);
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(tab) = tab_at_position(chunks[0], column, row) {
+                    self.select_tab(tab);
+                } else if let Some(index) = self.hotkey_index_at_position(chunks[2], column, row) {
+                    self.selected = index;
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if contains(chunks[2], column, row) {
+                    self.move_selection(MOUSE_SCROLL_STEP);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if contains(chunks[2], column, row) {
+                    self.move_selection(-MOUSE_SCROLL_STEP);
+                }
+            }
+            _ => {}
+        }
+        HelpOutcome::Stay
+    }
+
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let popup = layout::centered_rect(area, 80, 72);
+        let popup = help_popup_area(area);
         frame.render_widget(Clear, popup);
 
         if !self.tab().is_hotkey_tab() {
@@ -543,6 +579,35 @@ impl HelpModalState {
         }
     }
 
+    fn handle_query_help_mouse(
+        &mut self,
+        area: Rect,
+        kind: MouseEventKind,
+        column: u16,
+        row: u16,
+    ) -> HelpOutcome {
+        let chunks = query_help_chunks(area);
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(tab) = tab_at_position(chunks[0], column, row) {
+                    self.select_tab(tab);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if contains(chunks[2], column, row) {
+                    self.query_scroll = self.query_scroll.saturating_add(MOUSE_SCROLL_STEP as u16);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if contains(chunks[2], column, row) {
+                    self.query_scroll = self.query_scroll.saturating_sub(MOUSE_SCROLL_STEP as u16);
+                }
+            }
+            _ => {}
+        }
+        HelpOutcome::Stay
+    }
+
     fn render_query_help(&mut self, frame: &mut Frame, popup: Rect, theme: &Theme) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -551,14 +616,7 @@ impl HelpModalState {
             .title(block_title(self.tab.current().title()));
         frame.render_widget(block, popup);
 
-        let inner = padded_inner(popup);
-        let chunks = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(2),
-        ])
-        .split(inner);
+        let chunks = query_help_chunks_for_popup(popup);
 
         frame.render_widget(Paragraph::new(self.render_tabs(theme)), chunks[0]);
 
@@ -591,6 +649,13 @@ impl HelpModalState {
         self.query_scroll = 0;
     }
 
+    fn select_tab(&mut self, tab: HelpTab) {
+        if self.tab.set(&tab) {
+            self.selected = 0;
+            self.query_scroll = 0;
+        }
+    }
+
     fn move_selection(&mut self, delta: isize) {
         let len = self.filtered_items().len();
         if len == 0 {
@@ -615,6 +680,17 @@ impl HelpModalState {
                     || item.detail.to_ascii_lowercase().contains(&filter)
             })
             .collect()
+    }
+
+    fn hotkey_index_at_position(&self, list: Rect, column: u16, row: u16) -> Option<usize> {
+        if !contains(list, column, row) {
+            return None;
+        }
+        let filtered = self.filtered_items();
+        let max_rows = list.height as usize;
+        let (start, end) = visible_window(filtered.len(), self.selected, max_rows);
+        let index = start + (row - list.y) as usize;
+        (index < end).then_some(index)
     }
 
     fn filter_text(&self) -> &str {
@@ -685,6 +761,68 @@ fn build_filter_input() -> TextArea<'static> {
     filter.set_cursor_line_style(Style::default());
     filter.set_placeholder_text("type to filter");
     filter
+}
+
+fn help_popup_area(area: Rect) -> Rect {
+    layout::centered_rect(area, 80, 72)
+}
+
+fn hotkey_left_chunks(area: Rect) -> Vec<Rect> {
+    let popup = help_popup_area(area);
+    let [left_area, _] = split_help_columns(popup);
+    let left_inner = padded_inner(left_area);
+    Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Min(0),
+        Constraint::Length(2),
+    ])
+    .split(left_inner)
+    .to_vec()
+}
+
+fn query_help_chunks(area: Rect) -> Vec<Rect> {
+    query_help_chunks_for_popup(help_popup_area(area))
+}
+
+fn query_help_chunks_for_popup(popup: Rect) -> Vec<Rect> {
+    let inner = padded_inner(popup);
+    Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(2),
+    ])
+    .split(inner)
+    .to_vec()
+}
+
+fn tab_at_position(area: Rect, column: u16, row: u16) -> Option<HelpTab> {
+    HELP_TABS.into_iter().find(|tab| {
+        tab_span(area, *tab)
+            .is_some_and(|(start, end)| row == area.y && column >= start && column < end)
+    })
+}
+
+fn tab_span(area: Rect, target: HelpTab) -> Option<(u16, u16)> {
+    let mut cursor = area.x.saturating_add(1);
+    for (index, tab) in HELP_TABS.into_iter().enumerate() {
+        if index > 0 {
+            cursor = cursor.saturating_add(2);
+        }
+        let width = (tab.label().len() as u16).saturating_add(2);
+        let start = cursor;
+        let end = cursor.saturating_add(width).min(area.right());
+        if tab == target {
+            return Some((start, end));
+        }
+        cursor = cursor.saturating_add(width);
+    }
+    None
+}
+
+fn contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
 }
 
 fn help_tab_cursor(selected: HelpTab) -> RingCursor<HelpTab> {
@@ -790,13 +928,14 @@ fn help_item_summary_text(item: &HelpItem) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
 
     use super::{
-        help_item_summary_text, preferred_left_panel_width, search_query_help_text,
-        split_help_columns, HelpItem, HelpModalState, HelpOutcome, HelpTab,
-        LEFT_PANEL_PREFERRED_WIDTH, RIGHT_PANEL_MIN_CONTENT_WIDTH, RIGHT_PANEL_MIN_WIDTH,
+        help_item_summary_text, hotkey_left_chunks, preferred_left_panel_width, query_help_chunks,
+        search_query_help_text, split_help_columns, tab_span, HelpItem, HelpModalState,
+        HelpOutcome, HelpTab, LEFT_PANEL_PREFERRED_WIDTH, RIGHT_PANEL_MIN_CONTENT_WIDTH,
+        RIGHT_PANEL_MIN_WIDTH,
     };
 
     #[test]
@@ -835,6 +974,48 @@ mod tests {
         help.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
         assert_eq!(help.tab(), HelpTab::SearchQuery);
+    }
+
+    #[test]
+    fn clicking_help_tab_switches_tab() {
+        let mut help = HelpModalState::new(HelpTab::SessionList);
+        let area = Rect::new(0, 0, 120, 40);
+        let tabs = hotkey_left_chunks(area)[0];
+        let (start, _) = tab_span(tabs, HelpTab::Viewer).expect("viewer tab span");
+
+        help.handle_mouse(area, MouseEventKind::Down(MouseButton::Left), start, tabs.y);
+
+        assert_eq!(help.tab(), HelpTab::Viewer);
+        assert_eq!(help.selected, 0);
+    }
+
+    #[test]
+    fn clicking_help_item_selects_visible_row() {
+        let mut help = HelpModalState::new(HelpTab::SessionList);
+        let area = Rect::new(0, 0, 120, 40);
+        let list = hotkey_left_chunks(area)[2];
+
+        help.handle_mouse(
+            area,
+            MouseEventKind::Down(MouseButton::Left),
+            list.x,
+            list.y + 2,
+        );
+
+        assert_eq!(help.selected, 2);
+    }
+
+    #[test]
+    fn mouse_scrolls_search_query_help() {
+        let mut help = HelpModalState::new(HelpTab::SearchQuery);
+        let area = Rect::new(0, 0, 120, 40);
+        let content = query_help_chunks(area)[2];
+
+        help.handle_mouse(area, MouseEventKind::ScrollDown, content.x, content.y);
+        assert_eq!(help.query_scroll, 3);
+
+        help.handle_mouse(area, MouseEventKind::ScrollUp, content.x, content.y);
+        assert_eq!(help.query_scroll, 0);
     }
 
     #[test]

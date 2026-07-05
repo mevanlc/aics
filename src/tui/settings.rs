@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind,
+};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -76,17 +78,8 @@ impl SettingsModalState {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsOutcome {
         if let Some(summarizer) = self.summarizer.as_mut() {
-            match summarizer.handle_key(key) {
-                SummarizerOutcome::Stay => {}
-                SummarizerOutcome::Cancel => {
-                    self.summarizer = None;
-                }
-                SummarizerOutcome::Apply { command, prompt } => {
-                    self.base.summarize_command = command;
-                    self.base.summarize_prompt = prompt;
-                    self.summarizer = None;
-                }
-            }
+            let outcome = summarizer.handle_key(key);
+            self.handle_summarizer_outcome(outcome);
             return SettingsOutcome::Stay;
         }
 
@@ -149,8 +142,60 @@ impl SettingsModalState {
         SettingsOutcome::Stay
     }
 
+    pub fn handle_mouse(
+        &mut self,
+        area: Rect,
+        kind: MouseEventKind,
+        column: u16,
+        row: u16,
+    ) -> SettingsOutcome {
+        if let Some(summarizer) = self.summarizer.as_mut() {
+            let popup = settings_popup_area(area);
+            let outcome = summarizer.handle_mouse(popup, kind, column, row);
+            self.handle_summarizer_outcome(outcome);
+            return SettingsOutcome::Stay;
+        }
+
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(field) = settings_field_at(area, column, row) {
+                    self.field.set(&field);
+                    match field {
+                        SettingsField::Theme => {
+                            self.theme.move_next();
+                        }
+                        SettingsField::EditSummarizer => {
+                            self.summarizer = Some(SummarizerModalState::new(
+                                &self.base.summarize_command,
+                                &self.base.summarize_prompt,
+                            ));
+                        }
+                        SettingsField::SessionSeparator
+                        | SettingsField::SnippetLineCount
+                        | SettingsField::ClaudeCommand
+                        | SettingsField::ClaudeArgs
+                        | SettingsField::CodexCommand
+                        | SettingsField::CodexArgs => {}
+                    }
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if contains(settings_popup_area(area), column, row) {
+                    self.field.move_next();
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if contains(settings_popup_area(area), column, row) {
+                    self.field.move_prev();
+                }
+            }
+            _ => {}
+        }
+        SettingsOutcome::Stay
+    }
+
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let popup = layout::centered_rect(area, 72, 70);
+        let popup = settings_popup_area(area);
         frame.render_widget(Clear, popup);
 
         let block = Block::default()
@@ -161,31 +206,7 @@ impl SettingsModalState {
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
 
-        let rows = Layout::vertical([
-            Constraint::Length(1), // 0  top padding
-            Constraint::Length(1), // 1  Theme inline
-            Constraint::Length(1), // 2  spacing
-            Constraint::Length(1), // 3  divider
-            Constraint::Length(1), // 4  spacing
-            Constraint::Length(1), // 5  Session Separator inline
-            Constraint::Length(1), // 6  Snippet Lines inline
-            Constraint::Length(1), // 7  spacing
-            Constraint::Length(1), // 8  divider
-            Constraint::Length(1), // 9  spacing
-            Constraint::Length(1), // 10 Claude Code Command inline
-            Constraint::Length(1), // 11 Claude Code Args inline
-            Constraint::Length(1), // 12 spacing
-            Constraint::Length(1), // 13 Codex CLI Command inline
-            Constraint::Length(1), // 14 Codex CLI Args inline
-            Constraint::Length(1), // 15 spacing
-            Constraint::Length(1), // 16 divider
-            Constraint::Length(1), // 17 spacing
-            Constraint::Length(1), // 18 Edit summarizer button
-            Constraint::Min(0),    // 19 flex slack
-            Constraint::Length(1), // 20 bottom divider
-            Constraint::Length(1), // 21 hints
-        ])
-        .split(inner);
+        let rows = settings_rows_from_inner(inner);
 
         // Theme inline
         let theme_focused = self.field == SettingsField::Theme;
@@ -426,6 +447,79 @@ impl SettingsModalState {
             ..self.base.clone()
         }
     }
+
+    fn handle_summarizer_outcome(&mut self, outcome: SummarizerOutcome) {
+        match outcome {
+            SummarizerOutcome::Stay => {}
+            SummarizerOutcome::Cancel => {
+                self.summarizer = None;
+            }
+            SummarizerOutcome::Apply { command, prompt } => {
+                self.base.summarize_command = command;
+                self.base.summarize_prompt = prompt;
+                self.summarizer = None;
+            }
+        }
+    }
+}
+
+fn settings_popup_area(area: Rect) -> Rect {
+    layout::centered_rect(area, 72, 70)
+}
+
+fn settings_rows(area: Rect) -> Vec<Rect> {
+    let popup = settings_popup_area(area);
+    let inner = Block::default().borders(Borders::ALL).inner(popup);
+    settings_rows_from_inner(inner)
+}
+
+fn settings_rows_from_inner(inner: Rect) -> Vec<Rect> {
+    Layout::vertical([
+        Constraint::Length(1), // 0  top padding
+        Constraint::Length(1), // 1  Theme inline
+        Constraint::Length(1), // 2  spacing
+        Constraint::Length(1), // 3  divider
+        Constraint::Length(1), // 4  spacing
+        Constraint::Length(1), // 5  Session Separator inline
+        Constraint::Length(1), // 6  Snippet Lines inline
+        Constraint::Length(1), // 7  spacing
+        Constraint::Length(1), // 8  divider
+        Constraint::Length(1), // 9  spacing
+        Constraint::Length(1), // 10 Claude Code Command inline
+        Constraint::Length(1), // 11 Claude Code Args inline
+        Constraint::Length(1), // 12 spacing
+        Constraint::Length(1), // 13 Codex CLI Command inline
+        Constraint::Length(1), // 14 Codex CLI Args inline
+        Constraint::Length(1), // 15 spacing
+        Constraint::Length(1), // 16 divider
+        Constraint::Length(1), // 17 spacing
+        Constraint::Length(1), // 18 Edit summarizer button
+        Constraint::Min(0),    // 19 flex slack
+        Constraint::Length(1), // 20 bottom divider
+        Constraint::Length(1), // 21 hints
+    ])
+    .split(inner)
+    .to_vec()
+}
+
+fn settings_field_at(area: Rect, column: u16, row: u16) -> Option<SettingsField> {
+    let rows = settings_rows(area);
+    [
+        (1, SettingsField::Theme),
+        (5, SettingsField::SessionSeparator),
+        (6, SettingsField::SnippetLineCount),
+        (10, SettingsField::ClaudeCommand),
+        (11, SettingsField::ClaudeArgs),
+        (13, SettingsField::CodexCommand),
+        (14, SettingsField::CodexArgs),
+        (18, SettingsField::EditSummarizer),
+    ]
+    .into_iter()
+    .find_map(|(index, field)| contains(rows[index], column, row).then_some(field))
+}
+
+fn contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
 }
 
 fn settings_field_cursor(selected: SettingsField) -> RingCursor<SettingsField> {
@@ -1437,13 +1531,31 @@ impl SummarizerModalState {
         SummarizerOutcome::Stay
     }
 
+    fn handle_mouse(
+        &mut self,
+        host: Rect,
+        kind: MouseEventKind,
+        column: u16,
+        row: u16,
+    ) -> SummarizerOutcome {
+        if self.picker.is_some() {
+            return SummarizerOutcome::Stay;
+        }
+
+        if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+            let rows = summarizer_rows(host);
+            if contains(rows[1], column, row) || contains(pad_rect(rows[2]), column, row) {
+                self.field.set(&SummarizerField::Command);
+            } else if contains(rows[4], column, row) || contains(pad_rect(rows[5]), column, row) {
+                self.field.set(&SummarizerField::Prompt);
+            }
+        }
+
+        SummarizerOutcome::Stay
+    }
+
     fn render(&mut self, frame: &mut Frame, host: Rect, theme: &Theme) {
-        let popup = Rect {
-            x: host.x.saturating_add(1),
-            y: host.y.saturating_add(1),
-            width: host.width.saturating_sub(2),
-            height: host.height.saturating_sub(2),
-        };
+        let popup = inset_popup(host);
         frame.render_widget(Clear, popup);
         let block = Block::default()
             .borders(Borders::ALL)
@@ -1453,17 +1565,7 @@ impl SummarizerModalState {
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
 
-        let rows = Layout::vertical([
-            Constraint::Length(1), // 0 top padding
-            Constraint::Length(1), // 1 command label
-            Constraint::Length(6), // 2 command textarea
-            Constraint::Length(1), // 3 spacing
-            Constraint::Length(1), // 4 prompt label
-            Constraint::Min(3),    // 5 prompt textarea
-            Constraint::Length(1), // 6 divider
-            Constraint::Length(1), // 7 hints
-        ])
-        .split(inner);
+        let rows = summarizer_rows_from_inner(inner);
 
         let cmd_focused = self.field == SummarizerField::Command;
         let cmd_label = responsive_label(
@@ -1508,13 +1610,45 @@ impl SummarizerModalState {
     }
 }
 
+fn inset_popup(host: Rect) -> Rect {
+    Rect {
+        x: host.x.saturating_add(1),
+        y: host.y.saturating_add(1),
+        width: host.width.saturating_sub(2),
+        height: host.height.saturating_sub(2),
+    }
+}
+
+fn summarizer_rows(host: Rect) -> Vec<Rect> {
+    let popup = inset_popup(host);
+    let inner = Block::default().borders(Borders::ALL).inner(popup);
+    summarizer_rows_from_inner(inner)
+}
+
+fn summarizer_rows_from_inner(inner: Rect) -> Vec<Rect> {
+    Layout::vertical([
+        Constraint::Length(1), // 0 top padding
+        Constraint::Length(1), // 1 command label
+        Constraint::Length(6), // 2 command textarea
+        Constraint::Length(1), // 3 spacing
+        Constraint::Length(1), // 4 prompt label
+        Constraint::Min(3),    // 5 prompt textarea
+        Constraint::Length(1), // 6 divider
+        Constraint::Length(1), // 7 hints
+    ])
+    .split(inner)
+    .to_vec()
+}
+
 #[cfg(test)]
 mod tests {
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+    use ratatui::layout::Rect;
     use ratatui::style::Style;
 
     use super::{
-        collapse_spaces, SettingsField, SettingsModalState, SettingsOutcome, TemplatePicker,
+        collapse_spaces, settings_popup_area, settings_rows, summarizer_rows, SettingsField,
+        SettingsModalState, SettingsOutcome, SummarizerModalState, TemplatePicker,
         TemplatePickerField, TemplateShell,
     };
     use crate::settings::{Settings, ThemeName};
@@ -1578,6 +1712,63 @@ mod tests {
             }
             other => panic!("expected apply outcome, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn clicking_settings_text_row_focuses_that_field() {
+        let mut state = SettingsModalState::new(&Settings::default());
+        let area = Rect::new(0, 0, 120, 40);
+        let rows = settings_rows(area);
+        let before_args = state.claude_args_input.value().to_owned();
+        let before_command = state.claude_command_input.value().to_owned();
+
+        state.handle_mouse(
+            area,
+            MouseEventKind::Down(MouseButton::Left),
+            rows[11].x,
+            rows[11].y,
+        );
+        state.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert_eq!(*state.field.current(), SettingsField::ClaudeArgs);
+        assert_eq!(state.claude_args_input.value(), format!("{before_args}x"));
+        assert_eq!(state.claude_command_input.value(), before_command);
+    }
+
+    #[test]
+    fn clicking_settings_summarizer_button_opens_submodal() {
+        let mut state = SettingsModalState::new(&Settings::default());
+        let area = Rect::new(0, 0, 120, 40);
+        let rows = settings_rows(area);
+
+        state.handle_mouse(
+            area,
+            MouseEventKind::Down(MouseButton::Left),
+            rows[18].x,
+            rows[18].y,
+        );
+
+        assert_eq!(*state.field.current(), SettingsField::EditSummarizer);
+        assert!(state.summarizer.is_some());
+    }
+
+    #[test]
+    fn clicking_summarizer_prompt_focuses_prompt_textarea() {
+        let mut summarizer = SummarizerModalState::new("cmd", "");
+        let host = settings_popup_area(Rect::new(0, 0, 120, 40));
+        let rows = summarizer_rows(host);
+
+        summarizer.handle_mouse(
+            host,
+            MouseEventKind::Down(MouseButton::Left),
+            rows[5].x + 2,
+            rows[5].y,
+        );
+        summarizer.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert_eq!(*summarizer.field.current(), super::SummarizerField::Prompt);
+        assert_eq!(summarizer.command_textarea.lines().join("\n"), "cmd");
+        assert_eq!(summarizer.prompt_textarea.lines().join("\n"), "x");
     }
 
     #[test]

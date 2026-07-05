@@ -162,6 +162,13 @@ impl ViewMenuState {
             }
         }
     }
+
+    pub fn toggle_index(&mut self, index: usize) -> Option<DisplayOptions> {
+        let field = view_fields().get(index).copied()?;
+        self.selected.set(&field);
+        self.toggle_current();
+        Some(self.options)
+    }
 }
 
 fn view_fields() -> [ViewField; 5] {
@@ -184,11 +191,33 @@ fn popup_area(area: Rect) -> Rect {
     layout::centered_rect_fixed_width(area, 42, 36)
 }
 
+pub fn list_area(area: Rect) -> Rect {
+    let popup = popup_area(area);
+    let inner = Block::default().borders(Borders::ALL).inner(popup);
+    let chunks = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    chunks[0]
+}
+
+pub fn index_at_row(area: Rect, column: u16, row: u16) -> Option<usize> {
+    let list = list_area(area);
+    if column < list.x || column >= list.right() || row < list.y || row >= list.bottom() {
+        return None;
+    }
+    let index = (row - list.y) as usize;
+    (index < view_fields().len()).then_some(index)
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
 
-    use super::{ViewField, ViewMenuOutcome, ViewMenuState};
+    use super::{index_at_row, list_area, ViewField, ViewMenuOutcome, ViewMenuState};
     use crate::settings::DisplayOptions;
 
     #[test]
@@ -216,5 +245,18 @@ mod tests {
                 ..DisplayOptions::default()
             })
         );
+    }
+
+    #[test]
+    fn index_at_row_tracks_rendered_list_rows() {
+        let area = Rect::new(0, 0, 120, 30);
+        let list = list_area(area);
+
+        assert_eq!(index_at_row(area, list.x, list.y), Some(0));
+        assert_eq!(index_at_row(area, list.x, list.y + 4), Some(4));
+        assert_eq!(index_at_row(area, list.x, list.y + 5), None);
+        assert_eq!(index_at_row(area, list.x, list.y.saturating_sub(1)), None);
+        assert_eq!(index_at_row(area, list.x.saturating_sub(1), list.y), None);
+        assert_eq!(index_at_row(area, list.right(), list.y), None);
     }
 }

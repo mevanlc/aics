@@ -251,9 +251,9 @@ pub fn list_area(area: Rect) -> Rect {
     chunks[0]
 }
 
-pub fn index_at_row(area: Rect, row: u16, action_count: usize) -> Option<usize> {
+pub fn index_at_row(area: Rect, column: u16, row: u16, action_count: usize) -> Option<usize> {
     let list = list_area(area);
-    if row < list.y || row >= list.bottom() {
+    if column < list.x || column >= list.right() || row < list.y || row >= list.bottom() {
         return None;
     }
     let index = (row - list.y) as usize;
@@ -263,8 +263,9 @@ pub fn index_at_row(area: Rect, row: u16, action_count: usize) -> Option<usize> 
 #[cfg(test)]
 mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
 
-    use super::{ActionMenuState, ActionOutcome, SessionAction};
+    use super::{index_at_row, list_area, ActionMenuState, ActionOutcome, SessionAction};
 
     #[test]
     fn up_wraps_to_last_action() {
@@ -322,5 +323,18 @@ mod tests {
             trashed.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)),
             ActionOutcome::Run(SessionAction::UndoTrash)
         ));
+    }
+
+    #[test]
+    fn index_at_row_rejects_columns_outside_list() {
+        let area = Rect::new(0, 0, 120, 30);
+        let list = list_area(area);
+
+        assert_eq!(index_at_row(area, list.x, list.y, 3), Some(0));
+        assert_eq!(
+            index_at_row(area, list.x.saturating_sub(1), list.y, 3),
+            None
+        );
+        assert_eq!(index_at_row(area, list.right(), list.y, 3), None);
     }
 }

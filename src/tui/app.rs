@@ -65,7 +65,7 @@ use crate::tui::util::{
     sticky_header_for_scroll, sticky_rows_from_line_markers, wrapped_text_height, StickyHeader,
     StickyRowMarker, STICKY_HEADER_HEIGHT,
 };
-use crate::tui::view_menu::{ViewMenuOutcome, ViewMenuState};
+use crate::tui::view_menu::{self, ViewMenuOutcome, ViewMenuState};
 use crate::tui::viewer::{
     collect_match_rows_in_text, collect_message_rows, message_row_for_scroll, next_match_index,
     previous_match_index, scroll_for_match, MatchDirection, MessageDirection, MessageJumpScope,
@@ -102,7 +102,7 @@ pub enum Focus {
 #[allow(clippy::large_enum_variant)]
 enum Overlay {
     None,
-    Filters(FilterModalState),
+    Filters(FilterModalState, Option<ViewerState>),
     Actions(ActionMenuState),
     RulesActions(RulesActionMenuState),
     View(ViewMenuState, Option<ViewerState>),
@@ -979,7 +979,25 @@ impl App {
         let viewer_before_actions = &mut self.viewer_before_actions;
         match &mut self.overlay {
             Overlay::None => {}
-            Overlay::Filters(filter_state) => {
+            Overlay::Filters(filter_state, viewer_before_filters) => {
+                if let Some(viewer_state) = viewer_before_filters.as_mut() {
+                    let hit = results.get(selected);
+                    let session = hit
+                        .and_then(|hit| preview_cache.get(&hit.session.file_path))
+                        .and_then(|session| session.as_ref());
+                    if let Some(session) = session {
+                        viewer_state.render(
+                            frame,
+                            frame.area(),
+                            session,
+                            hit.is_some_and(|hit| hit.session.trashed),
+                            viewer_summary.as_ref(),
+                            &theme,
+                            viewer_theme_name,
+                            display_options,
+                        );
+                    }
+                }
                 filter_state.render(frame, frame.area(), &theme, &local_scope_label);
             }
             Overlay::Actions(action_menu) => {
@@ -1243,6 +1261,14 @@ impl App {
 
         if matches!(self.overlay, Overlay::Viewer(_))
             && key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('f')
+        {
+            self.open_filters();
+            return Ok(());
+        }
+
+        if matches!(self.overlay, Overlay::Viewer(_))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
             && key.code == KeyCode::Char('x')
         {
             self.open_view_menu();
@@ -1280,17 +1306,24 @@ impl App {
         };
 
         match &mut self.overlay {
-            Overlay::Filters(state) => match state.handle_key(key, &self.local_scope)? {
-                FilterOutcome::Stay => {}
-                FilterOutcome::Close => self.overlay = Overlay::None,
-                FilterOutcome::Apply(update) => {
-                    self.scope = update.scope;
-                    self.filters = update.filters;
-                    self.sort = update.sort;
-                    self.overlay = Overlay::None;
-                    self.trigger_search_now()?;
+            Overlay::Filters(state, viewer_before_filters) => {
+                match state.handle_key(key, &self.local_scope)? {
+                    FilterOutcome::Stay => {}
+                    FilterOutcome::Close => {
+                        self.overlay = viewer_before_filters
+                            .take()
+                            .map(Overlay::Viewer)
+                            .unwrap_or(Overlay::None);
+                    }
+                    FilterOutcome::Apply(update) => {
+                        self.scope = update.scope;
+                        self.filters = update.filters;
+                        self.sort = update.sort;
+                        self.overlay = Overlay::None;
+                        self.trigger_search_now()?;
+                    }
                 }
-            },
+            }
             Overlay::Actions(state) => match state.handle_key(key) {
                 ActionOutcome::Stay => {}
                 ActionOutcome::Close => {
@@ -1411,7 +1444,13 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
-        if self.help.is_some() {
+        if let Some(help_state) = self.help.as_mut() {
+            if matches!(
+                help_state.handle_mouse(self.last_frame_area, mouse.kind, mouse.column, mouse.row),
+                HelpOutcome::Close
+            ) {
+                self.help = None;
+            }
             return Ok(());
         }
 
@@ -1505,6 +1544,25 @@ impl App {
 
     fn handle_overlay_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
         match &mut self.overlay {
+            Overlay::Filters(state, viewer_before_filters) => {
+                match state.handle_mouse(self.last_frame_area, mouse.kind, mouse.column, mouse.row)
+                {
+                    FilterOutcome::Stay => {}
+                    FilterOutcome::Close => {
+                        self.overlay = viewer_before_filters
+                            .take()
+                            .map(Overlay::Viewer)
+                            .unwrap_or(Overlay::None);
+                    }
+                    FilterOutcome::Apply(update) => {
+                        self.scope = update.scope;
+                        self.filters = update.filters;
+                        self.sort = update.sort;
+                        self.overlay = Overlay::None;
+                        self.trigger_search_now()?;
+                    }
+                }
+            }
             Overlay::Viewer(state) => {
                 let body = ViewerState::body_area(self.last_frame_area);
                 if contains(body, mouse.column, mouse.row) {
@@ -1523,9 +1581,12 @@ impl App {
                 MouseEventKind::Down(MouseButton::Left) => {
                     let mut action_to_run = None;
                     let mut close_overlay = false;
-                    if let Some(index) =
-                        actions::index_at_row(self.last_frame_area, mouse.row, state.action_count())
-                    {
+                    if let Some(index) = actions::index_at_row(
+                        self.last_frame_area,
+                        mouse.column,
+                        mouse.row,
+                        state.action_count(),
+                    ) {
                         state.select_index(index);
                         let now = Instant::now();
                         let double_click = self.pending_action_menu_click.is_some_and(|click| {
@@ -1562,7 +1623,7 @@ impl App {
                     let mut action_to_run = None;
                     let mut close_overlay = false;
                     if let Some(index) =
-                        rules_actions::index_at_row(self.last_frame_area, mouse.row)
+                        rules_actions::index_at_row(self.last_frame_area, mouse.column, mouse.row)
                     {
                         state.select_index(index);
                         let now = Instant::now();
@@ -1593,6 +1654,28 @@ impl App {
                     self.pending_action_menu_click = None;
                 }
             },
+            Overlay::View(state, _) => {
+                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                    if let Some(index) =
+                        view_menu::index_at_row(self.last_frame_area, mouse.column, mouse.row)
+                    {
+                        if let Some(options) = state.toggle_index(index) {
+                            self.apply_display_options(options);
+                        }
+                    }
+                }
+            }
+            Overlay::Settings(state) => {
+                match state.handle_mouse(self.last_frame_area, mouse.kind, mouse.column, mouse.row)
+                {
+                    SettingsOutcome::Stay => {}
+                    SettingsOutcome::Close => self.overlay = Overlay::None,
+                    SettingsOutcome::Apply(new_settings) => {
+                        self.apply_settings(new_settings)?;
+                        self.overlay = Overlay::None;
+                    }
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -2054,8 +2137,18 @@ impl App {
     }
 
     fn open_filters(&mut self) {
-        self.overlay =
-            Overlay::Filters(FilterModalState::new(&self.scope, &self.filters, self.sort));
+        let previous_overlay = std::mem::replace(&mut self.overlay, Overlay::None);
+        let viewer_before_filters = match previous_overlay {
+            Overlay::Viewer(state) => Some(state),
+            other => {
+                self.overlay = other;
+                None
+            }
+        };
+        self.overlay = Overlay::Filters(
+            FilterModalState::new(&self.scope, &self.filters, self.sort),
+            viewer_before_filters,
+        );
     }
 
     fn toggle_scope(&mut self) -> Result<()> {
@@ -3872,7 +3965,7 @@ mod tests {
     use crate::parse::{Agent, DerivationType, MessageRole};
     use crate::rules::{RuleAction, RulePreviewMatch, RuleProposal};
     use crate::settings::{Settings, ThemeName};
-    use crate::tui::help::HelpTab;
+    use crate::tui::help::{HelpModalState, HelpTab};
     use crate::tui::layout;
     use crate::tui::settings::SettingsModalState;
 
@@ -3881,7 +3974,7 @@ mod tests {
         build_resume_in_cwd_command_with_setcwd, claude_setcwd_failed_dialog,
         export_stem_for_session, finalize_run_result, run_claude_setcwd_tool, write_session_export,
         ActionMenuState, App, AppExit, RulesPreviewState, SearchResponse, SearchWorker,
-        CLAUDE_SETCWD_INSTALL_MESSAGE, PAGE_STEP,
+        ViewMenuState, CLAUDE_SETCWD_INSTALL_MESSAGE, PAGE_STEP,
     };
     use crate::scan::{AgentHomes, SessionRoots};
     use crate::summary::{
@@ -4325,6 +4418,116 @@ mod tests {
         app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
 
         assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+    }
+
+    #[test]
+    fn view_menu_over_viewer_blocks_viewer_keybindings() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.committed_query = "alpha".to_owned();
+        app.open_viewer();
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        app.handle_key(crossterm_key(KeyCode::Down)).unwrap();
+        app.handle_key(crossterm_key(KeyCode::Char(' '))).unwrap();
+        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
+
+        match &app.overlay {
+            super::Overlay::View(_, Some(viewer)) => {
+                assert_eq!(viewer.scroll, 0);
+                assert_eq!(viewer.search_query(), "alpha");
+            }
+            _ => panic!("view menu should remain open over viewer"),
+        }
+    }
+
+    #[test]
+    fn clicking_view_menu_row_toggles_display_option() {
+        let mut app = test_app();
+        app.last_frame_area = Rect::new(0, 0, 120, 30);
+        app.overlay = super::Overlay::View(ViewMenuState::new(app.display_options), None);
+
+        let list = crate::tui::view_menu::list_area(app.last_frame_area);
+        app.handle_overlay_mouse(crossterm_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x,
+            list.y + 1,
+        ))
+        .unwrap();
+
+        assert!(app.display_options.hide_tool_calls);
+        assert!(app.settings.display_options.hide_tool_calls);
+        assert!(matches!(app.overlay, super::Overlay::View(_, None)));
+    }
+
+    #[test]
+    fn mouse_events_route_to_help_modal_before_base_ui() {
+        let mut app = test_app();
+        app.last_frame_area = Rect::new(0, 0, 120, 40);
+        app.help = Some(HelpModalState::new(HelpTab::SessionList));
+
+        app.handle_mouse(crossterm_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            30,
+            7,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            app.help.as_ref().map(HelpModalState::tab),
+            Some(HelpTab::Viewer)
+        );
+        assert!(matches!(app.overlay, super::Overlay::None));
+    }
+
+    #[test]
+    fn ctrl_f_opens_filters_over_viewer_and_restores_viewer() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.open_viewer();
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert!(matches!(app.overlay, super::Overlay::Filters(_, Some(_))));
+
+        app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+    }
+
+    #[test]
+    fn filters_over_viewer_block_viewer_keybindings() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.committed_query = "alpha".to_owned();
+        app.open_viewer();
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        app.handle_key(crossterm_key(KeyCode::Down)).unwrap();
+        app.handle_key(crossterm_key(KeyCode::Char(' '))).unwrap();
+
+        match &app.overlay {
+            super::Overlay::Filters(_, Some(viewer)) => {
+                assert_eq!(viewer.scroll, 0);
+                assert_eq!(viewer.search_query(), "alpha");
+            }
+            _ => panic!("filters should remain open over viewer"),
+        }
+
+        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::None));
     }
 
     #[test]
