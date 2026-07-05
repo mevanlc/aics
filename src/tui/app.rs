@@ -25,7 +25,7 @@ use ratatui::crossterm::terminal::{
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
@@ -81,6 +81,9 @@ const PANEL_MOUSE_SCROLL_STEP: usize = 3;
 const PREVIEW_WIDTH_MIN: u16 = 25;
 const PREVIEW_WIDTH_MAX: u16 = 75;
 const LIST_DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
+const CLAUDE_SETCWD_TOOL: &str = "cc-session-setcwd";
+const CLAUDE_SETCWD_INSTALL_MESSAGE: &str =
+    "Install cc-session-setcwd to enable \"in CWD\" resume for Claude Code.";
 
 #[derive(Debug, Clone, Copy)]
 struct PendingListClick {
@@ -109,6 +112,7 @@ enum Overlay {
     ConfirmRulesProcess(RulesProcessSummary),
     ConfirmRestore(RestorePrompt),
     RestoreBlocked(RestoreBlockedDialog),
+    ResumeError(ResumeErrorDialog),
     ConfirmExit,
 }
 
@@ -128,6 +132,12 @@ enum RestorePromptKind {
 #[derive(Debug, Clone)]
 struct RestoreBlockedDialog {
     target: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct ResumeErrorDialog {
+    title: String,
+    body: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1052,6 +1062,9 @@ impl App {
             Overlay::RestoreBlocked(dialog) => {
                 Self::render_restore_blocked(frame, frame.area(), &theme, dialog)
             }
+            Overlay::ResumeError(dialog) => {
+                Self::render_resume_error(frame, frame.area(), &theme, dialog)
+            }
             Overlay::ConfirmExit => self.render_exit_confirm(frame, frame.area(), &theme),
         }
         if let Some(help_state) = &mut self.help {
@@ -1369,6 +1382,10 @@ impl App {
                 _ => {}
             },
             Overlay::RestoreBlocked(_) => match key.code {
+                KeyCode::Esc | KeyCode::Enter => self.overlay = Overlay::None,
+                _ => {}
+            },
+            Overlay::ResumeError(_) => match key.code {
                 KeyCode::Esc | KeyCode::Enter => self.overlay = Overlay::None,
                 _ => {}
             },
@@ -2077,7 +2094,6 @@ impl App {
             return;
         };
         let trashed = hit.session.trashed;
-        let codex = hit.session.agent == Agent::Codex;
 
         let previous_overlay = std::mem::replace(&mut self.overlay, Overlay::None);
         self.viewer_before_actions = match previous_overlay {
@@ -2087,7 +2103,7 @@ impl App {
                 None
             }
         };
-        self.overlay = Overlay::Actions(ActionMenuState::for_session(trashed, codex));
+        self.overlay = Overlay::Actions(ActionMenuState::new(trashed));
     }
 
     fn open_rules_action_menu(&mut self) {
@@ -2608,13 +2624,17 @@ impl App {
                 let Some(hit) = self.selected_hit() else {
                     return Ok(());
                 };
-                self.handoff = Some(build_resume_in_cwd_command(
-                    &hit,
-                    &self.settings,
-                    &self.homes,
-                    env::current_dir().context("failed to resolve current directory")?,
-                )?);
-                self.should_quit = true;
+                let process_cwd =
+                    env::current_dir().context("failed to resolve current directory")?;
+                match build_resume_in_cwd_command(&hit, &self.settings, &self.homes, process_cwd) {
+                    Ok(command) => {
+                        self.handoff = Some(command);
+                        self.should_quit = true;
+                    }
+                    Err(dialog) => {
+                        self.overlay = Overlay::ResumeError(dialog);
+                    }
+                }
             }
             SessionAction::Fork => {
                 let Some(hit) = self.selected_hit() else {
@@ -3104,6 +3124,59 @@ impl App {
         frame.render_widget(paragraph, popup);
     }
 
+    fn render_resume_error(
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        dialog: &ResumeErrorDialog,
+    ) {
+        let popup = layout::centered_rect_fixed_width(area, 78, 60);
+        frame.render_widget(Clear, popup);
+
+        let mut lines = vec![
+            Line::from(Span::styled(
+                dialog.title.clone(),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            )),
+            Line::default(),
+        ];
+        lines.extend(dialog.body.lines().map(|line| {
+            Line::from(Span::styled(
+                line.to_owned(),
+                Style::default().fg(theme.muted),
+            ))
+        }));
+        lines.extend([
+            Line::default(),
+            Line::from(vec![
+                Span::styled("Press ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    "Enter",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" or ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    "Esc",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" to close.", Style::default().fg(theme.muted)),
+            ]),
+        ]);
+
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme.border_style(true))
+                .title(block_title("Resume Failed")),
+        );
+        frame.render_widget(paragraph, popup);
+    }
+
     fn render_exit_confirm(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let popup = layout::centered_rect(area, 50, 22);
         frame.render_widget(Clear, popup);
@@ -3504,11 +3577,33 @@ fn build_resume_in_cwd_command(
     settings: &Settings,
     homes: &AgentHomes,
     process_cwd: PathBuf,
-) -> Result<ExternalCommand> {
-    if hit.session.agent != Agent::Codex {
-        bail!("Resume in CLI in CWD is only available for Codex sessions");
+) -> std::result::Result<ExternalCommand, ResumeErrorDialog> {
+    build_resume_in_cwd_command_with_setcwd(hit, settings, homes, process_cwd, |session_id, cwd| {
+        run_claude_setcwd_tool(CLAUDE_SETCWD_TOOL, session_id, cwd)
+    })
+}
+
+fn build_resume_in_cwd_command_with_setcwd<F>(
+    hit: &SearchHit,
+    settings: &Settings,
+    homes: &AgentHomes,
+    process_cwd: PathBuf,
+    setcwd: F,
+) -> std::result::Result<ExternalCommand, ResumeErrorDialog>
+where
+    F: FnOnce(&str, &Path) -> std::result::Result<(), ResumeErrorDialog>,
+{
+    match hit.session.agent {
+        Agent::Codex => build_resume_command_with_cd(hit, settings, homes, Some(process_cwd))
+            .map_err(resume_error_from_anyhow),
+        Agent::Claude => {
+            setcwd(&hit.session.session_id, &process_cwd)?;
+            let mut command = build_resume_command_with_cd(hit, settings, homes, None)
+                .map_err(resume_error_from_anyhow)?;
+            command.cwd = Some(process_cwd);
+            Ok(command)
+        }
     }
-    build_resume_command_with_cd(hit, settings, homes, Some(process_cwd))
 }
 
 fn build_resume_command_with_cd(
@@ -3556,6 +3651,63 @@ fn build_resume_command_with_cd(
         }
     };
     Ok(command)
+}
+
+fn run_claude_setcwd_tool(
+    program: &str,
+    session_id: &str,
+    process_cwd: &Path,
+) -> std::result::Result<(), ResumeErrorDialog> {
+    match Command::new(program)
+        .arg(session_id)
+        .arg(process_cwd)
+        .output()
+    {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(claude_setcwd_failed_dialog(
+            output.status,
+            &output.stdout,
+            &output.stderr,
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(ResumeErrorDialog {
+            title: "Claude Code CWD resume requires cc-session-setcwd".to_owned(),
+            body: CLAUDE_SETCWD_INSTALL_MESSAGE.to_owned(),
+        }),
+        Err(error) => Err(ResumeErrorDialog {
+            title: "Failed to run cc-session-setcwd".to_owned(),
+            body: format!("failed to run {CLAUDE_SETCWD_TOOL}: {error}"),
+        }),
+    }
+}
+
+fn claude_setcwd_failed_dialog(
+    status: std::process::ExitStatus,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> ResumeErrorDialog {
+    ResumeErrorDialog {
+        title: "cc-session-setcwd failed".to_owned(),
+        body: format!(
+            "cc-session-setcwd exited with status {status}.\n\nstdout:\n{}\n\nstderr:\n{}",
+            resume_output_text(stdout),
+            resume_output_text(stderr)
+        ),
+    }
+}
+
+fn resume_output_text(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        "(empty)".to_owned()
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+fn resume_error_from_anyhow(error: anyhow::Error) -> ResumeErrorDialog {
+    ResumeErrorDialog {
+        title: "Resume in CLI in CWD failed".to_owned(),
+        body: format!("{error:#}"),
+    }
 }
 
 fn build_fork_command(
@@ -3726,8 +3878,10 @@ mod tests {
 
     use super::{
         build_fork_command, build_resume_command, build_resume_in_cwd_command,
-        export_stem_for_session, finalize_run_result, write_session_export, ActionMenuState, App,
-        AppExit, RulesPreviewState, SearchResponse, SearchWorker, PAGE_STEP,
+        build_resume_in_cwd_command_with_setcwd, claude_setcwd_failed_dialog,
+        export_stem_for_session, finalize_run_result, run_claude_setcwd_tool, write_session_export,
+        ActionMenuState, App, AppExit, RulesPreviewState, SearchResponse, SearchWorker,
+        CLAUDE_SETCWD_INSTALL_MESSAGE, PAGE_STEP,
     };
     use crate::scan::{AgentHomes, SessionRoots};
     use crate::summary::{
@@ -3783,18 +3937,72 @@ mod tests {
     }
 
     #[test]
-    fn resume_in_cwd_rejects_claude_sessions() {
+    fn claude_resume_in_cwd_sets_session_cwd_then_builds_regular_resume() {
         let settings = Settings::default();
         let homes = sample_homes();
-        let error = build_resume_in_cwd_command(
+        let mut called = None::<(String, PathBuf)>;
+
+        let command = build_resume_in_cwd_command_with_setcwd(
             &sample_hit(Agent::Claude),
             &settings,
             &homes,
             PathBuf::from("/tmp/aics-cwd"),
+            |session_id, cwd| {
+                called = Some((session_id.to_owned(), cwd.to_path_buf()));
+                Ok(())
+            },
         )
-        .expect_err("Claude sessions should not support Resume in CLI in CWD");
+        .unwrap();
 
-        assert!(format!("{error:#}").contains("only available for Codex sessions"));
+        assert_eq!(
+            called,
+            Some(("session-123".to_owned(), PathBuf::from("/tmp/aics-cwd")))
+        );
+        assert_eq!(
+            command.args,
+            vec!["--dangerously-skip-permissions", "--resume", "session-123"]
+        );
+        assert_eq!(command.cwd, Some(PathBuf::from("/tmp/aics-cwd")));
+        assert_eq!(
+            command.env,
+            vec![(
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                "/tmp/claude-home".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn missing_claude_setcwd_tool_reports_install_instruction() {
+        let error = run_claude_setcwd_tool(
+            "cc-session-setcwd-aics-test-missing",
+            "session-123",
+            PathBuf::from("/tmp/aics-cwd").as_path(),
+        )
+        .expect_err("missing helper should return a dialog error");
+
+        assert_eq!(
+            error.title,
+            "Claude Code CWD resume requires cc-session-setcwd"
+        );
+        assert_eq!(error.body, CLAUDE_SETCWD_INSTALL_MESSAGE);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn claude_setcwd_failure_dialog_includes_stdout_and_stderr() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let dialog = claude_setcwd_failed_dialog(
+            std::process::ExitStatus::from_raw(7 << 8),
+            b"out line\n",
+            b"err line\n",
+        );
+
+        assert_eq!(dialog.title, "cc-session-setcwd failed");
+        assert!(dialog.body.contains("cc-session-setcwd exited with status"));
+        assert!(dialog.body.contains("stdout:\nout line\n"));
+        assert!(dialog.body.contains("stderr:\nerr line\n"));
     }
 
     #[test]
