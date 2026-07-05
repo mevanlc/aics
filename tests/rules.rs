@@ -82,6 +82,57 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
 }
 
 #[test]
+fn preview_rules_exposes_reasoning_effort() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let rules = write_rules(
+        &temp,
+        r#"
+        rule("trash medium effort codex", ({ session }) => {
+          return session.agent === "codex" && session.reasoningEffort === "medium"
+            ? trash("matched reasoning effort")
+            : nothing();
+        });
+        "#,
+    )?;
+    let cache_root = temp.path().join("cache");
+    let data_root = temp.path().join("data");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_aics"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CACHE_ROOT", &cache_root)
+        .env("AICS_DATA_ROOT", &data_root)
+        .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
+        .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .args([
+            "--preview-rules",
+            "--rules",
+            rules.to_str().unwrap(),
+            "--json",
+            "--progress",
+            "none",
+            "-g",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:#?}");
+    assert!(roots.claude_session.exists());
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    let value: serde_json::Value = serde_json::from_str(lines[0])?;
+    assert_eq!(value["rule"], "trash medium effort codex");
+    assert_eq!(value["action"], "trash");
+    assert_eq!(value["reason"], "matched reasoning effort");
+    assert_eq!(value["agent"], "codex");
+    Ok(())
+}
+
+#[test]
 fn apply_rules_moves_matching_session_to_trash() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;

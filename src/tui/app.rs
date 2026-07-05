@@ -1507,7 +1507,7 @@ impl App {
                     let mut action_to_run = None;
                     let mut close_overlay = false;
                     if let Some(index) =
-                        actions::index_at_row(self.last_frame_area, mouse.row, state.trashed())
+                        actions::index_at_row(self.last_frame_area, mouse.row, state.action_count())
                     {
                         state.select_index(index);
                         let now = Instant::now();
@@ -1518,7 +1518,7 @@ impl App {
                         if double_click {
                             self.pending_action_menu_click = None;
                             close_overlay = true;
-                            action_to_run = actions::action_at(index, state.trashed());
+                            action_to_run = state.action_at(index);
                         } else {
                             self.pending_action_menu_click =
                                 Some(PendingListClick { index, at: now });
@@ -2073,7 +2073,11 @@ impl App {
         }
 
         self.pending_action_menu_click = None;
-        let trashed = self.selected_is_trashed();
+        let Some(hit) = self.selected_hit() else {
+            return;
+        };
+        let trashed = hit.session.trashed;
+        let codex = hit.session.agent == Agent::Codex;
 
         let previous_overlay = std::mem::replace(&mut self.overlay, Overlay::None);
         self.viewer_before_actions = match previous_overlay {
@@ -2083,7 +2087,7 @@ impl App {
                 None
             }
         };
-        self.overlay = Overlay::Actions(ActionMenuState::new(trashed));
+        self.overlay = Overlay::Actions(ActionMenuState::for_session(trashed, codex));
     }
 
     fn open_rules_action_menu(&mut self) {
@@ -2540,12 +2544,6 @@ impl App {
         self.results.get(self.selected).cloned()
     }
 
-    fn selected_is_trashed(&self) -> bool {
-        self.results
-            .get(self.selected)
-            .is_some_and(|hit| hit.session.trashed)
-    }
-
     fn local_scope_label(&self) -> String {
         match &self.local_scope {
             Scope::Global => "Global".to_owned(),
@@ -2604,6 +2602,18 @@ impl App {
                     return Ok(());
                 };
                 self.handoff = Some(build_resume_command(&hit, &self.settings, &self.homes)?);
+                self.should_quit = true;
+            }
+            SessionAction::ResumeInCwd => {
+                let Some(hit) = self.selected_hit() else {
+                    return Ok(());
+                };
+                self.handoff = Some(build_resume_in_cwd_command(
+                    &hit,
+                    &self.settings,
+                    &self.homes,
+                    env::current_dir().context("failed to resolve current directory")?,
+                )?);
                 self.should_quit = true;
             }
             SessionAction::Fork => {
@@ -3486,6 +3496,27 @@ fn build_resume_command(
     settings: &Settings,
     homes: &AgentHomes,
 ) -> Result<ExternalCommand> {
+    build_resume_command_with_cd(hit, settings, homes, None)
+}
+
+fn build_resume_in_cwd_command(
+    hit: &SearchHit,
+    settings: &Settings,
+    homes: &AgentHomes,
+    process_cwd: PathBuf,
+) -> Result<ExternalCommand> {
+    if hit.session.agent != Agent::Codex {
+        bail!("Resume in CLI in CWD is only available for Codex sessions");
+    }
+    build_resume_command_with_cd(hit, settings, homes, Some(process_cwd))
+}
+
+fn build_resume_command_with_cd(
+    hit: &SearchHit,
+    settings: &Settings,
+    homes: &AgentHomes,
+    codex_cd: Option<PathBuf>,
+) -> Result<ExternalCommand> {
     let cwd = hit
         .session
         .cwd
@@ -3510,6 +3541,9 @@ fn build_resume_command(
         crate::parse::Agent::Codex => {
             let (program, mut args) = settings.codex_program_and_args();
             args.extend(["resume".to_owned(), hit.session.session_id.clone()]);
+            if let Some(cd) = codex_cd {
+                args.extend(["--cd".to_owned(), cd.display().to_string()]);
+            }
             ExternalCommand {
                 program,
                 args,
@@ -3691,9 +3725,9 @@ mod tests {
     use crate::tui::settings::SettingsModalState;
 
     use super::{
-        build_fork_command, build_resume_command, export_stem_for_session, finalize_run_result,
-        write_session_export, ActionMenuState, App, AppExit, RulesPreviewState, SearchResponse,
-        SearchWorker, PAGE_STEP,
+        build_fork_command, build_resume_command, build_resume_in_cwd_command,
+        export_stem_for_session, finalize_run_result, write_session_export, ActionMenuState, App,
+        AppExit, RulesPreviewState, SearchResponse, SearchWorker, PAGE_STEP,
     };
     use crate::scan::{AgentHomes, SessionRoots};
     use crate::summary::{
@@ -3727,6 +3761,40 @@ mod tests {
             codex.env,
             vec![("CODEX_HOME".to_owned(), "/tmp/codex-home".to_owned())]
         );
+    }
+
+    #[test]
+    fn codex_resume_in_cwd_appends_cd_argument() {
+        let settings = Settings::default();
+        let homes = sample_homes();
+        let command = build_resume_in_cwd_command(
+            &sample_hit(Agent::Codex),
+            &settings,
+            &homes,
+            PathBuf::from("/tmp/aics-cwd"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            command.args,
+            vec!["--yolo", "resume", "session-123", "--cd", "/tmp/aics-cwd"]
+        );
+        assert_eq!(command.cwd, Some(PathBuf::from("/tmp/demo")));
+    }
+
+    #[test]
+    fn resume_in_cwd_rejects_claude_sessions() {
+        let settings = Settings::default();
+        let homes = sample_homes();
+        let error = build_resume_in_cwd_command(
+            &sample_hit(Agent::Claude),
+            &settings,
+            &homes,
+            PathBuf::from("/tmp/aics-cwd"),
+        )
+        .expect_err("Claude sessions should not support Resume in CLI in CWD");
+
+        assert!(format!("{error:#}").contains("only available for Codex sessions"));
     }
 
     #[test]

@@ -27,6 +27,24 @@ const REGULAR_ACTIONS: [ActionItem; 10] = [
     ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
 ];
 
+const REGULAR_CODEX_ACTIONS: [ActionItem; 11] = [
+    ActionItem::new(SessionAction::View, 'v', "View full conversation"),
+    ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
+    ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
+    ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
+    ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
+    ActionItem::new(SessionAction::CopyDir, 'o', "Copy session directory"),
+    ActionItem::new(SessionAction::Delete, 'd', "Move session to Trash"),
+    ActionItem::new(
+        SessionAction::DeleteImmediately,
+        'D',
+        "Delete session immediately",
+    ),
+    ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
+    ActionItem::new(SessionAction::ResumeInCwd, 'R', "Resume in CLI in CWD"),
+    ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
+];
+
 const TRASHED_ACTIONS: [ActionItem; 11] = [
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
@@ -45,23 +63,46 @@ const TRASHED_ACTIONS: [ActionItem; 11] = [
     ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
 ];
 
-fn actions(trashed: bool) -> &'static [ActionItem] {
-    if trashed {
+const TRASHED_CODEX_ACTIONS: [ActionItem; 12] = [
+    ActionItem::new(SessionAction::View, 'v', "View full conversation"),
+    ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
+    ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
+    ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
+    ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
+    ActionItem::new(SessionAction::CopyDir, 'o', "Copy session directory"),
+    ActionItem::new(SessionAction::UndoTrash, 'u', "Undo trash"),
+    ActionItem::new(SessionAction::Delete, 'd', "Delete from Trash"),
+    ActionItem::new(
+        SessionAction::DeleteImmediately,
+        'D',
+        "Delete session immediately",
+    ),
+    ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
+    ActionItem::new(SessionAction::ResumeInCwd, 'R', "Resume in CLI in CWD"),
+    ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
+];
+
+fn actions(trashed: bool, codex: bool) -> &'static [ActionItem] {
+    if trashed && codex {
+        &TRASHED_CODEX_ACTIONS
+    } else if trashed {
         &TRASHED_ACTIONS
+    } else if codex {
+        &REGULAR_CODEX_ACTIONS
     } else {
         &REGULAR_ACTIONS
     }
 }
 
-pub fn action_for_key(ch: char, trashed: bool) -> Option<SessionAction> {
-    actions(trashed)
+pub fn action_for_key(ch: char, trashed: bool, codex: bool) -> Option<SessionAction> {
+    actions(trashed, codex)
         .iter()
         .find(|item| item.key == ch)
         .map(|item| item.action)
 }
 
-pub fn action_at(index: usize, trashed: bool) -> Option<SessionAction> {
-    actions(trashed).get(index).map(|item| item.action)
+pub fn action_at(index: usize, trashed: bool, codex: bool) -> Option<SessionAction> {
+    actions(trashed, codex).get(index).map(|item| item.action)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +117,7 @@ pub enum SessionAction {
     Delete,
     DeleteImmediately,
     Resume,
+    ResumeInCwd,
     Fork,
 }
 
@@ -83,6 +125,7 @@ pub enum SessionAction {
 pub struct ActionMenuState {
     pub selected: RingCursor<SessionAction>,
     trashed: bool,
+    codex: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -100,9 +143,19 @@ impl Default for ActionMenuState {
 
 impl ActionMenuState {
     pub fn new(trashed: bool) -> Self {
+        Self::for_session(trashed, false)
+    }
+
+    pub fn for_session(trashed: bool, codex: bool) -> Self {
         Self {
-            selected: RingCursor::new(actions(trashed).iter().map(|item| item.action).collect()),
+            selected: RingCursor::new(
+                actions(trashed, codex)
+                    .iter()
+                    .map(|item| item.action)
+                    .collect(),
+            ),
             trashed,
+            codex,
         }
     }
 
@@ -118,7 +171,7 @@ impl ActionMenuState {
                 self.selected.move_next();
                 ActionOutcome::Stay
             }
-            KeyCode::Char(ch) => action_for_key(ch, self.trashed)
+            KeyCode::Char(ch) => action_for_key(ch, self.trashed, self.codex)
                 .map(ActionOutcome::Run)
                 .unwrap_or(ActionOutcome::Stay),
             _ => ActionOutcome::Stay,
@@ -148,7 +201,7 @@ impl ActionMenuState {
         .split(inner);
 
         // List (no block — border lives on the outer block above)
-        let items = actions(self.trashed)
+        let items = actions(self.trashed, self.codex)
             .iter()
             .map(|item| {
                 ListItem::new(Line::from(vec![
@@ -200,9 +253,17 @@ impl ActionMenuState {
     }
 
     pub fn select_index(&mut self, index: usize) {
-        if let Some(action) = action_at(index, self.trashed) {
+        if let Some(action) = self.action_at(index) {
             self.selected.set(&action);
         }
+    }
+
+    pub fn action_at(&self, index: usize) -> Option<SessionAction> {
+        action_at(index, self.trashed, self.codex)
+    }
+
+    pub fn action_count(&self) -> usize {
+        actions(self.trashed, self.codex).len()
     }
 
     pub fn trashed(&self) -> bool {
@@ -240,13 +301,13 @@ pub fn list_area(area: Rect) -> Rect {
     chunks[0]
 }
 
-pub fn index_at_row(area: Rect, row: u16, trashed: bool) -> Option<usize> {
+pub fn index_at_row(area: Rect, row: u16, action_count: usize) -> Option<usize> {
     let list = list_area(area);
     if row < list.y || row >= list.bottom() {
         return None;
     }
     let index = (row - list.y) as usize;
-    (index < actions(trashed).len()).then_some(index)
+    (index < action_count).then_some(index)
 }
 
 #[cfg(test)]
@@ -285,6 +346,21 @@ mod tests {
         assert!(matches!(
             outcome,
             ActionOutcome::Run(SessionAction::DeleteImmediately)
+        ));
+    }
+
+    #[test]
+    fn capital_r_only_runs_resume_in_cwd_for_codex_sessions() {
+        let mut regular = ActionMenuState::new(false);
+        let mut codex = ActionMenuState::for_session(false, true);
+
+        assert!(matches!(
+            regular.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
+            ActionOutcome::Stay
+        ));
+        assert!(matches!(
+            codex.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
+            ActionOutcome::Run(SessionAction::ResumeInCwd)
         ));
     }
 

@@ -174,6 +174,7 @@ interface AicsRuleSession {
   customTitle: string | null;
   model: string | null;
   modelProvider: string | null;
+  reasoningEffort: string | null;
   approvalPolicy: string | null;
   sandboxMode: string | null;
   trashed: boolean;
@@ -991,6 +992,7 @@ struct RuleSession {
     custom_title: Option<String>,
     model: Option<String>,
     model_provider: Option<String>,
+    reasoning_effort: Option<String>,
     approval_policy: Option<String>,
     sandbox_mode: Option<String>,
     trashed: bool,
@@ -1013,6 +1015,7 @@ impl RuleSession {
             custom_title: session.custom_title.clone(),
             model: info.and_then(|info| info.model.clone()),
             model_provider: info.and_then(|info| info.model_provider.clone()),
+            reasoning_effort: info.and_then(|info| info.reasoning_effort.clone()),
             approval_policy: info.and_then(|info| info.approval_policy.clone()),
             sandbox_mode: info.and_then(|info| info.sandbox_mode.clone()),
             trashed: file.trashed,
@@ -1252,6 +1255,7 @@ mod tests {
                 custom_title: None,
                 model: Some("test-spark".to_owned()),
                 model_provider: None,
+                reasoning_effort: None,
                 approval_policy: None,
                 sandbox_mode: None,
                 trashed: false,
@@ -1402,6 +1406,7 @@ mod tests {
                 custom_title: None,
                 model: Some("test-spark".to_owned()),
                 model_provider: None,
+                reasoning_effort: None,
                 approval_policy: None,
                 sandbox_mode: None,
                 trashed: false,
