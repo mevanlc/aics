@@ -32,14 +32,18 @@ impl Scope {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum SortMode {
     Relevance,
+    #[default]
     Time,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum TrashFilter {
+    #[default]
     No,
     Yes,
     Both,
@@ -55,19 +59,31 @@ impl TrashFilter {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SearchFilters {
+    #[serde(default)]
     pub agent: Option<Agent>,
+    #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
     pub branch: Option<String>,
+    #[serde(default)]
     pub after_ts: Option<u64>,
+    #[serde(default)]
     pub before_ts: Option<u64>,
+    #[serde(default)]
     pub min_lines: Option<usize>,
+    #[serde(default = "default_include_original")]
     pub include_original: bool,
+    #[serde(default = "default_include_trimmed")]
     pub include_trimmed: bool,
+    #[serde(default = "default_include_continued")]
     pub include_continued: bool,
+    #[serde(default)]
     pub include_sub_agents: bool,
+    #[serde(default)]
     pub live_only: bool,
+    #[serde(default)]
     pub trashed: TrashFilter,
 }
 
@@ -88,6 +104,18 @@ impl Default for SearchFilters {
             trashed: TrashFilter::No,
         }
     }
+}
+
+fn default_include_original() -> bool {
+    true
+}
+
+fn default_include_trimmed() -> bool {
+    true
+}
+
+fn default_include_continued() -> bool {
+    true
 }
 
 impl SearchFilters {

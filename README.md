@@ -96,7 +96,7 @@ Large transcript fields are fetched from Rust only when a rule calls one of the 
 | `↑` / `↓` | Move selection |
 | `PgUp` / `PgDn` | Scroll preview / viewer |
 | `⏎` | Open actions menu for selected session |
-| `^F` | Filters modal |
+| `^F` | Filters modal (`^S` inside the modal saves the current filter as the startup default) |
 | `^S` | Settings modal |
 | `^T` | Toggle preview panel |
 | `^Y` | Toggle session/summary preview mode |
@@ -146,6 +146,7 @@ Available options:
 - `snippet_line_count`
 - `summarize_command`
 - `summarize_prompt`
+- `default_filter`
 
 ## License
 

@@ -52,7 +52,7 @@ pub struct SettingsModalState {
 pub enum SettingsOutcome {
     Stay,
     Close,
-    Apply(Settings),
+    Apply(Box<Settings>),
 }
 
 impl SettingsModalState {
@@ -86,7 +86,7 @@ impl SettingsModalState {
         match key.code {
             KeyCode::Esc => return SettingsOutcome::Close,
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return SettingsOutcome::Apply(self.build_settings());
+                return SettingsOutcome::Apply(Box::new(self.build_settings()));
             }
             KeyCode::Tab => {
                 self.field.move_next();

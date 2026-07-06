@@ -43,7 +43,9 @@ use crate::rules::{
     apply_rule_proposals, RuleEvaluationError, RulePreviewMatch, RuleProposal, RulesReport,
 };
 use crate::scan::{AgentHomes, SessionRoots};
-use crate::settings::{DisplayOptions, Settings, SettingsPatch, ThemeName};
+use crate::settings::{
+    DefaultFilter, DefaultFilterScope, DisplayOptions, Settings, SettingsPatch, ThemeName,
+};
 use crate::summary::sidecar::sidecar_path;
 use crate::summary::staleness::fingerprint as compute_fingerprint;
 use crate::summary::{
@@ -53,7 +55,7 @@ use crate::summary::{
 use crate::trash::TrashStore;
 use crate::tui::actions::{self, ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::ansi::strip_terminal_escapes;
-use crate::tui::filter::{FilterModalState, FilterOutcome};
+use crate::tui::filter::{FilterModalState, FilterOutcome, FilterUpdate};
 use crate::tui::help::{HelpModalState, HelpOutcome, HelpTab};
 use crate::tui::profile;
 use crate::tui::rules_actions::{self, RulesAction, RulesActionMenuState, RulesActionOutcome};
@@ -1322,6 +1324,9 @@ impl App {
                         self.overlay = Overlay::None;
                         self.trigger_search_now()?;
                     }
+                    FilterOutcome::SaveDefault(update) => {
+                        self.save_default_filter(&update);
+                    }
                 }
             }
             Overlay::Actions(state) => match state.handle_key(key) {
@@ -1378,7 +1383,7 @@ impl App {
                 SettingsOutcome::Stay => {}
                 SettingsOutcome::Close => self.overlay = Overlay::None,
                 SettingsOutcome::Apply(new_settings) => {
-                    self.apply_settings(new_settings)?;
+                    self.apply_settings(*new_settings)?;
                     self.overlay = Overlay::None;
                 }
             },
@@ -1561,6 +1566,9 @@ impl App {
                         self.overlay = Overlay::None;
                         self.trigger_search_now()?;
                     }
+                    FilterOutcome::SaveDefault(update) => {
+                        self.save_default_filter(&update);
+                    }
                 }
             }
             Overlay::Viewer(state) => {
@@ -1671,7 +1679,7 @@ impl App {
                     SettingsOutcome::Stay => {}
                     SettingsOutcome::Close => self.overlay = Overlay::None,
                     SettingsOutcome::Apply(new_settings) => {
-                        self.apply_settings(new_settings)?;
+                        self.apply_settings(*new_settings)?;
                         self.overlay = Overlay::None;
                     }
                 }
@@ -2134,6 +2142,27 @@ impl App {
             self.statusline = Some(statusline::Entry::completed("settings saved"));
         }
         Ok(())
+    }
+
+    fn save_default_filter(&mut self, update: &FilterUpdate) {
+        let default_filter = DefaultFilter {
+            scope: if matches!(update.scope, Scope::Global) {
+                DefaultFilterScope::Global
+            } else {
+                DefaultFilterScope::Local
+            },
+            sort: update.sort,
+            filters: update.filters.clone(),
+        };
+        let patch = SettingsPatch::default_filter(default_filter);
+        patch.apply_to(&mut self.settings);
+        if let Err(err) = Settings::save_patch(&patch) {
+            self.statusline = Some(statusline::Entry::failed(format!(
+                "settings error: {err:#}"
+            )));
+        } else {
+            self.statusline = Some(statusline::Entry::completed("default filter saved"));
+        }
     }
 
     fn open_filters(&mut self) {

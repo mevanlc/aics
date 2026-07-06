@@ -20,7 +20,7 @@ use aics::rules::{
     default_rules_path, print_report, run_rules, write_default_rules_dts, RulesMode, RulesOptions,
 };
 use aics::scan::ResolvedPaths;
-use aics::settings::{config_dir, Settings};
+use aics::settings::{config_dir, DefaultFilter, DefaultFilterScope, Settings};
 use aics::tui::theme::{PaletteEntry, Theme};
 use aics::tui::{run_app, run_rules_preview_app};
 
@@ -111,10 +111,9 @@ struct Cli {
     #[arg(
         long = "trashed",
         value_enum,
-        default_value_t = CliTrashFilter::No,
         help = "Search trashed sessions: no, yes, or both"
     )]
-    trashed: CliTrashFilter,
+    trashed: Option<CliTrashFilter>,
     #[arg(
         long = "json",
         help = "Print JSONL hits or rule records to stdout instead of launching the interactive TUI"
@@ -152,10 +151,9 @@ struct Cli {
     #[arg(
         long = "sort-by",
         value_enum,
-        default_value_t = CliSort::Time,
         help = "Order results by time or text relevance"
     )]
-    sort_by: CliSort,
+    sort_by: Option<CliSort>,
     #[arg(
         long = "rebuild-index",
         help = "Rebuild the local search index before searching"
@@ -339,6 +337,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    let mut request = request;
+    apply_default_filter_to_request(&mut request, &cli, settings.default_filter.as_ref());
+
     run_app(
         manager,
         search_engine,
@@ -459,7 +460,7 @@ fn build_request(cli: &Cli) -> Result<SearchRequest> {
         query: cli.query.clone().unwrap_or_default(),
         scope,
         limit: cli.num_results.max(1),
-        sort: cli.sort_by.into(),
+        sort: cli.sort_by.unwrap_or(CliSort::Time).into(),
         filters: SearchFilters {
             agent: cli.agent.as_deref().and_then(parse_agent_arg),
             session_id: cli.session.as_deref().and_then(optional_cli_string),
@@ -472,9 +473,73 @@ fn build_request(cli: &Cli) -> Result<SearchRequest> {
             include_continued: !cli.no_rollover,
             include_sub_agents: cli.sub_agent,
             live_only: cli.live,
-            trashed: cli.trashed.into(),
+            trashed: cli.trashed.unwrap_or(CliTrashFilter::No).into(),
         },
     })
+}
+
+fn apply_default_filter_to_request(
+    request: &mut SearchRequest,
+    cli: &Cli,
+    default_filter: Option<&DefaultFilter>,
+) {
+    let Some(default_filter) = default_filter else {
+        return;
+    };
+
+    if !cli.global
+        && cli.dir.is_none()
+        && matches!(default_filter.scope, DefaultFilterScope::Global)
+    {
+        request.scope = Scope::Global;
+    }
+
+    if cli.sort_by.is_none() {
+        request.sort = default_filter.sort;
+    }
+
+    if cli.agent.is_none() {
+        request.filters.agent = default_filter.filters.agent;
+    }
+    if cli.session.is_none() {
+        request.filters.session_id = default_filter.filters.session_id.clone();
+    }
+    if cli.branch.is_none() && !dir_arg_has_branch(cli.dir.as_deref()) {
+        request.filters.branch = default_filter.filters.branch.clone();
+    }
+    if cli.after.is_none() {
+        request.filters.after_ts = default_filter.filters.after_ts;
+    }
+    if cli.before.is_none() {
+        request.filters.before_ts = default_filter.filters.before_ts;
+    }
+    if cli.min_lines.is_none() {
+        request.filters.min_lines = default_filter.filters.min_lines;
+    }
+    if !cli.no_original {
+        request.filters.include_original = default_filter.filters.include_original;
+    }
+    if !cli.no_trimmed {
+        request.filters.include_trimmed = default_filter.filters.include_trimmed;
+    }
+    if !cli.no_rollover {
+        request.filters.include_continued = default_filter.filters.include_continued;
+    }
+    if !cli.sub_agent {
+        request.filters.include_sub_agents = default_filter.filters.include_sub_agents;
+    }
+    if !cli.live {
+        request.filters.live_only = default_filter.filters.live_only;
+    }
+    if cli.trashed.is_none() {
+        request.filters.trashed = default_filter.filters.trashed;
+    }
+}
+
+fn dir_arg_has_branch(raw_dir: Option<&str>) -> bool {
+    raw_dir
+        .and_then(|raw_dir| parse_dir_arg(raw_dir).1)
+        .is_some()
 }
 
 fn scope_from_cli(cli: &Cli) -> Result<(Scope, Option<String>)> {
@@ -782,12 +847,14 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        build_request, palette_pairs, parse_after_date, parse_before_date, parse_dir_arg,
-        render_palettes, rules_mode, validate_terminal_mode, Cli, CliProgress,
+        apply_default_filter_to_request, build_request, palette_pairs, parse_after_date,
+        parse_before_date, parse_dir_arg, render_palettes, rules_mode, validate_terminal_mode, Cli,
+        CliProgress,
     };
-    use aics::index::{Scope, SortMode};
+    use aics::index::{Scope, SearchFilters, SortMode, TrashFilter};
     use aics::parse::Agent;
     use aics::rules::RulesMode;
+    use aics::settings::{DefaultFilter, DefaultFilterScope};
     use aics::tui::theme::Theme;
 
     #[test]
@@ -855,6 +922,68 @@ mod tests {
 
         assert_eq!(request.query, "deploy");
         assert_eq!(request.sort, SortMode::Relevance);
+    }
+
+    #[test]
+    fn saved_default_filter_applies_to_interactive_request() {
+        let cli = Cli::parse_from(["aics", "deploy"]);
+        let mut request = build_request(&cli).unwrap();
+        let default_filter = DefaultFilter {
+            scope: DefaultFilterScope::Global,
+            sort: SortMode::Relevance,
+            filters: SearchFilters {
+                agent: Some(Agent::Codex),
+                branch: Some("main".to_owned()),
+                include_trimmed: false,
+                include_sub_agents: true,
+                trashed: TrashFilter::Both,
+                ..SearchFilters::default()
+            },
+        };
+
+        apply_default_filter_to_request(&mut request, &cli, Some(&default_filter));
+
+        assert!(matches!(request.scope, Scope::Global));
+        assert_eq!(request.sort, SortMode::Relevance);
+        assert_eq!(request.filters.agent, Some(Agent::Codex));
+        assert_eq!(request.filters.branch.as_deref(), Some("main"));
+        assert!(!request.filters.include_trimmed);
+        assert!(request.filters.include_sub_agents);
+        assert_eq!(request.filters.trashed, TrashFilter::Both);
+    }
+
+    #[test]
+    fn cli_filter_flags_override_saved_default_filter() {
+        let cli = Cli::parse_from([
+            "aics",
+            "--dir",
+            "/tmp/demo:feature",
+            "--agent",
+            "claude",
+            "--sort-by",
+            "time",
+            "--sub-agent",
+            "deploy",
+        ]);
+        let mut request = build_request(&cli).unwrap();
+        let default_filter = DefaultFilter {
+            scope: DefaultFilterScope::Global,
+            sort: SortMode::Relevance,
+            filters: SearchFilters {
+                agent: Some(Agent::Codex),
+                branch: Some("main".to_owned()),
+                include_sub_agents: false,
+                ..SearchFilters::default()
+            },
+        };
+
+        apply_default_filter_to_request(&mut request, &cli, Some(&default_filter));
+
+        assert!(matches!(request.scope, Scope::CurrentDir(..)));
+        assert_eq!(request.sort, SortMode::Time);
+        assert_eq!(request.filters.agent, Some(Agent::Claude));
+        assert_eq!(request.filters.branch.as_deref(), Some("feature"));
+        assert!(request.filters.include_sub_agents);
     }
 
     #[test]

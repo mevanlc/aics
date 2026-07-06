@@ -79,7 +79,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 21] = [
     HelpItem::new(
         "^F",
         "filters",
-        "Open the filter modal to change scope, agent, branch, date range, derivation toggles, live-only mode, and sort order.",
+        "Open the filter modal to change scope, agent, branch, date range, derivation toggles, live-only mode, and sort order. In the filter modal, ^S saves the current filter as the startup default.",
     ),
     HelpItem::new(
         "^G",

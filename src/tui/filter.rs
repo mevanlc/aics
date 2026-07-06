@@ -84,6 +84,7 @@ pub struct FilterUpdate {
 pub enum FilterOutcome {
     Stay,
     Apply(FilterUpdate),
+    SaveDefault(FilterUpdate),
     Close,
 }
 
@@ -120,6 +121,9 @@ impl FilterModalState {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
             *self = Self::new(local_scope, &SearchFilters::default(), SortMode::Time);
             return Ok(FilterOutcome::Stay);
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+            return Ok(FilterOutcome::SaveDefault(self.build_update(local_scope)?));
         }
         if let Some(field) = self.mnemonic_target(key) {
             self.selected.set(&field);
@@ -238,9 +242,9 @@ impl FilterModalState {
         const FILTER_HINTS: [KeymapHint; 6] = [
             KeymapHint::new("Enter", "apply"),
             KeymapHint::new("Esc", "close"),
+            KeymapHint::new("^S", "save"),
             KeymapHint::new("^R", "reset"),
             KeymapHint::new("←/→", "toggle"),
-            KeymapHint::new("↑↓", "move"),
             KeymapHint::new("letter", "jump"),
         ];
 
@@ -630,6 +634,34 @@ mod tests {
 
         let update = state.build_update(&scope).unwrap();
         assert_eq!(update.sort, SortMode::Time);
+    }
+
+    #[test]
+    fn ctrl_s_requests_save_default_filter() {
+        let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
+        let mut state = FilterModalState::new(
+            &scope,
+            &SearchFilters {
+                branch: Some("main".to_owned()),
+                ..SearchFilters::default()
+            },
+            SortMode::Relevance,
+        );
+
+        let outcome = state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                &scope,
+            )
+            .unwrap();
+
+        match outcome {
+            super::FilterOutcome::SaveDefault(update) => {
+                assert_eq!(update.filters.branch.as_deref(), Some("main"));
+                assert_eq!(update.sort, SortMode::Relevance);
+            }
+            other => panic!("expected save-default outcome, got {other:?}"),
+        }
     }
 
     #[test]

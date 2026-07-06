@@ -6,6 +6,7 @@ use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::index::{SearchFilters, SortMode};
 use crate::summary::prompt::DEFAULT_PROMPT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -62,6 +63,8 @@ pub struct Settings {
     pub summarize_prompt: String,
     #[serde(default)]
     pub display_options: DisplayOptions,
+    #[serde(default)]
+    pub default_filter: Option<DefaultFilter>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +81,24 @@ pub struct DisplayOptions {
     pub hide_project_docs_autodump: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultFilter {
+    #[serde(default)]
+    pub scope: DefaultFilterScope,
+    #[serde(default)]
+    pub sort: SortMode,
+    #[serde(default)]
+    pub filters: SearchFilters,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DefaultFilterScope {
+    #[default]
+    Local,
+    Global,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SettingsPatch {
     theme: Option<ThemeName>,
@@ -92,6 +113,7 @@ pub struct SettingsPatch {
     summarize_command: Option<String>,
     summarize_prompt: Option<String>,
     display_options: Option<DisplayOptions>,
+    default_filter: Option<Option<DefaultFilter>>,
 }
 
 impl SettingsPatch {
@@ -121,6 +143,13 @@ impl SettingsPatch {
     pub fn display_options(display_options: DisplayOptions) -> Self {
         Self {
             display_options: Some(display_options),
+            ..Self::default()
+        }
+    }
+
+    pub fn default_filter(default_filter: DefaultFilter) -> Self {
+        Self {
+            default_filter: Some(Some(default_filter)),
             ..Self::default()
         }
     }
@@ -161,6 +190,9 @@ impl SettingsPatch {
         }
         if let Some(value) = self.display_options {
             settings.display_options = value;
+        }
+        if let Some(value) = self.default_filter.as_ref() {
+            settings.default_filter.clone_from(value);
         }
     }
 }
@@ -232,6 +264,7 @@ impl Default for Settings {
             summarize_command: String::new(),
             summarize_prompt: default_summarize_prompt(),
             display_options: DisplayOptions::default(),
+            default_filter: None,
         }
     }
 }
@@ -371,6 +404,7 @@ const SETTINGS_FIELD_NAMES: &[&str] = &[
     "summarize_command",
     "summarize_prompt",
     "display_options",
+    "default_filter",
 ];
 
 fn settings_path() -> Result<PathBuf> {
@@ -506,6 +540,41 @@ mod tests {
         assert!(!saved.show_preview);
         assert_eq!(saved.preview_width_pct, 65);
         assert!(saved.display_options.hide_agent_replies);
+    }
+
+    #[test]
+    fn default_filter_patch_preserves_other_settings() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        let disk = Settings {
+            theme: ThemeName::Sunset,
+            show_preview: false,
+            preview_width_pct: 65,
+            ..Settings::default()
+        };
+        Settings::save_to_path(&path, &disk).unwrap();
+
+        let default_filter = DefaultFilter {
+            scope: DefaultFilterScope::Global,
+            sort: SortMode::Relevance,
+            filters: SearchFilters {
+                branch: Some("main".to_owned()),
+                include_sub_agents: true,
+                ..SearchFilters::default()
+            },
+        };
+        Settings::save_patch_to_path(&path, &SettingsPatch::default_filter(default_filter))
+            .unwrap();
+
+        let saved = Settings::load_from_path(&path).unwrap();
+        assert_eq!(saved.theme, ThemeName::Sunset);
+        assert!(!saved.show_preview);
+        assert_eq!(saved.preview_width_pct, 65);
+        let saved_filter = saved.default_filter.expect("default filter saved");
+        assert_eq!(saved_filter.scope, DefaultFilterScope::Global);
+        assert_eq!(saved_filter.sort, SortMode::Relevance);
+        assert_eq!(saved_filter.filters.branch.as_deref(), Some("main"));
+        assert!(saved_filter.filters.include_sub_agents);
     }
 
     #[test]
