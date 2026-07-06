@@ -1191,6 +1191,27 @@ impl TemplatePicker {
         }
     }
 
+    fn adjust_field(&mut self, field: TemplatePickerField, forward: bool) {
+        match field {
+            TemplatePickerField::Shell => {
+                if forward {
+                    self.shell.move_next();
+                } else {
+                    self.shell.move_prev();
+                }
+            }
+            TemplatePickerField::Backend => {
+                if forward {
+                    self.backend.move_next();
+                } else {
+                    self.backend.move_prev();
+                }
+            }
+            TemplatePickerField::Model => self.move_model(forward),
+            TemplatePickerField::Effort => self.move_effort(forward),
+        }
+    }
+
     fn forward_to_input(&mut self, key: KeyEvent, which: TemplatePickerField) {
         if !matches!(*self.backend.current(), SummarizeBackend::Codex) {
             return;
@@ -1238,26 +1259,39 @@ impl TemplatePicker {
         }
 
         match key.code {
-            KeyCode::Left | KeyCode::Char('h') => match field {
-                TemplatePickerField::Shell => {
-                    self.shell.move_prev();
+            KeyCode::Left | KeyCode::Char('h') => self.adjust_field(field, false),
+            KeyCode::Right | KeyCode::Char('l') => self.adjust_field(field, true),
+            _ => {}
+        }
+        TemplatePickerOutcome::Stay
+    }
+
+    fn handle_mouse(
+        &mut self,
+        host: Rect,
+        kind: MouseEventKind,
+        column: u16,
+        row: u16,
+    ) -> TemplatePickerOutcome {
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(field) = template_picker_field_at(host, column, row) {
+                    self.field.set(&field);
+                    if !self.is_freeform_input_field(field) {
+                        self.adjust_field(field, true);
+                    }
                 }
-                TemplatePickerField::Backend => {
-                    self.backend.move_prev();
+            }
+            MouseEventKind::ScrollDown => {
+                if contains(template_picker_popup(host), column, row) {
+                    self.field.move_next();
                 }
-                TemplatePickerField::Model => self.move_model(false),
-                TemplatePickerField::Effort => self.move_effort(false),
-            },
-            KeyCode::Right | KeyCode::Char('l') => match field {
-                TemplatePickerField::Shell => {
-                    self.shell.move_next();
+            }
+            MouseEventKind::ScrollUp => {
+                if contains(template_picker_popup(host), column, row) {
+                    self.field.move_prev();
                 }
-                TemplatePickerField::Backend => {
-                    self.backend.move_next();
-                }
-                TemplatePickerField::Model => self.move_model(true),
-                TemplatePickerField::Effort => self.move_effort(true),
-            },
+            }
             _ => {}
         }
         TemplatePickerOutcome::Stay
@@ -1346,12 +1380,7 @@ impl TemplatePicker {
     /// Render the picker as a popup inset by 1 cell on each edge of `host`
     /// (the settings dialog rect).
     fn render(&self, frame: &mut Frame, host: Rect, theme: &Theme) {
-        let popup = Rect {
-            x: host.x.saturating_add(1),
-            y: host.y.saturating_add(1),
-            width: host.width.saturating_sub(2),
-            height: host.height.saturating_sub(2),
-        };
+        let popup = template_picker_popup(host);
         frame.render_widget(Clear, popup);
         let block = Block::default()
             .borders(Borders::ALL)
@@ -1361,21 +1390,7 @@ impl TemplatePicker {
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
 
-        let rows = Layout::vertical([
-            Constraint::Length(1), // 0 padding
-            Constraint::Length(1), // 1 shell
-            Constraint::Length(1), // 2 backend
-            Constraint::Length(1), // 3 model
-            Constraint::Length(1), // 4 effort
-            Constraint::Length(1), // 5 spacing
-            Constraint::Length(1), // 6 preview label
-            Constraint::Min(3),    // 7 preview
-            Constraint::Length(1), // 8 spacing
-            Constraint::Length(4), // 9 docs
-            Constraint::Length(1), // 10 divider
-            Constraint::Length(1), // 11 hints
-        ])
-        .split(inner);
+        let rows = template_picker_rows_from_inner(inner);
 
         let shell_focused = self.field == TemplatePickerField::Shell;
         let shell_line = inline_radio_row(
@@ -1445,6 +1460,52 @@ impl TemplatePicker {
         ];
         keymap_hint::render(frame, rows[11], &HINTS, theme, "");
     }
+}
+
+fn template_picker_popup(host: Rect) -> Rect {
+    Rect {
+        x: host.x.saturating_add(1),
+        y: host.y.saturating_add(1),
+        width: host.width.saturating_sub(2),
+        height: host.height.saturating_sub(2),
+    }
+}
+
+fn template_picker_rows(host: Rect) -> Vec<Rect> {
+    let popup = template_picker_popup(host);
+    let inner = Block::default().borders(Borders::ALL).inner(popup);
+    template_picker_rows_from_inner(inner)
+}
+
+fn template_picker_rows_from_inner(inner: Rect) -> Vec<Rect> {
+    Layout::vertical([
+        Constraint::Length(1), // 0 padding
+        Constraint::Length(1), // 1 shell
+        Constraint::Length(1), // 2 backend
+        Constraint::Length(1), // 3 model
+        Constraint::Length(1), // 4 effort
+        Constraint::Length(1), // 5 spacing
+        Constraint::Length(1), // 6 preview label
+        Constraint::Min(3),    // 7 preview
+        Constraint::Length(1), // 8 spacing
+        Constraint::Length(4), // 9 docs
+        Constraint::Length(1), // 10 divider
+        Constraint::Length(1), // 11 hints
+    ])
+    .split(inner)
+    .to_vec()
+}
+
+fn template_picker_field_at(host: Rect, column: u16, row: u16) -> Option<TemplatePickerField> {
+    let rows = template_picker_rows(host);
+    [
+        (1, TemplatePickerField::Shell),
+        (2, TemplatePickerField::Backend),
+        (3, TemplatePickerField::Model),
+        (4, TemplatePickerField::Effort),
+    ]
+    .into_iter()
+    .find_map(|(index, field)| contains(rows[index], column, row).then_some(field))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1538,17 +1599,49 @@ impl SummarizerModalState {
         column: u16,
         row: u16,
     ) -> SummarizerOutcome {
-        if self.picker.is_some() {
+        if let Some(picker) = self.picker.as_mut() {
+            match picker.handle_mouse(inset_popup(host), kind, column, row) {
+                TemplatePickerOutcome::Stay => {}
+                TemplatePickerOutcome::Cancel => {
+                    self.picker = None;
+                }
+                TemplatePickerOutcome::Insert(text) => {
+                    self.command_textarea = build_textarea(&text);
+                    self.picker = None;
+                }
+            }
             return SummarizerOutcome::Stay;
         }
 
-        if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
-            let rows = summarizer_rows(host);
-            if contains(rows[1], column, row) || contains(pad_rect(rows[2]), column, row) {
-                self.field.set(&SummarizerField::Command);
-            } else if contains(rows[4], column, row) || contains(pad_rect(rows[5]), column, row) {
-                self.field.set(&SummarizerField::Prompt);
+        let rows = summarizer_rows(host);
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if contains(rows[1], column, row) || contains(pad_rect(rows[2]), column, row) {
+                    self.field.set(&SummarizerField::Command);
+                } else if contains(rows[4], column, row) || contains(pad_rect(rows[5]), column, row)
+                {
+                    self.field.set(&SummarizerField::Prompt);
+                }
             }
+            MouseEventKind::ScrollDown => {
+                if contains(pad_rect(rows[2]), column, row) {
+                    self.field.set(&SummarizerField::Command);
+                    self.command_textarea.scroll((3, 0));
+                } else if contains(pad_rect(rows[5]), column, row) {
+                    self.field.set(&SummarizerField::Prompt);
+                    self.prompt_textarea.scroll((3, 0));
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if contains(pad_rect(rows[2]), column, row) {
+                    self.field.set(&SummarizerField::Command);
+                    self.command_textarea.scroll((-3, 0));
+                } else if contains(pad_rect(rows[5]), column, row) {
+                    self.field.set(&SummarizerField::Prompt);
+                    self.prompt_textarea.scroll((-3, 0));
+                }
+            }
+            _ => {}
         }
 
         SummarizerOutcome::Stay
@@ -1647,8 +1740,8 @@ mod tests {
     use ratatui::style::Style;
 
     use super::{
-        collapse_spaces, settings_popup_area, settings_rows, summarizer_rows, SettingsField,
-        SettingsModalState, SettingsOutcome, SummarizerModalState, TemplatePicker,
+        collapse_spaces, settings_popup_area, settings_rows, summarizer_rows, template_picker_rows,
+        SettingsField, SettingsModalState, SettingsOutcome, SummarizerModalState, TemplatePicker,
         TemplatePickerField, TemplateShell,
     };
     use crate::settings::{Settings, ThemeName};
@@ -1769,6 +1862,57 @@ mod tests {
         assert_eq!(*summarizer.field.current(), super::SummarizerField::Prompt);
         assert_eq!(summarizer.command_textarea.lines().join("\n"), "cmd");
         assert_eq!(summarizer.prompt_textarea.lines().join("\n"), "x");
+    }
+
+    #[test]
+    fn scrolling_summarizer_textarea_focuses_that_field() {
+        let mut summarizer =
+            SummarizerModalState::new("cmd", "one\ntwo\nthree\nfour\nfive\nsix\nseven");
+        let host = settings_popup_area(Rect::new(0, 0, 120, 40));
+        let rows = summarizer_rows(host);
+
+        summarizer.handle_mouse(host, MouseEventKind::ScrollDown, rows[5].x + 2, rows[5].y);
+        summarizer.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert_eq!(*summarizer.field.current(), super::SummarizerField::Prompt);
+        assert!(summarizer.prompt_textarea.lines().join("\n").contains('x'));
+    }
+
+    #[test]
+    fn clicking_template_picker_rows_focuses_and_cycles_values() {
+        let mut picker = TemplatePicker::new(TemplateShell::Zsh);
+        let host = Rect::new(10, 5, 80, 30);
+        let rows = template_picker_rows(host);
+
+        picker.handle_mouse(
+            host,
+            MouseEventKind::Down(MouseButton::Left),
+            rows[2].x,
+            rows[2].y,
+        );
+
+        assert_eq!(*picker.field.current(), TemplatePickerField::Backend);
+        assert!(picker.backend == SummarizeBackend::Codex);
+    }
+
+    #[test]
+    fn summarizer_routes_mouse_to_template_picker() {
+        let mut summarizer = SummarizerModalState::new("cmd", "");
+        let settings_popup = settings_popup_area(Rect::new(0, 0, 120, 40));
+        summarizer.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        let picker_host = super::inset_popup(settings_popup);
+        let rows = template_picker_rows(picker_host);
+
+        summarizer.handle_mouse(
+            settings_popup,
+            MouseEventKind::Down(MouseButton::Left),
+            rows[2].x,
+            rows[2].y,
+        );
+
+        let picker = summarizer.picker.as_ref().expect("picker stays open");
+        assert_eq!(*picker.field.current(), TemplatePickerField::Backend);
+        assert!(picker.backend == SummarizeBackend::Codex);
     }
 
     #[test]
