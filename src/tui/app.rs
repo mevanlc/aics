@@ -83,9 +83,9 @@ const PANEL_MOUSE_SCROLL_STEP: usize = 3;
 const PREVIEW_WIDTH_MIN: u16 = 25;
 const PREVIEW_WIDTH_MAX: u16 = 75;
 const LIST_DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
-const CLAUDE_SETCWD_TOOL: &str = "cc-session-setcwd";
-const CLAUDE_SETCWD_INSTALL_MESSAGE: &str =
-    "Install cc-session-setcwd to enable \"in CWD\" resume for Claude Code.";
+const CLAUDE_CWD_TOOL: &str = "cc-session-cwd";
+const CLAUDE_CWD_INSTALL_MESSAGE: &str =
+    "Install cc-session-cwd to enable \"in CWD\" resume for Claude Code.";
 
 #[derive(Debug, Clone, Copy)]
 struct PendingListClick {
@@ -3700,17 +3700,21 @@ fn build_resume_in_cwd_command(
     homes: &AgentHomes,
     process_cwd: PathBuf,
 ) -> std::result::Result<ExternalCommand, ResumeErrorDialog> {
-    build_resume_in_cwd_command_with_setcwd(hit, settings, homes, process_cwd, |session_id, cwd| {
-        run_claude_setcwd_tool(CLAUDE_SETCWD_TOOL, session_id, cwd)
-    })
+    build_resume_in_cwd_command_with_cwd_tool(
+        hit,
+        settings,
+        homes,
+        process_cwd,
+        |session_id, cwd| run_claude_cwd_tool(CLAUDE_CWD_TOOL, session_id, cwd),
+    )
 }
 
-fn build_resume_in_cwd_command_with_setcwd<F>(
+fn build_resume_in_cwd_command_with_cwd_tool<F>(
     hit: &SearchHit,
     settings: &Settings,
     homes: &AgentHomes,
     process_cwd: PathBuf,
-    setcwd: F,
+    set_cwd: F,
 ) -> std::result::Result<ExternalCommand, ResumeErrorDialog>
 where
     F: FnOnce(&str, &Path) -> std::result::Result<(), ResumeErrorDialog>,
@@ -3719,7 +3723,7 @@ where
         Agent::Codex => build_resume_command_with_cd(hit, settings, homes, Some(process_cwd))
             .map_err(resume_error_from_anyhow),
         Agent::Claude => {
-            setcwd(&hit.session.session_id, &process_cwd)?;
+            set_cwd(&hit.session.session_id, &process_cwd)?;
             let mut command = build_resume_command_with_cd(hit, settings, homes, None)
                 .map_err(resume_error_from_anyhow)?;
             command.cwd = Some(process_cwd);
@@ -3775,42 +3779,43 @@ fn build_resume_command_with_cd(
     Ok(command)
 }
 
-fn run_claude_setcwd_tool(
+fn run_claude_cwd_tool(
     program: &str,
     session_id: &str,
     process_cwd: &Path,
 ) -> std::result::Result<(), ResumeErrorDialog> {
     match Command::new(program)
+        .arg("set")
         .arg(session_id)
         .arg(process_cwd)
         .output()
     {
         Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => Err(claude_setcwd_failed_dialog(
+        Ok(output) => Err(claude_cwd_failed_dialog(
             output.status,
             &output.stdout,
             &output.stderr,
         )),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Err(ResumeErrorDialog {
-            title: "Claude Code CWD resume requires cc-session-setcwd".to_owned(),
-            body: CLAUDE_SETCWD_INSTALL_MESSAGE.to_owned(),
+            title: "Claude Code CWD resume requires cc-session-cwd".to_owned(),
+            body: CLAUDE_CWD_INSTALL_MESSAGE.to_owned(),
         }),
         Err(error) => Err(ResumeErrorDialog {
-            title: "Failed to run cc-session-setcwd".to_owned(),
-            body: format!("failed to run {CLAUDE_SETCWD_TOOL}: {error}"),
+            title: "Failed to run cc-session-cwd".to_owned(),
+            body: format!("failed to run {CLAUDE_CWD_TOOL}: {error}"),
         }),
     }
 }
 
-fn claude_setcwd_failed_dialog(
+fn claude_cwd_failed_dialog(
     status: std::process::ExitStatus,
     stdout: &[u8],
     stderr: &[u8],
 ) -> ResumeErrorDialog {
     ResumeErrorDialog {
-        title: "cc-session-setcwd failed".to_owned(),
+        title: "cc-session-cwd failed".to_owned(),
         body: format!(
-            "cc-session-setcwd exited with status {status}.\n\nstdout:\n{}\n\nstderr:\n{}",
+            "cc-session-cwd set exited with status {status}.\n\nstdout:\n{}\n\nstderr:\n{}",
             resume_output_text(stdout),
             resume_output_text(stderr)
         ),
@@ -4000,10 +4005,10 @@ mod tests {
 
     use super::{
         build_fork_command, build_resume_command, build_resume_in_cwd_command,
-        build_resume_in_cwd_command_with_setcwd, claude_setcwd_failed_dialog,
-        export_stem_for_session, finalize_run_result, run_claude_setcwd_tool, write_session_export,
+        build_resume_in_cwd_command_with_cwd_tool, claude_cwd_failed_dialog,
+        export_stem_for_session, finalize_run_result, run_claude_cwd_tool, write_session_export,
         ActionMenuState, App, AppExit, RulesPreviewState, SearchResponse, SearchWorker,
-        ViewMenuState, CLAUDE_SETCWD_INSTALL_MESSAGE, PAGE_STEP,
+        ViewMenuState, CLAUDE_CWD_INSTALL_MESSAGE, PAGE_STEP,
     };
     use crate::scan::{AgentHomes, SessionRoots};
     use crate::summary::{
@@ -4064,7 +4069,7 @@ mod tests {
         let homes = sample_homes();
         let mut called = None::<(String, PathBuf)>;
 
-        let command = build_resume_in_cwd_command_with_setcwd(
+        let command = build_resume_in_cwd_command_with_cwd_tool(
             &sample_hit(Agent::Claude),
             &settings,
             &homes,
@@ -4095,9 +4100,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_claude_setcwd_tool_reports_install_instruction() {
-        let error = run_claude_setcwd_tool(
-            "cc-session-setcwd-aics-test-missing",
+    fn missing_claude_cwd_tool_reports_install_instruction() {
+        let error = run_claude_cwd_tool(
+            "cc-session-cwd-aics-test-missing",
             "session-123",
             PathBuf::from("/tmp/aics-cwd").as_path(),
         )
@@ -4105,24 +4110,53 @@ mod tests {
 
         assert_eq!(
             error.title,
-            "Claude Code CWD resume requires cc-session-setcwd"
+            "Claude Code CWD resume requires cc-session-cwd"
         );
-        assert_eq!(error.body, CLAUDE_SETCWD_INSTALL_MESSAGE);
+        assert_eq!(error.body, CLAUDE_CWD_INSTALL_MESSAGE);
     }
 
     #[test]
     #[cfg(unix)]
-    fn claude_setcwd_failure_dialog_includes_stdout_and_stderr() {
+    fn claude_cwd_tool_invokes_set_subcommand() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let script = dir.path().join("cc-session-cwd-fake");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nlog=\"$(dirname \"$0\")/argv.txt\"\nprintf '%s\\n' \"$@\" > \"$log\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        run_claude_cwd_tool(
+            script.to_str().unwrap(),
+            "session-123",
+            PathBuf::from("/tmp/aics-cwd").as_path(),
+        )
+        .unwrap();
+
+        let args = std::fs::read_to_string(dir.path().join("argv.txt")).unwrap();
+        assert_eq!(args, "set\nsession-123\n/tmp/aics-cwd\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn claude_cwd_failure_dialog_includes_stdout_and_stderr() {
         use std::os::unix::process::ExitStatusExt;
 
-        let dialog = claude_setcwd_failed_dialog(
+        let dialog = claude_cwd_failed_dialog(
             std::process::ExitStatus::from_raw(7 << 8),
             b"out line\n",
             b"err line\n",
         );
 
-        assert_eq!(dialog.title, "cc-session-setcwd failed");
-        assert!(dialog.body.contains("cc-session-setcwd exited with status"));
+        assert_eq!(dialog.title, "cc-session-cwd failed");
+        assert!(dialog
+            .body
+            .contains("cc-session-cwd set exited with status"));
         assert!(dialog.body.contains("stdout:\nout line\n"));
         assert!(dialog.body.contains("stderr:\nerr line\n"));
     }
