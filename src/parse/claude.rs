@@ -11,7 +11,7 @@ use super::session::{
     cells_from_messages, earliest_timestamp, fallback_session_id, first_message_fields,
     first_user_message, infer_derivation_type, last_message_fields, latest_timestamp,
     metadata_created, metadata_modified, modified_ts, nonempty_trimmed, push_tool_message,
-    push_unique_chunk, push_unique_message, Agent, MessageRole, Session,
+    push_unique_chunk, push_unique_message, Agent, MessageRole, Session, SessionInfo,
 };
 use super::tool_format;
 
@@ -37,6 +37,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
         .components()
         .any(|component| component.as_os_str() == "subagents");
     let mut custom_title = None::<String>;
+    let mut model = None::<String>;
     let mut messages = Vec::new();
     let mut content_chunks = Vec::new();
     let mut summary_chunks = Vec::new();
@@ -111,6 +112,13 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
                 let Some(message) = value.get("message") else {
                     continue;
                 };
+
+                if model.is_none() {
+                    model = message
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .and_then(nonempty_trimmed);
+                }
 
                 let is_meta = value
                     .get("isMeta")
@@ -188,6 +196,10 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
     let (first_msg_role, first_msg_content) = first_message_fields(&messages);
     let (last_msg_role, last_msg_content) = last_message_fields(&messages);
     let cells = cells_from_messages(&messages);
+    let session_info = model.map(|model| SessionInfo {
+        model: Some(model),
+        ..SessionInfo::default()
+    });
 
     Ok(Some(Session {
         session_id,
@@ -211,7 +223,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
         content: content_chunks.join("\n\n"),
         messages,
         cells,
-        session_info: None,
+        session_info,
     }))
 }
 
@@ -542,7 +554,7 @@ fn stringify_json(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_claude_text;
+    use super::{normalize_claude_text, parse_claude_session_file};
 
     #[test]
     fn normalizes_claude_local_command_wrappers() {
@@ -573,5 +585,25 @@ mod tests {
         assert_eq!(normalized, text.trim());
         assert!(normalized.contains("\n\n## Global Instructions\n\n"));
         assert!(normalized.contains("+</mxfile>\n```\n\n# Instructions"));
+    }
+
+    #[test]
+    fn parser_populates_first_nonempty_claude_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let body = concat!(
+            "{\"type\":\"user\",\"sessionId\":\"s1\",\"cwd\":\"/tmp/demo\",\"timestamp\":\"2026-07-01T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"cwd\":\"/tmp/demo\",\"timestamp\":\"2026-07-01T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"model\":\"   \",\"content\":[{\"type\":\"text\",\"text\":\"ignored blank model\"}]}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"cwd\":\"/tmp/demo\",\"timestamp\":\"2026-07-01T00:00:02Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[{\"type\":\"text\",\"text\":\"first real model\"}]}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"cwd\":\"/tmp/demo\",\"timestamp\":\"2026-07-01T00:00:03Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-4-7\",\"content\":[{\"type\":\"text\",\"text\":\"later model\"}]}}\n",
+        );
+        std::fs::write(&path, body).expect("write fixture");
+
+        let session = parse_claude_session_file(&path)
+            .expect("parse")
+            .expect("session");
+        let info = session.session_info.expect("session_info populated");
+
+        assert_eq!(info.model.as_deref(), Some("claude-sonnet-4-6"));
     }
 }
