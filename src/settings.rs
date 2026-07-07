@@ -1,7 +1,9 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+#[cfg(not(test))]
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -154,6 +156,51 @@ impl SettingsPatch {
         }
     }
 
+    /// Names of the fields this patch will write, for diagnostic logging.
+    fn field_names(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.theme.is_some() {
+            names.push("theme");
+        }
+        if self.claude_command.is_some() {
+            names.push("claude_command");
+        }
+        if self.claude_args.is_some() {
+            names.push("claude_args");
+        }
+        if self.codex_command.is_some() {
+            names.push("codex_command");
+        }
+        if self.codex_args.is_some() {
+            names.push("codex_args");
+        }
+        if self.show_preview.is_some() {
+            names.push("show_preview");
+        }
+        if self.preview_width_pct.is_some() {
+            names.push("preview_width_pct");
+        }
+        if self.session_separator.is_some() {
+            names.push("session_separator");
+        }
+        if self.snippet_line_count.is_some() {
+            names.push("snippet_line_count");
+        }
+        if self.summarize_command.is_some() {
+            names.push("summarize_command");
+        }
+        if self.summarize_prompt.is_some() {
+            names.push("summarize_prompt");
+        }
+        if self.display_options.is_some() {
+            names.push("display_options");
+        }
+        if self.default_filter.is_some() {
+            names.push("default_filter");
+        }
+        names
+    }
+
     pub fn apply_to(&self, settings: &mut Settings) {
         if let Some(value) = self.theme {
             settings.theme = value;
@@ -269,10 +316,67 @@ impl Default for Settings {
     }
 }
 
+/// Result of loading settings at startup: the settings to use plus an
+/// optional user-facing warning when the on-disk file had to be recovered.
+#[derive(Debug)]
+pub struct LoadedSettings {
+    pub settings: Settings,
+    pub warning: Option<String>,
+}
+
 impl Settings {
-    pub fn load() -> Result<Self> {
-        let path = settings_path()?;
-        Self::load_from_path(&path)
+    /// Load settings, recovering from a corrupt file instead of failing.
+    ///
+    /// A file that exists but cannot be read or parsed is moved aside to a
+    /// `settings.json.corrupt-<timestamp>` backup — never overwritten with
+    /// defaults — and defaults are returned along with a user-facing warning.
+    pub fn load_with_recovery() -> LoadedSettings {
+        match settings_path() {
+            Ok(path) => Self::load_with_recovery_from_path(&path),
+            Err(err) => {
+                let warning = format!("cannot locate settings: {err:#}");
+                settings_log(&format!("load: {warning}"));
+                LoadedSettings {
+                    settings: Self::default(),
+                    warning: Some(warning),
+                }
+            }
+        }
+    }
+
+    fn load_with_recovery_from_path(path: &Path) -> LoadedSettings {
+        if !path.exists() {
+            settings_log(&format!("load: {} missing, using defaults", path.display()));
+            return LoadedSettings {
+                settings: Self::default(),
+                warning: None,
+            };
+        }
+        match Self::load_from_path(path) {
+            Ok(settings) => {
+                settings_log(&format!("load: {} ok", path.display()));
+                LoadedSettings {
+                    settings,
+                    warning: None,
+                }
+            }
+            Err(err) => {
+                let warning = match backup_corrupt_settings(path) {
+                    Ok(backup) => format!(
+                        "settings reset to defaults ({err:#}); previous file kept at {}",
+                        backup.display()
+                    ),
+                    Err(backup_err) => {
+                        format!("settings unusable ({err:#}); backup also failed ({backup_err:#})")
+                    }
+                };
+                settings_log(&format!("load: {warning}"));
+                LoadedSettings {
+                    settings: Self::default(),
+                    warning: Some(warning),
+                }
+            }
+        }
     }
 
     fn load_from_path(path: &Path) -> Result<Self> {
@@ -297,30 +401,47 @@ impl Settings {
     }
 
     fn save_to_path(path: &Path, settings: &Self) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
         let contents = serde_json::to_string_pretty(settings)?;
-        fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
-        Ok(())
+        let result = write_atomic(path, &contents);
+        match &result {
+            Ok(()) => settings_log(&format!("save_full ok path={}", path.display())),
+            Err(err) => settings_log(&format!(
+                "save_full FAILED path={}: {err:#}",
+                path.display()
+            )),
+        }
+        result
     }
 
     fn save_patch_to_path(path: &Path, patch: &SettingsPatch) -> Result<Self> {
-        let raw = load_raw_settings(path)?;
-        let mut settings = raw
-            .as_ref()
-            .map(|value| {
-                serde_json::from_value(value.clone())
-                    .with_context(|| format!("failed to parse {}", path.display()))
-            })
-            .unwrap_or_else(|| Ok(Self::default()))?;
-        patch.apply_to(&mut settings);
+        let fields = patch.field_names().join(",");
+        let result = (|| {
+            let raw = load_raw_settings(path)?;
+            let mut settings = raw
+                .as_ref()
+                .map(|value| {
+                    serde_json::from_value(value.clone())
+                        .with_context(|| format!("failed to parse {}", path.display()))
+                })
+                .unwrap_or_else(|| Ok(Self::default()))?;
+            patch.apply_to(&mut settings);
 
-        let mut output = serde_json::to_value(&settings)?;
-        preserve_unknown_settings_fields(raw.as_ref(), &mut output);
-        write_settings_value(path, &output)?;
-        Ok(settings)
+            let mut output = serde_json::to_value(&settings)?;
+            preserve_unknown_settings_fields(raw.as_ref(), &mut output);
+            write_settings_value(path, &output)?;
+            Ok(settings)
+        })();
+        match &result {
+            Ok(_) => settings_log(&format!(
+                "save_patch ok fields=[{fields}] path={}",
+                path.display()
+            )),
+            Err(err) => settings_log(&format!(
+                "save_patch FAILED fields=[{fields}] path={}: {err:#}",
+                path.display()
+            )),
+        }
+        result
     }
 
     /// Split a command string into program and arguments.
@@ -367,13 +488,103 @@ fn load_raw_settings(path: &Path) -> Result<Option<Value>> {
 }
 
 fn write_settings_value(path: &Path, value: &Value) -> Result<()> {
+    let contents = serde_json::to_string_pretty(value)?;
+    write_atomic(path, &contents)
+}
+
+/// Write `contents` to `path` atomically: write a temp sibling, fsync, then
+/// rename over the destination so readers never observe a partial file.
+fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let contents = serde_json::to_string_pretty(value)?;
-    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(format!(".tmp-{}", std::process::id()));
+    let tmp_path = path.with_file_name(tmp_name);
+    let result = (|| -> std::io::Result<()> {
+        let mut file = fs::File::create(&tmp_path)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()
+    })()
+    .with_context(|| format!("failed to write {}", tmp_path.display()))
+    .and_then(|()| {
+        fs::rename(&tmp_path, path).with_context(|| format!("failed to replace {}", path.display()))
+    });
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+/// Move an unreadable/unparseable settings file aside so it is preserved for
+/// inspection and cannot be silently overwritten with defaults.
+fn backup_corrupt_settings(path: &Path) -> Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("settings.json");
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let mut candidate = path.with_file_name(format!("{file_name}.corrupt-{stamp}"));
+    let mut counter = 1;
+    while candidate.exists() {
+        counter += 1;
+        candidate = path.with_file_name(format!("{file_name}.corrupt-{stamp}-{counter}"));
+    }
+    fs::rename(path, &candidate)
+        .with_context(|| format!("failed to move {} aside", path.display()))?;
+    Ok(candidate)
+}
+
+/// When this env var is set to a file path, every settings load/save appends
+/// a diagnostic line there — an aid for tracking down unexpected resets.
+/// The process id is inserted into the filename so concurrent instances each
+/// log to their own file (`settings.log` becomes `settings.<pid>.log`).
+pub const SETTINGS_LOGFILE_ENV: &str = "AICS_SETTINGS_LOGFILE";
+
+fn settings_log(message: &str) {
+    let Ok(path) = std::env::var(SETTINGS_LOGFILE_ENV) else {
+        return;
+    };
+    if path.trim().is_empty() {
+        return;
+    }
+    append_settings_log(&per_pid_log_path(Path::new(&path)), message);
+}
+
+/// `settings.log` -> `settings.<pid>.log`; a name without an extension gets
+/// `.<pid>` appended.
+fn per_pid_log_path(base: &Path) -> PathBuf {
+    let pid = std::process::id();
+    let stem = base.file_stem().and_then(|stem| stem.to_str());
+    let ext = base.extension().and_then(|ext| ext.to_str());
+    match (stem, ext) {
+        (Some(stem), Some(ext)) => base.with_file_name(format!("{stem}.{pid}.{ext}")),
+        _ => {
+            let mut name = base.as_os_str().to_os_string();
+            name.push(format!(".{pid}"));
+            PathBuf::from(name)
+        }
+    }
+}
+
+/// Best-effort append; diagnostics must never break the app.
+fn append_settings_log(path: &Path, message: &str) {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = fs::create_dir_all(parent);
+        }
+    }
+    let line = format!(
+        "{} pid={} {message}\n",
+        chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f"),
+        std::process::id(),
+    );
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
 }
 
 fn preserve_unknown_settings_fields(raw: Option<&Value>, output: &mut Value) {
@@ -416,8 +627,32 @@ pub fn config_dir() -> Result<PathBuf> {
     if let Ok(val) = std::env::var("AICS_CONFIG_ROOT") {
         return Ok(PathBuf::from(val));
     }
-    let base_dirs = BaseDirs::new().context("failed to locate home directory")?;
-    Ok(default_config_dir(base_dirs.home_dir()))
+    // Unit tests run in-process with the developer's real environment; a test
+    // that reaches this fallback would read/write the real settings file.
+    #[cfg(test)]
+    panic!(
+        "unit test resolved the real config dir; \
+         call settings::isolate_config_root_for_tests() first"
+    );
+    #[cfg(not(test))]
+    {
+        let base_dirs = BaseDirs::new().context("failed to locate home directory")?;
+        Ok(default_config_dir(base_dirs.home_dir()))
+    }
+}
+
+/// Point `AICS_CONFIG_ROOT` at a process-lifetime temp dir so unit tests can
+/// never touch the developer's real settings file.
+#[cfg(test)]
+pub(crate) fn isolate_config_root_for_tests() {
+    use std::sync::Once;
+    static ISOLATE: Once = Once::new();
+    ISOLATE.call_once(|| {
+        let dir = tempfile::tempdir().expect("create temp config root for tests");
+        std::env::set_var("AICS_CONFIG_ROOT", dir.path());
+        // The root must outlive every test in the process.
+        std::mem::forget(dir);
+    });
 }
 
 fn default_config_dir(home: &Path) -> PathBuf {
@@ -433,8 +668,8 @@ mod tests {
     #[test]
     fn fresh_install_has_preview_pane_on() {
         // When a user launches aics for the first time (no config file yet),
-        // `load` is expected to return `Self::default()`, so this guards the
-        // contract "preview pane on by default" at that specific entry point.
+        // `load_with_recovery` is expected to return `Self::default()`, so this
+        // guards the contract "preview pane on by default" at that entry point.
         let settings = Settings::default();
         assert!(
             settings.show_preview,
@@ -624,5 +859,116 @@ mod tests {
         let json = r#"{"theme": "aics", "unknown_field": 42}"#;
         let settings: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(settings.theme, ThemeName::Aics);
+    }
+
+    #[test]
+    fn save_leaves_no_temp_files_behind() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+
+        Settings::save_to_path(&path, &Settings::default()).unwrap();
+        Settings::save_patch_to_path(&path, &SettingsPatch::layout(false, 50)).unwrap();
+
+        let names: Vec<String> = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, vec!["settings.json".to_owned()]);
+    }
+
+    #[test]
+    fn missing_settings_file_loads_defaults_without_warning() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+
+        let loaded = Settings::load_with_recovery_from_path(&path);
+
+        assert!(loaded.warning.is_none());
+        assert!(loaded.settings.show_preview);
+        assert!(!path.exists(), "load must not create the settings file");
+    }
+
+    #[test]
+    fn corrupt_settings_file_is_backed_up_not_destroyed() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        let garbage = "{ this is not json";
+        fs::write(&path, garbage).unwrap();
+
+        let loaded = Settings::load_with_recovery_from_path(&path);
+
+        assert_eq!(loaded.settings.theme, ThemeName::Lazygit);
+        let warning = loaded.warning.expect("corrupt settings must warn");
+        assert!(
+            warning.contains("previous file kept at"),
+            "warning must point at the backup: {warning}"
+        );
+        assert!(!path.exists(), "corrupt file must be moved aside");
+        let backup_name = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .find(|name| name.starts_with("settings.json.corrupt-"))
+            .expect("backup file must exist");
+        let backup_contents = fs::read_to_string(temp.path().join(backup_name)).unwrap();
+        assert_eq!(backup_contents, garbage);
+    }
+
+    #[test]
+    fn save_patch_refuses_to_overwrite_corrupt_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        let garbage = "{ this is not json";
+        fs::write(&path, garbage).unwrap();
+
+        let result = Settings::save_patch_to_path(&path, &SettingsPatch::layout(true, 40));
+
+        assert!(result.is_err(), "patching a corrupt file must fail");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            garbage,
+            "corrupt file must be left untouched"
+        );
+    }
+
+    #[test]
+    fn patch_field_names_reflect_set_fields() {
+        assert_eq!(
+            SettingsPatch::layout(true, 40).field_names(),
+            vec!["show_preview", "preview_width_pct"]
+        );
+        assert_eq!(
+            SettingsPatch::display_options(DisplayOptions::default()).field_names(),
+            vec!["display_options"]
+        );
+    }
+
+    #[test]
+    fn settings_log_appends_timestamped_lines() {
+        let temp = TempDir::new().unwrap();
+        // Nested, not-yet-existing directory: the logger must create it.
+        let log = temp.path().join("nested").join("dir").join("settings.log");
+
+        append_settings_log(&log, "first");
+        append_settings_log(&log, "second");
+
+        let contents = fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].ends_with("first"));
+        assert!(lines[1].ends_with("second"));
+        assert!(lines[0].contains(&format!("pid={}", std::process::id())));
+    }
+
+    #[test]
+    fn per_pid_log_path_inserts_pid_into_filename() {
+        let pid = std::process::id();
+        assert_eq!(
+            per_pid_log_path(Path::new("/tmp/settings.log")),
+            PathBuf::from(format!("/tmp/settings.{pid}.log"))
+        );
+        assert_eq!(
+            per_pid_log_path(Path::new("/tmp/settingslog")),
+            PathBuf::from(format!("/tmp/settingslog.{pid}"))
+        );
     }
 }

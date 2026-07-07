@@ -301,6 +301,7 @@ pub fn run_app(
     settings: Settings,
     homes: AgentHomes,
     roots: SessionRoots,
+    startup_warning: Option<String>,
 ) -> Result<()> {
     let worker = SearchWorker::spawn(search_engine)?;
     let summary_worker = SummaryWorker::spawn()?;
@@ -313,6 +314,9 @@ pub fn run_app(
         homes,
         roots,
     );
+    if let Some(warning) = startup_warning {
+        app.statusline = Some(statusline::Entry::failed(warning));
+    }
     match app.run()? {
         AppExit::Normal => Ok(()),
         AppExit::Handoff(command) => execute_handoff(command),
@@ -326,6 +330,7 @@ pub fn run_rules_preview_app(
     settings: Settings,
     homes: AgentHomes,
     roots: SessionRoots,
+    startup_warning: Option<String>,
 ) -> Result<()> {
     let summary_worker = SummaryWorker::spawn()?;
     let mut app = App::new_rules_preview(
@@ -337,6 +342,11 @@ pub fn run_rules_preview_app(
         homes,
         roots,
     );
+    if app.statusline.is_none() {
+        if let Some(warning) = startup_warning {
+            app.statusline = Some(statusline::Entry::failed(warning));
+        }
+    }
     match app.run()? {
         AppExit::Normal => Ok(()),
         AppExit::Handoff(command) => execute_handoff(command),
@@ -5551,6 +5561,7 @@ mod tests {
     }
 
     fn test_app_with_response_sender() -> (App, mpsc::Sender<SearchResponse>) {
+        crate::settings::isolate_config_root_for_tests();
         let temp = TempDir::new().unwrap();
         let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path()));
         let (request_tx, request_rx) = mpsc::channel();

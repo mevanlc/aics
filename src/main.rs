@@ -20,7 +20,7 @@ use aics::rules::{
     default_rules_path, print_report, run_rules, write_default_rules_dts, RulesMode, RulesOptions,
 };
 use aics::scan::ResolvedPaths;
-use aics::settings::{config_dir, DefaultFilter, DefaultFilterScope, Settings};
+use aics::settings::{config_dir, DefaultFilter, DefaultFilterScope, LoadedSettings, Settings};
 use aics::tui::theme::{PaletteEntry, Theme};
 use aics::tui::{run_app, run_rules_preview_app};
 
@@ -262,7 +262,13 @@ fn main() -> Result<()> {
         return Ok(());
     }
     validate_terminal_mode(&cli)?;
-    let settings = Settings::load().unwrap_or_default();
+    let LoadedSettings {
+        settings,
+        warning: settings_warning,
+    } = Settings::load_with_recovery();
+    if let Some(warning) = settings_warning.as_deref() {
+        eprintln!("aics: {warning}");
+    }
     manager.write_profile_metadata(&resolved_paths)?;
     let sync_outcome = if let Some(draw_target) = progress_draw_target(cli.progress, cli.json) {
         let mut progress = StartupProgress::new(draw_target);
@@ -316,6 +322,7 @@ fn main() -> Result<()> {
                 settings,
                 resolved_paths.homes,
                 resolved_paths.roots,
+                settings_warning,
             );
         }
 
@@ -347,6 +354,7 @@ fn main() -> Result<()> {
         settings,
         resolved_paths.homes,
         resolved_paths.roots,
+        settings_warning,
     )
 }
 
