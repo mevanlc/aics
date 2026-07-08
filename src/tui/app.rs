@@ -86,6 +86,9 @@ const LIST_DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 const CLAUDE_CWD_TOOL: &str = "cc-session-cwd";
 const CLAUDE_CWD_INSTALL_MESSAGE: &str =
     "Install cc-session-cwd to enable \"in CWD\" resume for Claude Code.";
+const CODEX_CWD_TOOL: &str = "cx-session-cwd";
+const CODEX_CWD_INSTALL_MESSAGE: &str =
+    "Install cx-session-cwd to enable \"in CWD\" resume for Codex CLI.";
 
 #[derive(Debug, Clone, Copy)]
 struct PendingListClick {
@@ -3701,7 +3704,7 @@ fn build_resume_command(
     settings: &Settings,
     homes: &AgentHomes,
 ) -> Result<ExternalCommand> {
-    build_resume_command_with_cd(hit, settings, homes, None)
+    build_resume_command_for_hit(hit, settings, homes)
 }
 
 fn build_resume_in_cwd_command(
@@ -3710,31 +3713,41 @@ fn build_resume_in_cwd_command(
     homes: &AgentHomes,
     process_cwd: PathBuf,
 ) -> std::result::Result<ExternalCommand, ResumeErrorDialog> {
-    build_resume_in_cwd_command_with_cwd_tool(
+    build_resume_in_cwd_command_with_cwd_tools(
         hit,
         settings,
         homes,
         process_cwd,
         |session_id, cwd| run_claude_cwd_tool(CLAUDE_CWD_TOOL, session_id, cwd),
+        |session_id, cwd, codex_home| {
+            run_codex_cwd_tool(CODEX_CWD_TOOL, session_id, cwd, codex_home)
+        },
     )
 }
 
-fn build_resume_in_cwd_command_with_cwd_tool<F>(
+fn build_resume_in_cwd_command_with_cwd_tools<C, X>(
     hit: &SearchHit,
     settings: &Settings,
     homes: &AgentHomes,
     process_cwd: PathBuf,
-    set_cwd: F,
+    set_claude_cwd: C,
+    set_codex_cwd: X,
 ) -> std::result::Result<ExternalCommand, ResumeErrorDialog>
 where
-    F: FnOnce(&str, &Path) -> std::result::Result<(), ResumeErrorDialog>,
+    C: FnOnce(&str, &Path) -> std::result::Result<(), ResumeErrorDialog>,
+    X: FnOnce(&str, &Path, &Path) -> std::result::Result<(), ResumeErrorDialog>,
 {
     match hit.session.agent {
-        Agent::Codex => build_resume_command_with_cd(hit, settings, homes, Some(process_cwd))
-            .map_err(resume_error_from_anyhow),
+        Agent::Codex => {
+            set_codex_cwd(&hit.session.session_id, &process_cwd, &homes.codex_home)?;
+            let mut command = build_resume_command_for_hit(hit, settings, homes)
+                .map_err(resume_error_from_anyhow)?;
+            command.cwd = Some(process_cwd);
+            Ok(command)
+        }
         Agent::Claude => {
-            set_cwd(&hit.session.session_id, &process_cwd)?;
-            let mut command = build_resume_command_with_cd(hit, settings, homes, None)
+            set_claude_cwd(&hit.session.session_id, &process_cwd)?;
+            let mut command = build_resume_command_for_hit(hit, settings, homes)
                 .map_err(resume_error_from_anyhow)?;
             command.cwd = Some(process_cwd);
             Ok(command)
@@ -3742,11 +3755,10 @@ where
     }
 }
 
-fn build_resume_command_with_cd(
+fn build_resume_command_for_hit(
     hit: &SearchHit,
     settings: &Settings,
     homes: &AgentHomes,
-    codex_cd: Option<PathBuf>,
 ) -> Result<ExternalCommand> {
     let cwd = hit
         .session
@@ -3772,9 +3784,6 @@ fn build_resume_command_with_cd(
         crate::parse::Agent::Codex => {
             let (program, mut args) = settings.codex_program_and_args();
             args.extend(["resume".to_owned(), hit.session.session_id.clone()]);
-            if let Some(cd) = codex_cd {
-                args.extend(["--cd".to_owned(), cd.display().to_string()]);
-            }
             ExternalCommand {
                 program,
                 args,
@@ -3817,6 +3826,37 @@ fn run_claude_cwd_tool(
     }
 }
 
+fn run_codex_cwd_tool(
+    program: &str,
+    session_id: &str,
+    process_cwd: &Path,
+    codex_home: &Path,
+) -> std::result::Result<(), ResumeErrorDialog> {
+    match Command::new(program)
+        .arg("set")
+        .arg("--codex-home")
+        .arg(codex_home)
+        .arg(session_id)
+        .arg(process_cwd)
+        .output()
+    {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(codex_cwd_failed_dialog(
+            output.status,
+            &output.stdout,
+            &output.stderr,
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(ResumeErrorDialog {
+            title: "Codex CWD resume requires cx-session-cwd".to_owned(),
+            body: CODEX_CWD_INSTALL_MESSAGE.to_owned(),
+        }),
+        Err(error) => Err(ResumeErrorDialog {
+            title: "Failed to run cx-session-cwd".to_owned(),
+            body: format!("failed to run {CODEX_CWD_TOOL}: {error}"),
+        }),
+    }
+}
+
 fn claude_cwd_failed_dialog(
     status: std::process::ExitStatus,
     stdout: &[u8],
@@ -3826,6 +3866,21 @@ fn claude_cwd_failed_dialog(
         title: "cc-session-cwd failed".to_owned(),
         body: format!(
             "cc-session-cwd set exited with status {status}.\n\nstdout:\n{}\n\nstderr:\n{}",
+            resume_output_text(stdout),
+            resume_output_text(stderr)
+        ),
+    }
+}
+
+fn codex_cwd_failed_dialog(
+    status: std::process::ExitStatus,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> ResumeErrorDialog {
+    ResumeErrorDialog {
+        title: "cx-session-cwd failed".to_owned(),
+        body: format!(
+            "cx-session-cwd set exited with status {status}.\n\nstdout:\n{}\n\nstderr:\n{}",
             resume_output_text(stdout),
             resume_output_text(stderr)
         ),
@@ -4014,11 +4069,11 @@ mod tests {
     use crate::tui::settings::SettingsModalState;
 
     use super::{
-        build_fork_command, build_resume_command, build_resume_in_cwd_command,
-        build_resume_in_cwd_command_with_cwd_tool, claude_cwd_failed_dialog,
-        export_stem_for_session, finalize_run_result, run_claude_cwd_tool, write_session_export,
+        build_fork_command, build_resume_command, build_resume_in_cwd_command_with_cwd_tools,
+        claude_cwd_failed_dialog, codex_cwd_failed_dialog, export_stem_for_session,
+        finalize_run_result, run_claude_cwd_tool, run_codex_cwd_tool, write_session_export,
         ActionMenuState, App, AppExit, RulesPreviewState, SearchResponse, SearchWorker,
-        ViewMenuState, CLAUDE_CWD_INSTALL_MESSAGE, PAGE_STEP,
+        ViewMenuState, CLAUDE_CWD_INSTALL_MESSAGE, CODEX_CWD_INSTALL_MESSAGE, PAGE_STEP,
     };
     use crate::scan::{AgentHomes, SessionRoots};
     use crate::summary::{
@@ -4055,22 +4110,42 @@ mod tests {
     }
 
     #[test]
-    fn codex_resume_in_cwd_appends_cd_argument() {
+    fn codex_resume_in_cwd_sets_session_cwd_then_builds_regular_resume() {
         let settings = Settings::default();
         let homes = sample_homes();
-        let command = build_resume_in_cwd_command(
+        let mut called = None::<(String, PathBuf, PathBuf)>;
+
+        let command = build_resume_in_cwd_command_with_cwd_tools(
             &sample_hit(Agent::Codex),
             &settings,
             &homes,
             PathBuf::from("/tmp/aics-cwd"),
+            |_, _| unreachable!("Claude helper should not run for Codex sessions"),
+            |session_id, cwd, codex_home| {
+                called = Some((
+                    session_id.to_owned(),
+                    cwd.to_path_buf(),
+                    codex_home.to_path_buf(),
+                ));
+                Ok(())
+            },
         )
         .unwrap();
 
         assert_eq!(
-            command.args,
-            vec!["--yolo", "resume", "session-123", "--cd", "/tmp/aics-cwd"]
+            called,
+            Some((
+                "session-123".to_owned(),
+                PathBuf::from("/tmp/aics-cwd"),
+                PathBuf::from("/tmp/codex-home")
+            ))
         );
-        assert_eq!(command.cwd, Some(PathBuf::from("/tmp/demo")));
+        assert_eq!(command.args, vec!["--yolo", "resume", "session-123"]);
+        assert_eq!(command.cwd, Some(PathBuf::from("/tmp/aics-cwd")));
+        assert_eq!(
+            command.env,
+            vec![("CODEX_HOME".to_owned(), "/tmp/codex-home".to_owned())]
+        );
     }
 
     #[test]
@@ -4079,7 +4154,7 @@ mod tests {
         let homes = sample_homes();
         let mut called = None::<(String, PathBuf)>;
 
-        let command = build_resume_in_cwd_command_with_cwd_tool(
+        let command = build_resume_in_cwd_command_with_cwd_tools(
             &sample_hit(Agent::Claude),
             &settings,
             &homes,
@@ -4088,6 +4163,7 @@ mod tests {
                 called = Some((session_id.to_owned(), cwd.to_path_buf()));
                 Ok(())
             },
+            |_, _, _| unreachable!("Codex helper should not run for Claude sessions"),
         )
         .unwrap();
 
@@ -4126,6 +4202,20 @@ mod tests {
     }
 
     #[test]
+    fn missing_codex_cwd_tool_reports_install_instruction() {
+        let error = run_codex_cwd_tool(
+            "cx-session-cwd-aics-test-missing",
+            "session-123",
+            PathBuf::from("/tmp/aics-cwd").as_path(),
+            PathBuf::from("/tmp/codex-home").as_path(),
+        )
+        .expect_err("missing helper should return a dialog error");
+
+        assert_eq!(error.title, "Codex CWD resume requires cx-session-cwd");
+        assert_eq!(error.body, CODEX_CWD_INSTALL_MESSAGE);
+    }
+
+    #[test]
     #[cfg(unix)]
     fn claude_cwd_tool_invokes_set_subcommand() {
         use std::os::unix::fs::PermissionsExt;
@@ -4154,6 +4244,37 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn codex_cwd_tool_invokes_set_subcommand_with_codex_home() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let script = dir.path().join("cx-session-cwd-fake");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nlog=\"$(dirname \"$0\")/argv.txt\"\nprintf '%s\\n' \"$@\" > \"$log\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        run_codex_cwd_tool(
+            script.to_str().unwrap(),
+            "session-123",
+            PathBuf::from("/tmp/aics-cwd").as_path(),
+            PathBuf::from("/tmp/codex-home").as_path(),
+        )
+        .unwrap();
+
+        let args = std::fs::read_to_string(dir.path().join("argv.txt")).unwrap();
+        assert_eq!(
+            args,
+            "set\n--codex-home\n/tmp/codex-home\nsession-123\n/tmp/aics-cwd\n"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn claude_cwd_failure_dialog_includes_stdout_and_stderr() {
         use std::os::unix::process::ExitStatusExt;
 
@@ -4167,6 +4288,25 @@ mod tests {
         assert!(dialog
             .body
             .contains("cc-session-cwd set exited with status"));
+        assert!(dialog.body.contains("stdout:\nout line\n"));
+        assert!(dialog.body.contains("stderr:\nerr line\n"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn codex_cwd_failure_dialog_includes_stdout_and_stderr() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let dialog = codex_cwd_failed_dialog(
+            std::process::ExitStatus::from_raw(7 << 8),
+            b"out line\n",
+            b"err line\n",
+        );
+
+        assert_eq!(dialog.title, "cx-session-cwd failed");
+        assert!(dialog
+            .body
+            .contains("cx-session-cwd set exited with status"));
         assert!(dialog.body.contains("stdout:\nout line\n"));
         assert!(dialog.body.contains("stderr:\nerr line\n"));
     }
