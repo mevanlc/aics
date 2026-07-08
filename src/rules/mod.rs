@@ -274,6 +274,12 @@ pub struct RulesOptions {
     pub filters: SearchFilters,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulesProgress {
+    ProcessingStarted { total: usize },
+    ProcessingProgress { processed: usize, total: usize },
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RulesReport {
     pub preview_matches: Vec<RulePreviewMatch>,
@@ -355,6 +361,17 @@ pub fn write_default_rules_dts() -> Result<PathBuf> {
 }
 
 pub fn run_rules(roots: &SessionRoots, options: &RulesOptions) -> Result<RulesReport> {
+    run_rules_with_progress(roots, options, |_| {})
+}
+
+pub fn run_rules_with_progress<F>(
+    roots: &SessionRoots,
+    options: &RulesOptions,
+    mut on_progress: F,
+) -> Result<RulesReport>
+where
+    F: FnMut(RulesProgress),
+{
     if !options.rules_path.exists() {
         bail!(
             "rules file not found: {}",
@@ -364,27 +381,40 @@ pub fn run_rules(roots: &SessionRoots, options: &RulesOptions) -> Result<RulesRe
 
     let engine = JsRuleEngine::load(&options.rules_path)?;
     let files = scan_session_files(roots)?;
+    let total = files.len();
+    on_progress(RulesProgress::ProcessingStarted { total });
     let mut report = RulesReport::default();
+    let mut mark_processed = |processed| {
+        on_progress(RulesProgress::ProcessingProgress { processed, total });
+    };
 
-    for file in files {
+    for (index, file) in files.into_iter().enumerate() {
+        let processed = index + 1;
         if !file_matches_filters(&file, &options.filters) {
+            mark_processed(processed);
             continue;
         }
         let parsed = match parse_session_file(file.agent, &file.path) {
             Ok(Some(session)) => session,
-            Ok(None) => continue,
+            Ok(None) => {
+                mark_processed(processed);
+                continue;
+            }
             Err(error) => {
                 warn!(
                     "failed to parse {} for rules: {error:#}",
                     file.path.display()
                 );
+                mark_processed(processed);
                 continue;
             }
         };
         if !session_matches_scope(&options.scope, &parsed) {
+            mark_processed(processed);
             continue;
         }
         if !session_matches_filters(&parsed, &file, &options.filters) {
+            mark_processed(processed);
             continue;
         }
 
@@ -398,6 +428,7 @@ pub fn run_rules(roots: &SessionRoots, options: &RulesOptions) -> Result<RulesRe
                 error: format!("{error:#}"),
             }),
         }
+        mark_processed(processed);
     }
 
     report.preview_matches = dedupe_preview_matches(std::mem::take(&mut report.preview_matches));

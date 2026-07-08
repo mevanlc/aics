@@ -17,7 +17,8 @@ use aics::index::{
 use aics::live::LiveSessionTracker;
 use aics::parse::Agent;
 use aics::rules::{
-    default_rules_path, print_report, run_rules, write_default_rules_dts, RulesMode, RulesOptions,
+    default_rules_path, print_report, run_rules_with_progress, write_default_rules_dts, RulesMode,
+    RulesOptions, RulesProgress,
 };
 use aics::scan::ResolvedPaths;
 use aics::settings::{config_dir, DefaultFilter, DefaultFilterScope, LoadedSettings, Settings};
@@ -294,16 +295,23 @@ fn main() -> Result<()> {
         };
         let rules_scope = request.scope.clone();
         let rules_filters = request.filters.clone();
-        let report = run_rules(
-            &resolved_paths.roots,
-            &RulesOptions {
-                rules_path,
-                mode,
-                json: cli.json,
-                scope: rules_scope.clone(),
-                filters: rules_filters.clone(),
-            },
-        )?;
+        let rules_options = RulesOptions {
+            rules_path,
+            mode,
+            json: cli.json,
+            scope: rules_scope.clone(),
+            filters: rules_filters.clone(),
+        };
+        let report = if let Some(draw_target) = progress_draw_target(cli.progress, cli.json) {
+            let mut progress = RulesProcessingProgress::new(draw_target);
+            let report = run_rules_with_progress(&resolved_paths.roots, &rules_options, |event| {
+                progress.update(event)
+            });
+            progress.finish();
+            report?
+        } else {
+            run_rules_with_progress(&resolved_paths.roots, &rules_options, |_| {})?
+        };
         if cli.benchmark_rules {
             return Ok(());
         }
@@ -450,6 +458,40 @@ fn discovering_style() -> ProgressStyle {
 
 fn indexing_style() -> ProgressStyle {
     ProgressStyle::with_template("Indexing {wide_bar:.green/blue} {pos}/{len} ({eta})")
+        .expect("valid progress template")
+        .progress_chars("█▉▊▋▌▍▎▏ ")
+}
+
+struct RulesProcessingProgress {
+    bar: ProgressBar,
+}
+
+impl RulesProcessingProgress {
+    fn new(draw_target: ProgressDrawTarget) -> Self {
+        let bar = ProgressBar::with_draw_target(None, draw_target);
+        bar.set_style(rules_processing_style());
+        Self { bar }
+    }
+
+    fn update(&mut self, event: RulesProgress) {
+        match event {
+            RulesProgress::ProcessingStarted { total } => {
+                self.bar.set_length(total as u64);
+                self.bar.set_position(0);
+            }
+            RulesProgress::ProcessingProgress { processed, .. } => {
+                self.bar.set_position(processed as u64);
+            }
+        }
+    }
+
+    fn finish(self) {
+        self.bar.finish_and_clear();
+    }
+}
+
+fn rules_processing_style() -> ProgressStyle {
+    ProgressStyle::with_template("Processing rules {wide_bar:.green/blue} {pos}/{len} ({eta})")
         .expect("valid progress template")
         .progress_chars("█▉▊▋▌▍▎▏ ")
 }

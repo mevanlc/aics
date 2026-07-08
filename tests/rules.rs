@@ -2,6 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use aics::index::{Scope, SearchFilters};
+use aics::rules::{run_rules_with_progress, RulesMode, RulesOptions, RulesProgress};
+use aics::scan::SessionRoots;
 use anyhow::Result;
 use tempfile::TempDir;
 
@@ -224,6 +227,57 @@ fn benchmark_rules_evaluates_without_output_or_applying_actions() -> Result<()> 
     assert!(roots.claude_session.exists());
     assert_eq!(fs::read_to_string(data_root.join("trash.jsonl"))?, "");
     assert_eq!(fs::read_dir(data_root.join("trash"))?.count(), 0);
+    Ok(())
+}
+
+#[test]
+fn rules_progress_reports_processing_count() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let rules = write_rules(
+        &temp,
+        r#"
+        rule("noop", () => nothing());
+        "#,
+    )?;
+    let session_roots = SessionRoots {
+        claude_projects: roots.claude_projects,
+        codex_sessions: roots.codex_sessions,
+        trash: None,
+    };
+    let mut events = Vec::new();
+
+    let report = run_rules_with_progress(
+        &session_roots,
+        &RulesOptions {
+            rules_path: rules,
+            mode: RulesMode::Preview,
+            json: true,
+            scope: Scope::Global,
+            filters: SearchFilters::default(),
+        },
+        |event| events.push(event),
+    )?;
+
+    assert!(report.proposals.is_empty());
+    assert_eq!(
+        events.first(),
+        Some(&RulesProgress::ProcessingStarted { total: 2 })
+    );
+    assert_eq!(
+        events.last(),
+        Some(&RulesProgress::ProcessingProgress {
+            processed: 2,
+            total: 2
+        })
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, RulesProgress::ProcessingProgress { .. }))
+            .count(),
+        2
+    );
     Ok(())
 }
 

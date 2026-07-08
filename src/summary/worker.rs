@@ -313,6 +313,8 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn worker_produces_sidecar_with_fake_backend() {
+        crate::settings::isolate_config_root_for_tests();
+
         // A trivial "summarizer" that just copies the prompt to output.
         let template = "cat \"{{prompt_file}}\" > \"{{output_file}}\"";
         let prompt = "summary of {{jsonl_path}}";
@@ -365,6 +367,8 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn worker_emits_failure_when_output_empty() {
+        crate::settings::isolate_config_root_for_tests();
+
         let template = "true > \"{{output_file}}\"";
         let prompt = "ignored";
         let dir = tempfile::tempdir().unwrap();
