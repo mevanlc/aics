@@ -218,15 +218,21 @@ impl FilterModalState {
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(field) = field_at_position(area, column, row) {
+                    let was_selected =
+                        self.selected_side == FilterSide::Filters && self.selected == field;
                     self.selected_side = FilterSide::Filters;
                     self.selected.set(&field);
-                    if !field.is_text() {
+                    if was_selected && !field.is_text() {
                         self.adjust_current(true);
                     }
                 } else if let Some(field) = display_at_position(area, column, row) {
+                    let was_selected =
+                        self.selected_side == FilterSide::Display && self.display_selected == field;
                     self.selected_side = FilterSide::Display;
                     self.display_selected.set(&field);
-                    self.toggle_display_current();
+                    if was_selected {
+                        self.toggle_display_current();
+                    }
                 }
             }
             MouseEventKind::ScrollDown => {
@@ -818,7 +824,9 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
 
-    use super::{display_rows_area, field_rows_area, DisplayField, FilterField, FilterModalState};
+    use super::{
+        display_rows_area, field_rows_area, DisplayField, FilterField, FilterModalState, FilterSide,
+    };
     use crate::index::{Scope, SearchFilters, SortMode};
     use crate::parse::Agent;
     use crate::settings::DisplayOptions;
@@ -985,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_non_text_filter_row_cycles_value() {
+    fn clicking_unfocused_non_text_filter_row_only_focuses() {
         let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
         let mut state = FilterModalState::new(
             &scope,
@@ -995,6 +1003,30 @@ mod tests {
         );
         let area = Rect::new(0, 0, 120, 40);
         let rows = field_rows_area(area);
+
+        state.handle_mouse(
+            area,
+            MouseEventKind::Down(MouseButton::Left),
+            rows.x,
+            rows.y + 1,
+        );
+
+        assert_eq!(*state.selected.current(), FilterField::Agent);
+        assert_eq!(state.agent, None);
+    }
+
+    #[test]
+    fn clicking_focused_non_text_filter_row_cycles_value() {
+        let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
+        let mut state = FilterModalState::new(
+            &scope,
+            &SearchFilters::default(),
+            SortMode::Time,
+            DisplayOptions::default(),
+        );
+        let area = Rect::new(0, 0, 120, 40);
+        let rows = field_rows_area(area);
+        assert!(state.selected.set(&FilterField::Agent));
 
         state.handle_mouse(
             area,
@@ -1037,7 +1069,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_display_option_toggles_without_applying() {
+    fn clicking_unfocused_display_option_only_focuses() {
         let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
         let mut state = FilterModalState::new(
             &scope,
@@ -1047,6 +1079,31 @@ mod tests {
         );
         let area = Rect::new(0, 0, 120, 40);
         let rows = display_rows_area(area);
+
+        state.handle_mouse(
+            area,
+            MouseEventKind::Down(MouseButton::Left),
+            rows.x,
+            rows.y + 1,
+        );
+
+        assert_eq!(*state.display_selected.current(), DisplayField::ToolCalls);
+        assert!(!state.display_options.hide_tool_calls);
+    }
+
+    #[test]
+    fn clicking_focused_display_option_toggles_without_applying() {
+        let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
+        let mut state = FilterModalState::new(
+            &scope,
+            &SearchFilters::default(),
+            SortMode::Time,
+            DisplayOptions::default(),
+        );
+        let area = Rect::new(0, 0, 120, 40);
+        let rows = display_rows_area(area);
+        state.selected_side = FilterSide::Display;
+        assert!(state.display_selected.set(&DisplayField::ToolCalls));
 
         state.handle_mouse(
             area,

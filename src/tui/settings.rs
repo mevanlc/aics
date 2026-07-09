@@ -159,9 +159,10 @@ impl SettingsModalState {
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(field) = settings_field_at(area, column, row) {
+                    let was_selected = self.field == field;
                     self.field.set(&field);
                     match field {
-                        SettingsField::Theme => {
+                        SettingsField::Theme if was_selected => {
                             let rows = settings_rows(area);
                             let items = theme_labels();
                             match inline_radio_hit_at(
@@ -186,6 +187,7 @@ impl SettingsModalState {
                                 None => {}
                             }
                         }
+                        SettingsField::Theme => {}
                         SettingsField::EditSummarizer => {
                             self.summarizer = Some(SummarizerModalState::new(
                                 &self.base.summarize_command,
@@ -1643,8 +1645,11 @@ impl TemplatePicker {
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(field) = template_picker_field_at(host, column, row) {
+                    let was_selected = self.field == field;
                     self.field.set(&field);
-                    self.handle_radio_mouse(host, field, column, row);
+                    if was_selected {
+                        self.handle_radio_mouse(host, field, column, row);
+                    }
                 }
             }
             MouseEventKind::ScrollDown => {
@@ -2261,8 +2266,31 @@ mod tests {
     }
 
     #[test]
-    fn clicking_theme_item_selects_that_theme() {
+    fn clicking_unfocused_theme_item_only_focuses_theme() {
         let mut state = SettingsModalState::new(&Settings::default());
+        assert!(state.field.set(&SettingsField::ClaudeCommand));
+        let area = Rect::new(0, 0, 120, 40);
+        let rows = settings_rows(area);
+        let rendered =
+            spans_text(&state.render_inline_theme_row(rows[1].width, &Theme::default(), true));
+        let sunset_byte = rendered.find("sunset").expect("sunset should be visible");
+        let sunset_column = rows[1].x + UnicodeWidthStr::width(&rendered[..sunset_byte]) as u16;
+
+        state.handle_mouse(
+            area,
+            MouseEventKind::Down(MouseButton::Left),
+            sunset_column,
+            rows[1].y,
+        );
+
+        assert_eq!(*state.field.current(), SettingsField::Theme);
+        assert_eq!(*state.theme.current(), ThemeName::Lazygit);
+    }
+
+    #[test]
+    fn clicking_focused_theme_item_selects_that_theme() {
+        let mut state = SettingsModalState::new(&Settings::default());
+        assert!(state.field.set(&SettingsField::Theme));
         let area = Rect::new(0, 0, 120, 40);
         let rows = settings_rows(area);
         let rendered =
@@ -2420,8 +2448,32 @@ mod tests {
     }
 
     #[test]
+    fn clicking_unfocused_template_picker_backend_item_only_focuses_backend() {
+        let mut picker = TemplatePicker::new(TemplateShell::Zsh);
+        let host = Rect::new(10, 5, 80, 30);
+        let rows = template_picker_rows(host);
+        let items = PICKER_BACKENDS
+            .iter()
+            .map(|b| super::backend_label(*b).to_owned())
+            .collect::<Vec<_>>();
+        let codex_column =
+            radio_item_column("Backend", &items, picker.backend.index(), rows[2], "Codex");
+
+        picker.handle_mouse(
+            host,
+            MouseEventKind::Down(MouseButton::Left),
+            codex_column,
+            rows[2].y,
+        );
+
+        assert_eq!(*picker.field.current(), TemplatePickerField::Backend);
+        assert!(picker.backend == SummarizeBackend::Claude);
+    }
+
+    #[test]
     fn clicking_template_picker_backend_item_selects_backend() {
         let mut picker = TemplatePicker::new(TemplateShell::Zsh);
+        assert!(picker.field.set(&TemplatePickerField::Backend));
         let host = Rect::new(10, 5, 80, 30);
         let rows = template_picker_rows(host);
         let items = PICKER_BACKENDS
@@ -2445,6 +2497,7 @@ mod tests {
     #[test]
     fn clicking_template_picker_shell_item_selects_shell() {
         let mut picker = TemplatePicker::new(TemplateShell::Zsh);
+        assert!(picker.field.set(&TemplatePickerField::Shell));
         let host = Rect::new(10, 5, 80, 30);
         let rows = template_picker_rows(host);
         let items = TemplateShell::ALL
@@ -2467,6 +2520,7 @@ mod tests {
     #[test]
     fn clicking_template_picker_model_item_selects_model() {
         let mut picker = TemplatePicker::new(TemplateShell::Zsh);
+        assert!(picker.field.set(&TemplatePickerField::Model));
         let host = Rect::new(10, 5, 80, 30);
         let rows = template_picker_rows(host);
         let items = CLAUDE_MODELS
@@ -2495,6 +2549,7 @@ mod tests {
     #[test]
     fn clicking_template_picker_effort_item_selects_effort() {
         let mut picker = TemplatePicker::new(TemplateShell::Zsh);
+        assert!(picker.field.set(&TemplatePickerField::Effort));
         let host = Rect::new(10, 5, 80, 30);
         let rows = template_picker_rows(host);
         let items = CLAUDE_EFFORTS
@@ -2560,6 +2615,12 @@ mod tests {
             .collect::<Vec<_>>();
         let codex_column = radio_item_column("Backend", &items, 0, rows[2], "Codex");
 
+        summarizer.handle_mouse(
+            settings_popup,
+            MouseEventKind::Down(MouseButton::Left),
+            codex_column,
+            rows[2].y,
+        );
         summarizer.handle_mouse(
             settings_popup,
             MouseEventKind::Down(MouseButton::Left),
