@@ -15,6 +15,14 @@ cargo test           # run tests
 cargo build --release  # release build
 ```
 
+When authoring or running tests that can load or save settings/config, protect
+the user's real `~/.config/aics/` data. Prefer explicit temp paths with
+`Settings::*_to_path` helpers. App-level/unit tests that may call
+`Settings::save_patch`, spawn settings-sensitive workers, or otherwise resolve
+the default config dir must call `crate::settings::isolate_config_root_for_tests()`
+before constructing the app or touching settings; this sets `AICS_CONFIG_ROOT`
+to a process-lifetime temp directory.
+
 Binary name: `aics`
 
 ## Conventions
@@ -30,4 +38,3 @@ Binary name: `aics`
 
 The original plan is in devdocs/ULTRAPLAN.md
 .md files for/by AI Agents should be read/written to devdocs/
-

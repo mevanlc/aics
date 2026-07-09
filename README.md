@@ -96,11 +96,10 @@ Large transcript fields are fetched from Rust only when a rule calls one of the 
 | `↑` / `↓` | Move selection |
 | `PgUp` / `PgDn` | Scroll preview / viewer |
 | `⏎` | Open actions menu for selected session |
-| `^F` | Filters modal (`^S` inside the modal saves the current filter as the startup default) |
+| `^F` | Filters modal, including preview/viewer display toggles (`^S` inside the modal saves startup defaults) |
 | `^S` | Settings modal |
 | `^T` | Toggle preview panel |
 | `^Y` | Toggle session/summary preview mode |
-| `^X` | View menu |
 | `^]` / `^\` | Resize list/preview split; `Ctrl+5` / `Ctrl+4` are aliases |
 | `Shift+↑` / `Shift+↓` | Jump between messages in the viewer |
 | `?` / `^L` | Help |

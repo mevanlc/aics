@@ -156,6 +156,14 @@ impl SettingsPatch {
         }
     }
 
+    pub fn filter_defaults(default_filter: DefaultFilter, display_options: DisplayOptions) -> Self {
+        Self {
+            display_options: Some(display_options),
+            default_filter: Some(Some(default_filter)),
+            ..Self::default()
+        }
+    }
+
     /// Names of the fields this patch will write, for diagnostic logging.
     fn field_names(&self) -> Vec<&'static str> {
         let mut names = Vec::new();
@@ -810,6 +818,38 @@ mod tests {
         assert_eq!(saved_filter.sort, SortMode::Relevance);
         assert_eq!(saved_filter.filters.branch.as_deref(), Some("main"));
         assert!(saved_filter.filters.include_sub_agents);
+    }
+
+    #[test]
+    fn filter_defaults_patch_saves_filter_and_display_options() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        Settings::save_to_path(&path, &Settings::default()).unwrap();
+
+        let default_filter = DefaultFilter {
+            scope: DefaultFilterScope::Global,
+            sort: SortMode::Relevance,
+            filters: SearchFilters {
+                branch: Some("main".to_owned()),
+                ..SearchFilters::default()
+            },
+        };
+        let display_options = DisplayOptions {
+            hide_tool_calls: true,
+            ..DisplayOptions::default()
+        };
+        Settings::save_patch_to_path(
+            &path,
+            &SettingsPatch::filter_defaults(default_filter, display_options),
+        )
+        .unwrap();
+
+        let saved = Settings::load_from_path(&path).unwrap();
+        assert!(saved.display_options.hide_tool_calls);
+        let saved_filter = saved.default_filter.expect("default filter saved");
+        assert_eq!(saved_filter.scope, DefaultFilterScope::Global);
+        assert_eq!(saved_filter.sort, SortMode::Relevance);
+        assert_eq!(saved_filter.filters.branch.as_deref(), Some("main"));
     }
 
     #[test]

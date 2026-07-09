@@ -35,7 +35,7 @@ const RIGHT_PANEL_HORIZONTAL_CHROME: u16 = 3;
 const RIGHT_PANEL_MIN_WIDTH: u16 = RIGHT_PANEL_MIN_CONTENT_WIDTH + RIGHT_PANEL_HORIZONTAL_CHROME;
 const HELP_KEY_COLUMN_WIDTH: usize = 12;
 
-const SESSION_LIST_ITEMS: [HelpItem; 21] = [
+const SESSION_LIST_ITEMS: [HelpItem; 20] = [
     HelpItem::new(
         "Type",
         "filter sessions",
@@ -57,11 +57,6 @@ const SESSION_LIST_ITEMS: [HelpItem; 21] = [
         "Move the highlighted session up or down in the result list without opening the actions menu.",
     ),
     HelpItem::new(
-        "^X",
-        "view menu",
-        "Open display toggles for hiding AGENTS.md/CLAUDE.md instruction blocks, tool results, agent replies, or user messages in preview and viewer transcript rendering.",
-    ),
-    HelpItem::new(
         "PgUp / PgDn",
         "page preview or list",
         "When the preview pane is visible, Page Up and Page Down scroll the preview. If the preview is hidden, they move the result selection by one page.",
@@ -79,7 +74,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 21] = [
     HelpItem::new(
         "^F",
         "filters",
-        "Open the filter modal to change scope, agent, branch, date range, derivation toggles, live-only mode, and sort order. In the filter modal, ^S saves the current filter as the startup default.",
+        "Open the filter modal to change search filters and preview/viewer display toggles. Enter applies the current modal values; ^S saves them as startup defaults.",
     ),
     HelpItem::new(
         "^G",

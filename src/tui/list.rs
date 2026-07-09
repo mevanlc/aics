@@ -9,8 +9,7 @@ use crate::index::SearchHit;
 use crate::tui::app::App;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
-    agent_badge, block_title, format_line_count, list_title, relative_time, right_block_title,
-    truncate_plain,
+    agent_badge, block_title, format_line_count, list_title, relative_time, truncate_plain,
 };
 
 fn card_height(snippet_line_count: usize, separator: &str, extra_row_count: usize) -> usize {
@@ -55,16 +54,7 @@ pub fn render(
         .title(block_title(Span::styled(
             "Sessions",
             Style::default().fg(theme.accent),
-        )))
-        .title(right_block_title(Line::from(vec![
-            Span::styled(
-                "↑↓",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" select", Style::default().fg(theme.muted)),
-        ])));
+        )));
 
     let compact = effective_item_height(area, snippet_line_count, separator, extra_row_count) == 1;
     let items = if app.results.is_empty() {
