@@ -162,7 +162,29 @@ impl SettingsModalState {
                     self.field.set(&field);
                     match field {
                         SettingsField::Theme => {
-                            self.theme.move_next();
+                            let rows = settings_rows(area);
+                            let items = theme_labels();
+                            match inline_radio_hit_at(
+                                "Theme",
+                                &items,
+                                self.theme.index(),
+                                rows[1],
+                                column,
+                                row,
+                            ) {
+                                Some(RadioHit::Item(index)) => {
+                                    if let Some(theme) = ThemeName::ALL.get(index) {
+                                        self.theme.set(theme);
+                                    }
+                                }
+                                Some(RadioHit::Previous) => {
+                                    self.theme.move_prev();
+                                }
+                                Some(RadioHit::Next) => {
+                                    self.theme.move_next();
+                                }
+                                None => {}
+                            }
                         }
                         SettingsField::EditSummarizer => {
                             self.summarizer = Some(SummarizerModalState::new(
@@ -212,6 +234,10 @@ impl SettingsModalState {
         let theme_focused = self.field == SettingsField::Theme;
         let theme_line = self.render_inline_theme_row(rows[1].width, theme, theme_focused);
         frame.render_widget(Paragraph::new(theme_line), rows[1]);
+        if theme_focused {
+            let items = theme_labels();
+            set_inline_radio_cursor(frame, "Theme", &items, self.theme.index(), rows[1]);
+        }
 
         frame.render_widget(
             Paragraph::new("─".repeat(inner.width as usize))
@@ -290,6 +316,9 @@ impl SettingsModalState {
 
         let button_focused = self.field == SettingsField::EditSummarizer;
         render_edit_summarizer_button(frame, rows[18], theme, button_focused);
+        if button_focused {
+            set_row_cursor(frame, rows[18], 2);
+        }
 
         // Bottom divider + hints
         frame.render_widget(
@@ -313,10 +342,7 @@ impl SettingsModalState {
     fn render_inline_theme_row(&self, width: u16, theme: &Theme, focused: bool) -> Line<'static> {
         inline_radio_row(
             "Theme",
-            &ThemeName::ALL
-                .iter()
-                .map(|name| name.label().to_owned())
-                .collect::<Vec<_>>(),
+            &theme_labels(),
             self.theme.index(),
             width,
             theme,
@@ -543,6 +569,13 @@ fn theme_name_cursor(selected: ThemeName) -> RingCursor<ThemeName> {
     cursor
 }
 
+fn theme_labels() -> Vec<String> {
+    ThemeName::ALL
+        .iter()
+        .map(|name| name.label().to_owned())
+        .collect()
+}
+
 fn build_textarea(content: &str) -> TextArea<'static> {
     let mut textarea: TextArea<'static> = if content.is_empty() {
         TextArea::default()
@@ -731,50 +764,16 @@ fn radio_spans(
     theme: &Theme,
     focused: bool,
 ) -> Vec<Span<'static>> {
-    if items.is_empty() || width == 0 {
+    if items.is_empty() || width == 0 || selected >= items.len() {
         return Vec::new();
     }
-    let entries: Vec<String> = items
-        .iter()
-        .enumerate()
-        .map(|(i, item)| {
-            let marker = if i == selected { "● " } else { "○ " };
-            format!("{marker}{item}")
-        })
-        .collect();
+    let entries = radio_entries(items, selected);
     let sep = "  ";
     let arrow_left = "< ";
     let arrow_right = " >";
-    let sep_w = UnicodeWidthStr::width(sep);
-    let arrow_w = UnicodeWidthStr::width(arrow_left);
-    let entry_width = |i: usize| UnicodeWidthStr::width(entries[i].as_str());
-
-    let mut start = selected;
-    let mut end = selected + 1;
-    let mut total_w = arrow_w * 2 + entry_width(selected);
-
-    loop {
-        let mut grew = false;
-        if start > 0 {
-            let cw = sep_w + entry_width(start - 1);
-            if total_w + cw <= width {
-                start -= 1;
-                total_w += cw;
-                grew = true;
-            }
-        }
-        if end < entries.len() {
-            let cw = sep_w + entry_width(end);
-            if total_w + cw <= width {
-                total_w += cw;
-                end += 1;
-                grew = true;
-            }
-        }
-        if !grew {
-            break;
-        }
-    }
+    let Some((start, end)) = radio_visible_range(&entries, selected, width) else {
+        return Vec::new();
+    };
 
     let active_arrow = if focused {
         Style::default()
@@ -825,6 +824,230 @@ fn radio_spans(
     ));
 
     spans
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RadioHit {
+    Previous,
+    Item(usize),
+    Next,
+}
+
+fn inline_radio_hit_at(
+    label: &str,
+    items: &[String],
+    selected: usize,
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<RadioHit> {
+    if !contains(area, column, row) {
+        return None;
+    }
+    let label_text = format!("  {label}");
+    let label_w = UnicodeWidthStr::width(label_text.as_str());
+    let gap = 2usize;
+    let radio_offset = label_w + gap;
+    if radio_offset >= area.width as usize {
+        return None;
+    }
+    let radio_x = area.x.saturating_add(radio_offset as u16);
+    let relative_column = column.checked_sub(radio_x)? as usize;
+    let radio_width = (area.width as usize).saturating_sub(radio_offset);
+    radio_hit_at(items, selected, radio_width, relative_column)
+}
+
+fn set_inline_radio_cursor(
+    frame: &mut Frame,
+    label: &str,
+    items: &[String],
+    selected: usize,
+    area: Rect,
+) {
+    let Some(column) = inline_radio_selected_column(label, items, selected, area) else {
+        return;
+    };
+    frame.set_cursor_position((column, area.y));
+}
+
+fn inline_radio_selected_column(
+    label: &str,
+    items: &[String],
+    selected: usize,
+    area: Rect,
+) -> Option<u16> {
+    if area.width == 0 || items.is_empty() || selected >= items.len() {
+        return None;
+    }
+    let label_text = format!("  {label}");
+    let label_w = UnicodeWidthStr::width(label_text.as_str());
+    let gap = 2usize;
+    let radio_offset = label_w + gap;
+    if radio_offset >= area.width as usize {
+        return None;
+    }
+
+    let entries = radio_entries(items, selected);
+    let radio_width = (area.width as usize).saturating_sub(radio_offset);
+    let (start, end) = radio_visible_range(&entries, selected, radio_width)?;
+    if !(start..end).contains(&selected) {
+        return None;
+    }
+
+    let sep = "  ";
+    let arrow_left = "< ";
+    let sep_w = UnicodeWidthStr::width(sep);
+    let arrow_w = UnicodeWidthStr::width(arrow_left);
+    let entry_width = |i: usize| UnicodeWidthStr::width(entries[i].as_str());
+    let mut relative = arrow_w;
+    for index in start..selected {
+        if index > start {
+            relative += sep_w;
+        }
+        relative += entry_width(index);
+    }
+    if selected > start {
+        relative += sep_w;
+    }
+
+    let column = area
+        .x
+        .saturating_add(radio_offset as u16)
+        .saturating_add(relative as u16);
+    (column < area.right()).then_some(column)
+}
+
+fn radio_hit_at(
+    items: &[String],
+    selected: usize,
+    width: usize,
+    relative_column: usize,
+) -> Option<RadioHit> {
+    if items.is_empty() || width == 0 || selected >= items.len() || relative_column >= width {
+        return None;
+    }
+    let entries = radio_entries(items, selected);
+    let (start, end) = radio_visible_range(&entries, selected, width)?;
+    let sep = "  ";
+    let arrow_left = "< ";
+    let sep_w = UnicodeWidthStr::width(sep);
+    let arrow_w = UnicodeWidthStr::width(arrow_left);
+    let entry_width = |i: usize| UnicodeWidthStr::width(entries[i].as_str());
+
+    let mut cursor = 0usize;
+    if relative_column < cursor + arrow_w {
+        return Some(RadioHit::Previous);
+    }
+    cursor += arrow_w;
+
+    for index in start..end {
+        if index > start {
+            if relative_column < cursor + sep_w {
+                return None;
+            }
+            cursor += sep_w;
+        }
+        let width = entry_width(index);
+        if relative_column < cursor + width {
+            return Some(RadioHit::Item(index));
+        }
+        cursor += width;
+    }
+
+    (relative_column < cursor + arrow_w).then_some(RadioHit::Next)
+}
+
+fn apply_radio_hit_to_cursor<T: Clone + PartialEq>(cursor: &mut RingCursor<T>, hit: RadioHit) {
+    match hit {
+        RadioHit::Previous => {
+            cursor.move_prev();
+        }
+        RadioHit::Next => {
+            cursor.move_next();
+        }
+        RadioHit::Item(index) => {
+            if let Some(item) = cursor.items().get(index).cloned() {
+                cursor.set(&item);
+            }
+        }
+    }
+}
+
+fn radio_entries(items: &[String], selected: usize) -> Vec<String> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let marker = if i == selected { "● " } else { "○ " };
+            format!("{marker}{item}")
+        })
+        .collect()
+}
+
+fn radio_visible_range(
+    entries: &[String],
+    selected: usize,
+    width: usize,
+) -> Option<(usize, usize)> {
+    if entries.is_empty() || width == 0 || selected >= entries.len() {
+        return None;
+    }
+    let sep = "  ";
+    let arrow_left = "< ";
+    let sep_w = UnicodeWidthStr::width(sep);
+    let arrow_w = UnicodeWidthStr::width(arrow_left);
+    let entry_width = |i: usize| UnicodeWidthStr::width(entries[i].as_str());
+
+    let mut start = selected;
+    let mut end = selected + 1;
+    let mut total_w = arrow_w * 2 + entry_width(selected);
+
+    loop {
+        let mut grew = false;
+        if start > 0 {
+            let cw = sep_w + entry_width(start - 1);
+            if total_w + cw <= width {
+                start -= 1;
+                total_w += cw;
+                grew = true;
+            }
+        }
+        if end < entries.len() {
+            let cw = sep_w + entry_width(end);
+            if total_w + cw <= width {
+                total_w += cw;
+                end += 1;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    Some((start, end))
+}
+
+fn set_row_cursor(frame: &mut Frame, area: Rect, offset: u16) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let max_offset = area.width.saturating_sub(1);
+    frame.set_cursor_position((area.x.saturating_add(offset.min(max_offset)), area.y));
+}
+
+fn set_textarea_cursor(frame: &mut Frame, textarea: &TextArea<'_>, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let cursor = textarea.screen_cursor();
+    let x = area
+        .x
+        .saturating_add((cursor.col as u16).min(area.width.saturating_sub(1)));
+    let y = area
+        .y
+        .saturating_add((cursor.row as u16).min(area.height.saturating_sub(1)));
+    frame.set_cursor_position((x, y));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1191,6 +1414,30 @@ impl TemplatePicker {
         }
     }
 
+    fn set_codex_model_index(&mut self, index: usize) {
+        let CodexSelectors::Cached {
+            models,
+            model,
+            effort,
+        } = &mut self.codex
+        else {
+            return;
+        };
+        let Some(selected) = model.items().get(index).cloned() else {
+            return;
+        };
+        model.set(&selected);
+        let idx = model.index();
+        let items: Vec<Option<String>> = if idx == 0 {
+            vec![None]
+        } else {
+            std::iter::once(None)
+                .chain(models[idx - 1].efforts.iter().cloned().map(Some))
+                .collect()
+        };
+        *effort = RingCursor::new(items);
+    }
+
     fn adjust_field(&mut self, field: TemplatePickerField, forward: bool) {
         match field {
             TemplatePickerField::Shell => {
@@ -1266,6 +1513,126 @@ impl TemplatePicker {
         TemplatePickerOutcome::Stay
     }
 
+    fn handle_radio_mouse(
+        &mut self,
+        host: Rect,
+        field: TemplatePickerField,
+        column: u16,
+        row: u16,
+    ) {
+        let rows = template_picker_rows(host);
+        match field {
+            TemplatePickerField::Shell => {
+                let items = TemplateShell::ALL
+                    .iter()
+                    .map(|s| s.label().to_owned())
+                    .collect::<Vec<_>>();
+                if let Some(hit) =
+                    inline_radio_hit_at("Shell", &items, self.shell.index(), rows[1], column, row)
+                {
+                    apply_radio_hit_to_cursor(&mut self.shell, hit);
+                }
+            }
+            TemplatePickerField::Backend => {
+                let items = PICKER_BACKENDS
+                    .iter()
+                    .map(|b| backend_label(*b).to_owned())
+                    .collect::<Vec<_>>();
+                if let Some(hit) = inline_radio_hit_at(
+                    "Backend",
+                    &items,
+                    self.backend.index(),
+                    rows[2],
+                    column,
+                    row,
+                ) {
+                    apply_radio_hit_to_cursor(&mut self.backend, hit);
+                }
+            }
+            TemplatePickerField::Model => self.handle_model_radio_mouse(rows[3], column, row),
+            TemplatePickerField::Effort => self.handle_effort_radio_mouse(rows[4], column, row),
+        }
+    }
+
+    fn handle_model_radio_mouse(&mut self, area: Rect, column: u16, row: u16) {
+        match *self.backend.current() {
+            SummarizeBackend::Claude => {
+                let items = CLAUDE_MODELS
+                    .iter()
+                    .map(|m| option_label(*m))
+                    .collect::<Vec<_>>();
+                if let Some(hit) = inline_radio_hit_at(
+                    "Model",
+                    &items,
+                    self.claude_model.index(),
+                    area,
+                    column,
+                    row,
+                ) {
+                    apply_radio_hit_to_cursor(&mut self.claude_model, hit);
+                }
+            }
+            SummarizeBackend::Codex => match &self.codex {
+                CodexSelectors::Cached { model, .. } => {
+                    let items = model
+                        .items()
+                        .iter()
+                        .map(|o| option_label(o.as_deref()))
+                        .collect::<Vec<_>>();
+                    let selected = model.index();
+                    if let Some(hit) =
+                        inline_radio_hit_at("Model", &items, selected, area, column, row)
+                    {
+                        match hit {
+                            RadioHit::Previous => self.move_model(false),
+                            RadioHit::Next => self.move_model(true),
+                            RadioHit::Item(index) => self.set_codex_model_index(index),
+                        }
+                    }
+                }
+                CodexSelectors::Freeform { .. } => {}
+            },
+            SummarizeBackend::Custom => {}
+        }
+    }
+
+    fn handle_effort_radio_mouse(&mut self, area: Rect, column: u16, row: u16) {
+        match *self.backend.current() {
+            SummarizeBackend::Claude => {
+                let items = CLAUDE_EFFORTS
+                    .iter()
+                    .map(|m| option_label(*m))
+                    .collect::<Vec<_>>();
+                if let Some(hit) = inline_radio_hit_at(
+                    "Effort",
+                    &items,
+                    self.claude_effort.index(),
+                    area,
+                    column,
+                    row,
+                ) {
+                    apply_radio_hit_to_cursor(&mut self.claude_effort, hit);
+                }
+            }
+            SummarizeBackend::Codex => match &mut self.codex {
+                CodexSelectors::Cached { effort, .. } => {
+                    let items = effort
+                        .items()
+                        .iter()
+                        .map(|o| option_label(o.as_deref()))
+                        .collect::<Vec<_>>();
+                    if let Some(hit) =
+                        inline_radio_hit_at("Effort", &items, effort.index(), area, column, row)
+                    {
+                        apply_radio_hit_to_cursor(effort, hit);
+                    }
+                }
+                CodexSelectors::Freeform { .. } => {}
+            },
+            SummarizeBackend::Custom => {}
+        }
+    }
+
     fn handle_mouse(
         &mut self,
         host: Rect,
@@ -1277,9 +1644,7 @@ impl TemplatePicker {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(field) = template_picker_field_at(host, column, row) {
                     self.field.set(&field);
-                    if !self.is_freeform_input_field(field) {
-                        self.adjust_field(field, true);
-                    }
+                    self.handle_radio_mouse(host, field, column, row);
                 }
             }
             MouseEventKind::ScrollDown => {
@@ -1311,6 +1676,15 @@ impl TemplatePicker {
                     focused,
                 );
                 frame.render_widget(Paragraph::new(line), area);
+                if focused {
+                    set_inline_radio_cursor(
+                        frame,
+                        "Model",
+                        &items,
+                        self.claude_model.index(),
+                        area,
+                    );
+                }
             }
             SummarizeBackend::Codex => match &self.codex {
                 CodexSelectors::Cached { model, .. } => {
@@ -1328,6 +1702,9 @@ impl TemplatePicker {
                         focused,
                     );
                     frame.render_widget(Paragraph::new(line), area);
+                    if focused {
+                        set_inline_radio_cursor(frame, "Model", &items, model.index(), area);
+                    }
                 }
                 CodexSelectors::Freeform { model, .. } => {
                     render_inline_text_field(frame, area, theme, "Model", model, focused);
@@ -1351,6 +1728,15 @@ impl TemplatePicker {
                     focused,
                 );
                 frame.render_widget(Paragraph::new(line), area);
+                if focused {
+                    set_inline_radio_cursor(
+                        frame,
+                        "Effort",
+                        &items,
+                        self.claude_effort.index(),
+                        area,
+                    );
+                }
             }
             SummarizeBackend::Codex => match &self.codex {
                 CodexSelectors::Cached { effort, .. } => {
@@ -1368,6 +1754,9 @@ impl TemplatePicker {
                         focused,
                     );
                     frame.render_widget(Paragraph::new(line), area);
+                    if focused {
+                        set_inline_radio_cursor(frame, "Effort", &items, effort.index(), area);
+                    }
                 }
                 CodexSelectors::Freeform { effort, .. } => {
                     render_inline_text_field(frame, area, theme, "Effort", effort, focused);
@@ -1405,6 +1794,13 @@ impl TemplatePicker {
             shell_focused,
         );
         frame.render_widget(Paragraph::new(shell_line), rows[1]);
+        if shell_focused {
+            let items = TemplateShell::ALL
+                .iter()
+                .map(|s| s.label().to_owned())
+                .collect::<Vec<_>>();
+            set_inline_radio_cursor(frame, "Shell", &items, self.shell.index(), rows[1]);
+        }
 
         let backend_focused = self.field == TemplatePickerField::Backend;
         let backend_line = inline_radio_row(
@@ -1419,6 +1815,13 @@ impl TemplatePicker {
             backend_focused,
         );
         frame.render_widget(Paragraph::new(backend_line), rows[2]);
+        if backend_focused {
+            let items = PICKER_BACKENDS
+                .iter()
+                .map(|b| backend_label(*b).to_owned())
+                .collect::<Vec<_>>();
+            set_inline_radio_cursor(frame, "Backend", &items, self.backend.index(), rows[2]);
+        }
 
         self.render_model_row(frame, rows[3], theme);
         self.render_effort_row(frame, rows[4], theme);
@@ -1671,7 +2074,11 @@ impl SummarizerModalState {
         );
         render_field_label(frame, rows[1], theme, cmd_label, cmd_focused);
         style_textarea(&mut self.command_textarea, theme, cmd_focused);
-        frame.render_widget(&self.command_textarea, pad_rect(rows[2]));
+        let command_area = pad_rect(rows[2]);
+        frame.render_widget(&self.command_textarea, command_area);
+        if cmd_focused {
+            set_textarea_cursor(frame, &self.command_textarea, command_area);
+        }
 
         let prompt_focused = self.field == SummarizerField::Prompt;
         render_field_label(
@@ -1682,7 +2089,11 @@ impl SummarizerModalState {
             prompt_focused,
         );
         style_textarea(&mut self.prompt_textarea, theme, prompt_focused);
-        frame.render_widget(&self.prompt_textarea, pad_rect(rows[5]));
+        let prompt_area = pad_rect(rows[5]);
+        frame.render_widget(&self.prompt_textarea, prompt_area);
+        if prompt_focused {
+            set_textarea_cursor(frame, &self.prompt_textarea, prompt_area);
+        }
 
         frame.render_widget(
             Paragraph::new("─".repeat(inner.width as usize))
@@ -1735,14 +2146,18 @@ fn summarizer_rows_from_inner(inner: Rect) -> Vec<Rect> {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
-    use ratatui::layout::Rect;
+    use ratatui::layout::{Position, Rect};
     use ratatui::style::Style;
+    use ratatui::Terminal;
+    use unicode_width::UnicodeWidthStr;
 
     use super::{
-        collapse_spaces, settings_popup_area, settings_rows, summarizer_rows, template_picker_rows,
+        collapse_spaces, inline_radio_row, inline_radio_selected_column, option_label,
+        settings_popup_area, settings_rows, summarizer_rows, template_picker_rows, theme_labels,
         SettingsField, SettingsModalState, SettingsOutcome, SummarizerModalState, TemplatePicker,
-        TemplatePickerField, TemplateShell,
+        TemplatePickerField, TemplateShell, CLAUDE_EFFORTS, CLAUDE_MODELS, PICKER_BACKENDS,
     };
     use crate::settings::{Settings, ThemeName};
     use crate::summary::SummarizeBackend;
@@ -1846,6 +2261,84 @@ mod tests {
     }
 
     #[test]
+    fn clicking_theme_item_selects_that_theme() {
+        let mut state = SettingsModalState::new(&Settings::default());
+        let area = Rect::new(0, 0, 120, 40);
+        let rows = settings_rows(area);
+        let rendered =
+            spans_text(&state.render_inline_theme_row(rows[1].width, &Theme::default(), true));
+        let sunset_byte = rendered.find("sunset").expect("sunset should be visible");
+        let sunset_column = rows[1].x + UnicodeWidthStr::width(&rendered[..sunset_byte]) as u16;
+
+        state.handle_mouse(
+            area,
+            MouseEventKind::Down(MouseButton::Left),
+            sunset_column,
+            rows[1].y,
+        );
+
+        assert_eq!(*state.field.current(), SettingsField::Theme);
+        assert_eq!(*state.theme.current(), ThemeName::Sunset);
+    }
+
+    #[test]
+    fn clicking_theme_label_focuses_without_cycling_theme() {
+        let mut state = SettingsModalState::new(&Settings::default());
+        assert!(state.field.set(&SettingsField::ClaudeCommand));
+        let area = Rect::new(0, 0, 120, 40);
+        let rows = settings_rows(area);
+
+        state.handle_mouse(
+            area,
+            MouseEventKind::Down(MouseButton::Left),
+            rows[1].x,
+            rows[1].y,
+        );
+
+        assert_eq!(*state.field.current(), SettingsField::Theme);
+        assert_eq!(*state.theme.current(), ThemeName::Lazygit);
+    }
+
+    #[test]
+    fn settings_theme_focus_places_cursor_on_selected_theme() {
+        let mut state = SettingsModalState::new(&Settings::default());
+        assert!(state.field.set(&SettingsField::Theme));
+        let area = Rect::new(0, 0, 120, 40);
+        let rows = settings_rows(area);
+        let items = theme_labels();
+        let expected_x =
+            inline_radio_selected_column("Theme", &items, state.theme.index(), rows[1]).unwrap();
+
+        let mut terminal = test_terminal(area);
+        terminal
+            .draw(|frame| state.render(frame, area, &Theme::default()))
+            .unwrap();
+
+        assert_eq!(
+            terminal.backend().cursor_position(),
+            Position::new(expected_x, rows[1].y)
+        );
+    }
+
+    #[test]
+    fn settings_summarizer_button_focus_places_cursor_on_button() {
+        let mut state = SettingsModalState::new(&Settings::default());
+        assert!(state.field.set(&SettingsField::EditSummarizer));
+        let area = Rect::new(0, 0, 120, 40);
+        let rows = settings_rows(area);
+
+        let mut terminal = test_terminal(area);
+        terminal
+            .draw(|frame| state.render(frame, area, &Theme::default()))
+            .unwrap();
+
+        assert_eq!(
+            terminal.backend().cursor_position(),
+            Position::new(rows[18].x + 2, rows[18].y)
+        );
+    }
+
+    #[test]
     fn clicking_summarizer_prompt_focuses_prompt_textarea() {
         let mut summarizer = SummarizerModalState::new("cmd", "");
         let host = settings_popup_area(Rect::new(0, 0, 120, 40));
@@ -1865,6 +2358,54 @@ mod tests {
     }
 
     #[test]
+    fn summarizer_command_focus_places_cursor_in_command_textarea() {
+        let mut summarizer = SummarizerModalState::new("cmd", "prompt");
+        assert!(summarizer.field.set(&super::SummarizerField::Command));
+        let area = Rect::new(0, 0, 120, 40);
+        let host = settings_popup_area(area);
+        let rows = summarizer_rows(host);
+        let command_area = super::pad_rect(rows[2]);
+
+        let mut terminal = test_terminal(area);
+        terminal
+            .draw(|frame| summarizer.render(frame, host, &Theme::default()))
+            .unwrap();
+        let cursor = summarizer.command_textarea.screen_cursor();
+
+        assert_eq!(
+            terminal.backend().cursor_position(),
+            Position::new(
+                command_area.x + cursor.col as u16,
+                command_area.y + cursor.row as u16
+            )
+        );
+    }
+
+    #[test]
+    fn summarizer_prompt_focus_places_cursor_in_prompt_textarea() {
+        let mut summarizer = SummarizerModalState::new("cmd", "prompt");
+        assert!(summarizer.field.set(&super::SummarizerField::Prompt));
+        let area = Rect::new(0, 0, 120, 40);
+        let host = settings_popup_area(area);
+        let rows = summarizer_rows(host);
+        let prompt_area = super::pad_rect(rows[5]);
+
+        let mut terminal = test_terminal(area);
+        terminal
+            .draw(|frame| summarizer.render(frame, host, &Theme::default()))
+            .unwrap();
+        let cursor = summarizer.prompt_textarea.screen_cursor();
+
+        assert_eq!(
+            terminal.backend().cursor_position(),
+            Position::new(
+                prompt_area.x + cursor.col as u16,
+                prompt_area.y + cursor.row as u16
+            )
+        );
+    }
+
+    #[test]
     fn scrolling_summarizer_textarea_focuses_that_field() {
         let mut summarizer =
             SummarizerModalState::new("cmd", "one\ntwo\nthree\nfour\nfive\nsix\nseven");
@@ -1879,20 +2420,131 @@ mod tests {
     }
 
     #[test]
-    fn clicking_template_picker_rows_focuses_and_cycles_values() {
+    fn clicking_template_picker_backend_item_selects_backend() {
         let mut picker = TemplatePicker::new(TemplateShell::Zsh);
         let host = Rect::new(10, 5, 80, 30);
         let rows = template_picker_rows(host);
+        let items = PICKER_BACKENDS
+            .iter()
+            .map(|b| super::backend_label(*b).to_owned())
+            .collect::<Vec<_>>();
+        let codex_column =
+            radio_item_column("Backend", &items, picker.backend.index(), rows[2], "Codex");
 
         picker.handle_mouse(
             host,
             MouseEventKind::Down(MouseButton::Left),
-            rows[2].x,
+            codex_column,
             rows[2].y,
         );
 
         assert_eq!(*picker.field.current(), TemplatePickerField::Backend);
         assert!(picker.backend == SummarizeBackend::Codex);
+    }
+
+    #[test]
+    fn clicking_template_picker_shell_item_selects_shell() {
+        let mut picker = TemplatePicker::new(TemplateShell::Zsh);
+        let host = Rect::new(10, 5, 80, 30);
+        let rows = template_picker_rows(host);
+        let items = TemplateShell::ALL
+            .iter()
+            .map(|shell| shell.label().to_owned())
+            .collect::<Vec<_>>();
+        let bash_column = radio_item_column("Shell", &items, picker.shell.index(), rows[1], "bash");
+
+        picker.handle_mouse(
+            host,
+            MouseEventKind::Down(MouseButton::Left),
+            bash_column,
+            rows[1].y,
+        );
+
+        assert_eq!(*picker.field.current(), TemplatePickerField::Shell);
+        assert!(picker.shell == TemplateShell::Bash);
+    }
+
+    #[test]
+    fn clicking_template_picker_model_item_selects_model() {
+        let mut picker = TemplatePicker::new(TemplateShell::Zsh);
+        let host = Rect::new(10, 5, 80, 30);
+        let rows = template_picker_rows(host);
+        let items = CLAUDE_MODELS
+            .iter()
+            .map(|model| option_label(*model))
+            .collect::<Vec<_>>();
+        let haiku_column = radio_item_column(
+            "Model",
+            &items,
+            picker.claude_model.index(),
+            rows[3],
+            "haiku",
+        );
+
+        picker.handle_mouse(
+            host,
+            MouseEventKind::Down(MouseButton::Left),
+            haiku_column,
+            rows[3].y,
+        );
+
+        assert_eq!(*picker.field.current(), TemplatePickerField::Model);
+        assert_eq!(*picker.claude_model.current(), Some("haiku"));
+    }
+
+    #[test]
+    fn clicking_template_picker_effort_item_selects_effort() {
+        let mut picker = TemplatePicker::new(TemplateShell::Zsh);
+        let host = Rect::new(10, 5, 80, 30);
+        let rows = template_picker_rows(host);
+        let items = CLAUDE_EFFORTS
+            .iter()
+            .map(|effort| option_label(*effort))
+            .collect::<Vec<_>>();
+        let max_column = radio_item_column(
+            "Effort",
+            &items,
+            picker.claude_effort.index(),
+            rows[4],
+            "max",
+        );
+
+        picker.handle_mouse(
+            host,
+            MouseEventKind::Down(MouseButton::Left),
+            max_column,
+            rows[4].y,
+        );
+
+        assert_eq!(*picker.field.current(), TemplatePickerField::Effort);
+        assert_eq!(*picker.claude_effort.current(), Some("max"));
+    }
+
+    #[test]
+    fn template_picker_radio_focus_places_cursor_on_selected_item() {
+        let mut picker = TemplatePicker::new(TemplateShell::Zsh);
+        assert!(picker.field.set(&TemplatePickerField::Model));
+        let area = Rect::new(0, 0, 120, 40);
+        let host = settings_popup_area(area);
+        let picker_host = super::inset_popup(host);
+        let rows = template_picker_rows(picker_host);
+        let items = CLAUDE_MODELS
+            .iter()
+            .map(|model| option_label(*model))
+            .collect::<Vec<_>>();
+        let expected_x =
+            inline_radio_selected_column("Model", &items, picker.claude_model.index(), rows[3])
+                .unwrap();
+
+        let mut terminal = test_terminal(area);
+        terminal
+            .draw(|frame| picker.render(frame, picker_host, &Theme::default()))
+            .unwrap();
+
+        assert_eq!(
+            terminal.backend().cursor_position(),
+            Position::new(expected_x, rows[3].y)
+        );
     }
 
     #[test]
@@ -1902,11 +2554,16 @@ mod tests {
         summarizer.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
         let picker_host = super::inset_popup(settings_popup);
         let rows = template_picker_rows(picker_host);
+        let items = PICKER_BACKENDS
+            .iter()
+            .map(|b| super::backend_label(*b).to_owned())
+            .collect::<Vec<_>>();
+        let codex_column = radio_item_column("Backend", &items, 0, rows[2], "Codex");
 
         summarizer.handle_mouse(
             settings_popup,
             MouseEventKind::Down(MouseButton::Left),
-            rows[2].x,
+            codex_column,
             rows[2].y,
         );
 
@@ -2007,9 +2664,33 @@ mod tests {
             .collect::<String>()
     }
 
+    fn radio_item_column(
+        label: &str,
+        items: &[String],
+        selected: usize,
+        area: Rect,
+        needle: &str,
+    ) -> u16 {
+        let rendered = spans_text(&inline_radio_row(
+            label,
+            items,
+            selected,
+            area.width,
+            &Theme::default(),
+            true,
+        ));
+        let byte = rendered.find(needle).expect("radio item should be visible");
+        area.x + UnicodeWidthStr::width(&rendered[..byte]) as u16
+    }
+
     fn active_arrow_style(theme: &Theme) -> Style {
         Style::default()
             .fg(theme.accent)
             .add_modifier(ratatui::style::Modifier::BOLD)
+    }
+
+    fn test_terminal(area: Rect) -> Terminal<TestBackend> {
+        let backend = TestBackend::new(area.width, area.height);
+        Terminal::new(backend).unwrap()
     }
 }
