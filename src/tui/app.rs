@@ -1209,16 +1209,8 @@ impl App {
             KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.cycle_snippet_source()
             }
-            KeyCode::Char(']') | KeyCode::Char('5')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.resize_preview(5)
-            }
-            KeyCode::Char('\\') | KeyCode::Char('4')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.resize_preview(-5)
-            }
+            KeyCode::Left if key.modifiers == KeyModifiers::SHIFT => self.resize_preview(5),
+            KeyCode::Right if key.modifiers == KeyModifiers::SHIFT => self.resize_preview(-5),
             _ => {
                 let before = self.query.value().to_owned();
                 if self.query.handle_event(&Event::Key(key)).is_some()
@@ -4436,22 +4428,16 @@ mod tests {
     }
 
     #[test]
-    fn control_bracket_keys_resize_preview_divider() {
+    fn shift_arrow_keys_resize_preview_divider() {
         let mut app = test_app();
         app.preview_width_pct = 40;
 
-        app.handle_key(crossterm_key_mods(
-            KeyCode::Char(']'),
-            KeyModifiers::CONTROL,
-        ))
-        .unwrap();
+        app.handle_key(crossterm_key_mods(KeyCode::Left, KeyModifiers::SHIFT))
+            .unwrap();
         assert_eq!(app.preview_width_pct, 45);
 
-        app.handle_key(crossterm_key_mods(
-            KeyCode::Char('\\'),
-            KeyModifiers::CONTROL,
-        ))
-        .unwrap();
+        app.handle_key(crossterm_key_mods(KeyCode::Right, KeyModifiers::SHIFT))
+            .unwrap();
         assert_eq!(app.preview_width_pct, 40);
     }
 

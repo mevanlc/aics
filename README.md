@@ -100,7 +100,7 @@ Large transcript fields are fetched from Rust only when a rule calls one of the 
 | `^S` | Settings modal |
 | `^T` | Toggle preview panel |
 | `^Y` | Toggle session/summary preview mode |
-| `^]` / `^\` | Resize list/preview split; `Ctrl+5` / `Ctrl+4` are aliases |
+| `Shift+←` / `Shift+→` | Resize list/preview split |
 | `Shift+↑` / `Shift+↓` | Jump between messages in the viewer |
 | `?` / `^L` | Help |
 | `Esc` | Cancel / close modal |

@@ -112,9 +112,9 @@ const SESSION_LIST_ITEMS: [HelpItem; 20] = [
         "Cycle the selected session card snippet between session text and available summaries. The preview pane always shows all available summaries plus the session log.",
     ),
     HelpItem::new(
-        "^] / ^\\",
+        "Shift ← / →",
         "resize preview",
-        "Resize the preview pane width. Ctrl+] moves the divider left; Ctrl+\\ moves it right. Ctrl+5 and Ctrl+4 are accepted aliases.",
+        "Resize the preview pane width. Shift+Left moves the divider left; Shift+Right moves it right.",
     ),
     HelpItem::new(
         "^C",
