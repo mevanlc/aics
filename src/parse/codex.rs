@@ -281,7 +281,9 @@ fn handle_response_item(
                     }
                 }
 
-                push_unique_chunk(content_chunks, text);
+                if should_index_message(role) {
+                    push_unique_chunk(content_chunks, text);
+                }
             }
 
             if let Some(found_cwd) = extract_cwd_from_message(payload) {
@@ -472,7 +474,7 @@ fn extract_cwd_from_message(payload: &Value) -> Option<String> {
 }
 
 fn should_skip_display_message(role: &str, text: &str) -> bool {
-    if matches!(role, "developer" | "system") {
+    if is_internal_message_role(role) {
         return true;
     }
 
@@ -480,6 +482,14 @@ fn should_skip_display_message(role: &str, text: &str) -> bool {
     trimmed.starts_with("<environment_context>")
         || trimmed.starts_with("<permissions instructions>")
         || trimmed.starts_with("<collaboration_mode>")
+}
+
+fn should_index_message(role: &str) -> bool {
+    !is_internal_message_role(role)
+}
+
+fn is_internal_message_role(role: &str) -> bool {
+    matches!(role, "developer" | "system")
 }
 
 fn map_display_role(role: &str) -> Option<MessageRole> {
@@ -1693,6 +1703,29 @@ mod cell_tests {
                 "{name}: cells should not be empty"
             );
         }
+    }
+
+    #[test]
+    fn parser_excludes_developer_and_system_messages_from_searchable_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let body = concat!(
+            "{\"timestamp\":\"2026-04-26T18:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"timestamp\":\"2026-04-26T18:00:00Z\",\"cwd\":\"/tmp\"}}\n",
+            "{\"timestamp\":\"2026-04-26T18:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"developer-only needle\"}]}}\n",
+            "{\"timestamp\":\"2026-04-26T18:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"system-only needle\"}]}}\n",
+            "{\"timestamp\":\"2026-04-26T18:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"searchable user text\"}]}}\n",
+            "{\"timestamp\":\"2026-04-26T18:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"searchable assistant text\"}]}}\n",
+        );
+        std::fs::write(&path, body).expect("write fixture");
+
+        let session = parse_codex_session_file(&path)
+            .expect("parse")
+            .expect("session");
+
+        assert!(!session.content.contains("developer-only needle"));
+        assert!(!session.content.contains("system-only needle"));
+        assert!(session.content.contains("searchable user text"));
+        assert!(session.content.contains("searchable assistant text"));
     }
 
     #[test]

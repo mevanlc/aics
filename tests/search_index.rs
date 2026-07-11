@@ -54,6 +54,36 @@ fn search_query_returns_matching_sessions() -> Result<()> {
 }
 
 #[test]
+fn search_excludes_codex_developer_messages() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+
+    let developer_hits = engine.search(&SearchRequest {
+        query: "Filesystem sandboxing".to_owned(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Relevance,
+        filters: SearchFilters::default(),
+    })?;
+    assert!(developer_hits.is_empty());
+
+    let user_hits = engine.search(&SearchRequest {
+        query: "health check endpoint".to_owned(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Relevance,
+        filters: SearchFilters::default(),
+    })?;
+    assert!(user_hits
+        .iter()
+        .any(|hit| hit.session.file_path.ends_with("rollout-latest.jsonl")));
+    Ok(())
+}
+
+#[test]
 fn multi_word_queries_default_to_and() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
@@ -162,6 +192,11 @@ fn fixture_roots(temp: &TempDir) -> Result<SessionRoots> {
         temp,
         "tests/fixtures/sessions/codex/minimal.jsonl",
         ".codex/sessions/2026/01/15/rollout-minimal.jsonl",
+    )?;
+    copy_fixture(
+        temp,
+        "tests/fixtures/sessions/codex/latest_format.jsonl",
+        ".codex/sessions/2026/03/18/rollout-latest.jsonl",
     )?;
 
     Ok(SessionRoots {

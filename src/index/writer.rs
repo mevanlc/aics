@@ -502,9 +502,9 @@ fn searchable_content(session: &Session) -> String {
     chunks.join("\n\n")
 }
 
-/// Bump when fields stored in `session_json` (StoredSession) change shape so old
-/// state files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 3;
+/// Bump when stored fields or searchable-content semantics change so old state
+/// files are discarded and the index is rebuilt against fresh data.
+const INDEX_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {
