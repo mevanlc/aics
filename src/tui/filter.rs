@@ -45,6 +45,9 @@ const DISPLAY_ORDER: [DisplayField; 5] = [
     DisplayField::UserMessages,
 ];
 
+const FILTER_COLUMN_WIDTH: u16 = 27;
+const DISPLAY_LABEL_WIDTH: usize = "AGENTS.md/CLAUDE.md".len() + 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterField {
     Scope,
@@ -262,19 +265,20 @@ impl FilterModalState {
         let popup = popup_area(area);
         frame.render_widget(Clear, popup);
 
+        let visibility_title_gap =
+            "─".repeat(FILTER_COLUMN_WIDTH.saturating_sub("Filters".len() as u16) as usize);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(theme.border_style(true))
-            .title(block_title("Filters"));
+            .title(block_title(format!(
+                "Filters{visibility_title_gap}Visibility"
+            )));
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
 
         let chunks = filter_chunks(inner);
-        let columns =
-            Layout::horizontal([Constraint::Length(27), Constraint::Min(0)]).split(chunks.top);
-        let left_rows = columns[0];
-        let right_rows = columns[1];
+        let (left_rows, column_separator, right_rows) = split_filter_columns(chunks.top);
 
         let mut rows = Vec::new();
         for field in FIELD_ORDER {
@@ -324,12 +328,13 @@ impl FilterModalState {
                 };
                 Line::from(vec![
                     Span::styled(prefix, style),
-                    Span::styled(format!("{:<28}", field.label()), style),
+                    Span::styled(format!("{:<DISPLAY_LABEL_WIDTH$}", field.label()), style),
                     Span::styled(field.value(self.display_options), style),
                 ])
             })
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(display_rows), right_rows);
+        render_vertical_separator(frame, column_separator, theme);
 
         render_separator(frame, chunks.top_separator, theme);
 
@@ -539,6 +544,13 @@ fn render_separator(frame: &mut Frame, area: Rect, theme: &Theme) {
     );
 }
 
+fn render_vertical_separator(frame: &mut Frame, area: Rect, theme: &Theme) {
+    let rows = (0..area.height)
+        .map(|_| Line::from(Span::styled("│", Style::default().fg(theme.border))))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(rows), area);
+}
+
 #[derive(Debug, Clone, Copy)]
 struct FilterChunks {
     top: Rect,
@@ -575,9 +587,18 @@ fn filter_columns(area: Rect) -> (Rect, Rect) {
     let popup = popup_area(area);
     let inner = Block::default().borders(Borders::ALL).inner(popup);
     let chunks = filter_chunks(inner);
-    let columns =
-        Layout::horizontal([Constraint::Length(27), Constraint::Min(0)]).split(chunks.top);
-    (columns[0], columns[1])
+    let (left, _, right) = split_filter_columns(chunks.top);
+    (left, right)
+}
+
+fn split_filter_columns(area: Rect) -> (Rect, Rect, Rect) {
+    let columns = Layout::horizontal([
+        Constraint::Length(FILTER_COLUMN_WIDTH),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    (columns[0], columns[1], columns[2])
 }
 
 fn field_rows_area(area: Rect) -> Rect {
@@ -717,11 +738,11 @@ impl FilterField {
 impl DisplayField {
     fn label(self) -> &'static str {
         match self {
-            Self::ProjectDocsAutodump => "Hide AGENTS.md/CLAUDE.md",
-            Self::ToolCalls => "Hide Tool Calls",
-            Self::ToolResults => "Hide Tool Results",
-            Self::AgentReplies => "Hide Agent Replies",
-            Self::UserMessages => "Hide User Messages",
+            Self::ProjectDocsAutodump => "AGENTS.md/CLAUDE.md",
+            Self::ToolCalls => "Tool Calls",
+            Self::ToolResults => "Tool Results",
+            Self::AgentReplies => "Agent Replies",
+            Self::UserMessages => "User Messages",
         }
     }
 
@@ -738,14 +759,14 @@ impl DisplayField {
     }
 
     fn value(self, options: DisplayOptions) -> String {
-        let enabled = match self {
+        let hidden = match self {
             DisplayField::ProjectDocsAutodump => options.hide_project_docs_autodump,
             DisplayField::ToolCalls => options.hide_tool_calls,
             DisplayField::ToolResults => options.hide_tool_results,
             DisplayField::AgentReplies => options.hide_agent_replies,
             DisplayField::UserMessages => options.hide_user_messages,
         };
-        on_off(enabled)
+        on_off(!hidden)
     }
 }
 
@@ -821,8 +842,10 @@ fn format_optional_date(value: Option<u64>) -> String {
 mod tests {
     use std::path::PathBuf;
 
+    use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
+    use ratatui::Terminal;
 
     use super::{
         display_rows_area, field_rows_area, DisplayField, FilterField, FilterModalState, FilterSide,
@@ -830,6 +853,53 @@ mod tests {
     use crate::index::{Scope, SearchFilters, SortMode};
     use crate::parse::Agent;
     use crate::settings::DisplayOptions;
+    use crate::tui::theme::Theme;
+
+    #[test]
+    fn display_options_are_presented_as_visibility_settings() {
+        let defaults = DisplayOptions::default();
+
+        assert_eq!(
+            DisplayField::ProjectDocsAutodump.label(),
+            "AGENTS.md/CLAUDE.md"
+        );
+        assert_eq!(DisplayField::ProjectDocsAutodump.value(defaults), "off");
+        assert_eq!(DisplayField::ToolResults.label(), "Tool Results");
+        assert_eq!(DisplayField::ToolResults.value(defaults), "on");
+    }
+
+    #[test]
+    fn filter_modal_renders_visibility_header_and_column_divider() {
+        let area = Rect::new(0, 0, 120, 40);
+        let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
+        let state = FilterModalState::new(
+            &scope,
+            &SearchFilters::default(),
+            SortMode::Time,
+            DisplayOptions::default(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+
+        terminal
+            .draw(|frame| state.render(frame, area, &Theme::default(), "demo"))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let left = field_rows_area(area);
+        let right = display_rows_area(area);
+        let visibility_header = (0.."Visibility".len() as u16)
+            .map(|offset| buffer[(right.x + offset, left.y - 1)].symbol())
+            .collect::<String>();
+        let first_value_x = right.x + 1 + super::DISPLAY_LABEL_WIDTH as u16;
+        assert_eq!(visibility_header, "Visibility");
+        assert_eq!(right.x, left.right() + 1);
+        assert_eq!(buffer[(first_value_x - 2, right.y)].symbol(), " ");
+        assert_eq!(buffer[(first_value_x - 1, right.y)].symbol(), " ");
+        assert_eq!(buffer[(first_value_x, right.y)].symbol(), "o");
+        for row in left.y..left.bottom() {
+            assert_eq!(buffer[(left.right(), row)].symbol(), "│");
+        }
+    }
 
     #[test]
     fn ctrl_r_resets_sort_to_time() {
