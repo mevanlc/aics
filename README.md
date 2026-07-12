@@ -139,10 +139,6 @@ but cannot be parsed at startup, it is moved aside to
 `settings.json.corrupt-<timestamp>` and defaults are used; a warning is printed
 to stderr and shown in the TUI statusline.
 
-Set `AICS_SETTINGS_LOGFILE=<path>` to append a diagnostic line for every
-settings load/save. The process id is inserted into the filename so concurrent
-instances do not clobber each other (`settings.log` → `settings.<pid>.log`).
-
 Available options:
 
 - `theme` (`lazygit`, `aics`, `sunset`, `late.sh`)

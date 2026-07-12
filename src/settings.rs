@@ -164,51 +164,6 @@ impl SettingsPatch {
         }
     }
 
-    /// Names of the fields this patch will write, for diagnostic logging.
-    fn field_names(&self) -> Vec<&'static str> {
-        let mut names = Vec::new();
-        if self.theme.is_some() {
-            names.push("theme");
-        }
-        if self.claude_command.is_some() {
-            names.push("claude_command");
-        }
-        if self.claude_args.is_some() {
-            names.push("claude_args");
-        }
-        if self.codex_command.is_some() {
-            names.push("codex_command");
-        }
-        if self.codex_args.is_some() {
-            names.push("codex_args");
-        }
-        if self.show_preview.is_some() {
-            names.push("show_preview");
-        }
-        if self.preview_width_pct.is_some() {
-            names.push("preview_width_pct");
-        }
-        if self.session_separator.is_some() {
-            names.push("session_separator");
-        }
-        if self.snippet_line_count.is_some() {
-            names.push("snippet_line_count");
-        }
-        if self.summarize_command.is_some() {
-            names.push("summarize_command");
-        }
-        if self.summarize_prompt.is_some() {
-            names.push("summarize_prompt");
-        }
-        if self.display_options.is_some() {
-            names.push("display_options");
-        }
-        if self.default_filter.is_some() {
-            names.push("default_filter");
-        }
-        names
-    }
-
     pub fn apply_to(&self, settings: &mut Settings) {
         if let Some(value) = self.theme {
             settings.theme = value;
@@ -341,33 +296,25 @@ impl Settings {
     pub fn load_with_recovery() -> LoadedSettings {
         match settings_path() {
             Ok(path) => Self::load_with_recovery_from_path(&path),
-            Err(err) => {
-                let warning = format!("cannot locate settings: {err:#}");
-                settings_log(&format!("load: {warning}"));
-                LoadedSettings {
-                    settings: Self::default(),
-                    warning: Some(warning),
-                }
-            }
+            Err(err) => LoadedSettings {
+                settings: Self::default(),
+                warning: Some(format!("cannot locate settings: {err:#}")),
+            },
         }
     }
 
     fn load_with_recovery_from_path(path: &Path) -> LoadedSettings {
         if !path.exists() {
-            settings_log(&format!("load: {} missing, using defaults", path.display()));
             return LoadedSettings {
                 settings: Self::default(),
                 warning: None,
             };
         }
         match Self::load_from_path(path) {
-            Ok(settings) => {
-                settings_log(&format!("load: {} ok", path.display()));
-                LoadedSettings {
-                    settings,
-                    warning: None,
-                }
-            }
+            Ok(settings) => LoadedSettings {
+                settings,
+                warning: None,
+            },
             Err(err) => {
                 let warning = match backup_corrupt_settings(path) {
                     Ok(backup) => format!(
@@ -378,7 +325,6 @@ impl Settings {
                         format!("settings unusable ({err:#}); backup also failed ({backup_err:#})")
                     }
                 };
-                settings_log(&format!("load: {warning}"));
                 LoadedSettings {
                     settings: Self::default(),
                     warning: Some(warning),
@@ -410,46 +356,24 @@ impl Settings {
 
     fn save_to_path(path: &Path, settings: &Self) -> Result<()> {
         let contents = serde_json::to_string_pretty(settings)?;
-        let result = write_atomic(path, &contents);
-        match &result {
-            Ok(()) => settings_log(&format!("save_full ok path={}", path.display())),
-            Err(err) => settings_log(&format!(
-                "save_full FAILED path={}: {err:#}",
-                path.display()
-            )),
-        }
-        result
+        write_atomic(path, &contents)
     }
 
     fn save_patch_to_path(path: &Path, patch: &SettingsPatch) -> Result<Self> {
-        let fields = patch.field_names().join(",");
-        let result = (|| {
-            let raw = load_raw_settings(path)?;
-            let mut settings = raw
-                .as_ref()
-                .map(|value| {
-                    serde_json::from_value(value.clone())
-                        .with_context(|| format!("failed to parse {}", path.display()))
-                })
-                .unwrap_or_else(|| Ok(Self::default()))?;
-            patch.apply_to(&mut settings);
+        let raw = load_raw_settings(path)?;
+        let mut settings = raw
+            .as_ref()
+            .map(|value| {
+                serde_json::from_value(value.clone())
+                    .with_context(|| format!("failed to parse {}", path.display()))
+            })
+            .unwrap_or_else(|| Ok(Self::default()))?;
+        patch.apply_to(&mut settings);
 
-            let mut output = serde_json::to_value(&settings)?;
-            preserve_unknown_settings_fields(raw.as_ref(), &mut output);
-            write_settings_value(path, &output)?;
-            Ok(settings)
-        })();
-        match &result {
-            Ok(_) => settings_log(&format!(
-                "save_patch ok fields=[{fields}] path={}",
-                path.display()
-            )),
-            Err(err) => settings_log(&format!(
-                "save_patch FAILED fields=[{fields}] path={}: {err:#}",
-                path.display()
-            )),
-        }
-        result
+        let mut output = serde_json::to_value(&settings)?;
+        preserve_unknown_settings_fields(raw.as_ref(), &mut output);
+        write_settings_value(path, &output)?;
+        Ok(settings)
     }
 
     /// Split a command string into program and arguments.
@@ -542,57 +466,6 @@ fn backup_corrupt_settings(path: &Path) -> Result<PathBuf> {
     fs::rename(path, &candidate)
         .with_context(|| format!("failed to move {} aside", path.display()))?;
     Ok(candidate)
-}
-
-/// When this env var is set to a file path, every settings load/save appends
-/// a diagnostic line there — an aid for tracking down unexpected resets.
-/// The process id is inserted into the filename so concurrent instances each
-/// log to their own file (`settings.log` becomes `settings.<pid>.log`).
-pub const SETTINGS_LOGFILE_ENV: &str = "AICS_SETTINGS_LOGFILE";
-
-fn settings_log(message: &str) {
-    let Ok(path) = std::env::var(SETTINGS_LOGFILE_ENV) else {
-        return;
-    };
-    if path.trim().is_empty() {
-        return;
-    }
-    append_settings_log(&per_pid_log_path(Path::new(&path)), message);
-}
-
-/// `settings.log` -> `settings.<pid>.log`; a name without an extension gets
-/// `.<pid>` appended.
-fn per_pid_log_path(base: &Path) -> PathBuf {
-    let pid = std::process::id();
-    let stem = base.file_stem().and_then(|stem| stem.to_str());
-    let ext = base.extension().and_then(|ext| ext.to_str());
-    match (stem, ext) {
-        (Some(stem), Some(ext)) => base.with_file_name(format!("{stem}.{pid}.{ext}")),
-        _ => {
-            let mut name = base.as_os_str().to_os_string();
-            name.push(format!(".{pid}"));
-            PathBuf::from(name)
-        }
-    }
-}
-
-/// Best-effort append; diagnostics must never break the app.
-fn append_settings_log(path: &Path, message: &str) {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            let _ = fs::create_dir_all(parent);
-        }
-    }
-    let line = format!(
-        "{} pid={} {message}\n",
-        chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f"),
-        std::process::id(),
-    );
-    let _ = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut file| file.write_all(line.as_bytes()));
 }
 
 fn preserve_unknown_settings_fields(raw: Option<&Value>, output: &mut Value) {
@@ -967,48 +840,6 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             garbage,
             "corrupt file must be left untouched"
-        );
-    }
-
-    #[test]
-    fn patch_field_names_reflect_set_fields() {
-        assert_eq!(
-            SettingsPatch::layout(true, 40).field_names(),
-            vec!["show_preview", "preview_width_pct"]
-        );
-        assert_eq!(
-            SettingsPatch::display_options(DisplayOptions::default()).field_names(),
-            vec!["display_options"]
-        );
-    }
-
-    #[test]
-    fn settings_log_appends_timestamped_lines() {
-        let temp = TempDir::new().unwrap();
-        // Nested, not-yet-existing directory: the logger must create it.
-        let log = temp.path().join("nested").join("dir").join("settings.log");
-
-        append_settings_log(&log, "first");
-        append_settings_log(&log, "second");
-
-        let contents = fs::read_to_string(&log).unwrap();
-        let lines: Vec<&str> = contents.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].ends_with("first"));
-        assert!(lines[1].ends_with("second"));
-        assert!(lines[0].contains(&format!("pid={}", std::process::id())));
-    }
-
-    #[test]
-    fn per_pid_log_path_inserts_pid_into_filename() {
-        let pid = std::process::id();
-        assert_eq!(
-            per_pid_log_path(Path::new("/tmp/settings.log")),
-            PathBuf::from(format!("/tmp/settings.{pid}.log"))
-        );
-        assert_eq!(
-            per_pid_log_path(Path::new("/tmp/settingslog")),
-            PathBuf::from(format!("/tmp/settingslog.{pid}"))
         );
     }
 }
