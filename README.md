@@ -67,7 +67,7 @@ By default, searches are scoped to the current working directory. Use `-g` / `--
 ### JavaScript rules
 
 Rules live at `~/.config/aics/rules.js` by default. Use `--preview-rules` to review proposed actions in the TUI without changing files, or add `--json` to print proposed actions as JSONL. Use `--apply-rules` to apply supported actions non-interactively. Use `--rules PATH` to test another rules file. Run `aics --write-rules-dts` to write TypeScript declarations for the rules API to `~/.config/aics/rules.d.ts`.
-Rules receive session metadata such as `session.model`, `session.modelProvider`, `session.reasoningEffort`, `session.approvalPolicy`, and `session.sandboxMode`.
+Rules receive session metadata such as `session.model`, `session.modelProvider`, `session.reasoningEffort`, `session.approvalPolicy`, and `session.sandboxMode`. Optional string properties on `session` are empty strings when their values are unavailable.
 
 ```js
 rule("trash short commit helper sessions", ({ turns, re }) => {

@@ -28,8 +28,88 @@ fn write_rules_dts_creates_default_config_file() -> Result<()> {
 
     let contents = fs::read_to_string(rules_dts)?;
     assert!(contents.contains("interface AicsRuleSession"));
+    let session_declaration = contents
+        .split_once("interface AicsRuleSession {")
+        .unwrap()
+        .1
+        .split_once("\n}")
+        .unwrap()
+        .0;
+    for field in [
+        "cwd",
+        "branch",
+        "customTitle",
+        "model",
+        "modelProvider",
+        "reasoningEffort",
+        "approvalPolicy",
+        "sandboxMode",
+    ] {
+        assert!(session_declaration.contains(&format!("{field}: string;")));
+        assert!(!session_declaration.contains(&format!("{field}: string | null;")));
+    }
     assert!(contents.contains("declare function rule("));
     assert!(contents.contains("declare function trash(reason?: string): AicsTrashAction;"));
+    Ok(())
+}
+
+#[test]
+fn rules_expose_missing_session_strings_as_empty() -> Result<()> {
+    let temp = TempDir::new()?;
+    let claude_session = temp
+        .path()
+        .join(".claude/projects/-tmp-project/model-less.jsonl");
+    fs::create_dir_all(claude_session.parent().unwrap())?;
+    fs::write(
+        &claude_session,
+        concat!(
+            r#"{"type":"user","sessionId":"model-less","message":{"role":"user","content":"first"}}"#,
+            "\n",
+            r#"{"type":"user","sessionId":"model-less","message":{"role":"user","content":"second"}}"#,
+            "\n",
+        ),
+    )?;
+    let rules = write_rules(
+        &temp,
+        r#"
+        rule("missing strings", ({ session }) => {
+          const optionalStrings = [
+            session.cwd,
+            session.branch,
+            session.customTitle,
+            session.model,
+            session.modelProvider,
+            session.reasoningEffort,
+            session.approvalPolicy,
+            session.sandboxMode,
+          ];
+          return optionalStrings.every(value => value === "" && !value.includes("present"))
+            ? trash("empty strings")
+            : nothing();
+        });
+        "#,
+    )?;
+    let session_roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        trash: None,
+    };
+
+    let report = run_rules_with_progress(
+        &session_roots,
+        &RulesOptions {
+            rules_path: rules,
+            mode: RulesMode::Preview,
+            json: true,
+            scope: Scope::Global,
+            filters: SearchFilters::default(),
+        },
+        |_| {},
+    )?;
+
+    assert!(report.errors.is_empty());
+    assert_eq!(report.proposals.len(), 1);
+    assert_eq!(report.proposals[0].rule, "missing strings");
     Ok(())
 }
 

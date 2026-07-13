@@ -164,19 +164,19 @@ interface AicsRuleSession {
   id: string;
   agent: AicsAgent;
   project: string;
-  cwd: string | null;
-  branch: string | null;
+  cwd: string;
+  branch: string;
   path: string;
   modifiedTs: number;
   lines: number;
   derivationType: AicsDerivationType;
   isSidechain: boolean;
-  customTitle: string | null;
-  model: string | null;
-  modelProvider: string | null;
-  reasoningEffort: string | null;
-  approvalPolicy: string | null;
-  sandboxMode: string | null;
+  customTitle: string;
+  model: string;
+  modelProvider: string;
+  reasoningEffort: string;
+  approvalPolicy: string;
+  sandboxMode: string;
   trashed: boolean;
   firstUserText(limit?: number): string;
   firstText(limit?: number): string;
@@ -1013,19 +1013,19 @@ struct RuleSession {
     id: String,
     agent: &'static str,
     project: String,
-    cwd: Option<String>,
-    branch: Option<String>,
+    cwd: String,
+    branch: String,
     path: String,
     modified_ts: u64,
     lines: usize,
     derivation_type: &'static str,
     is_sidechain: bool,
-    custom_title: Option<String>,
-    model: Option<String>,
-    model_provider: Option<String>,
-    reasoning_effort: Option<String>,
-    approval_policy: Option<String>,
-    sandbox_mode: Option<String>,
+    custom_title: String,
+    model: String,
+    model_provider: String,
+    reasoning_effort: String,
+    approval_policy: String,
+    sandbox_mode: String,
     trashed: bool,
 }
 
@@ -1036,19 +1036,27 @@ impl RuleSession {
             id: session.session_id.clone(),
             agent: session.agent.as_str(),
             project: session.project.clone(),
-            cwd: session.cwd.clone(),
-            branch: session.branch.clone(),
+            cwd: session.cwd.clone().unwrap_or_default(),
+            branch: session.branch.clone().unwrap_or_default(),
             path: file.path.to_string_lossy().into_owned(),
             modified_ts: session.modified_ts,
             lines: session.lines,
             derivation_type: session.derivation_type.as_str(),
             is_sidechain: session.is_sidechain,
-            custom_title: session.custom_title.clone(),
-            model: info.and_then(|info| info.model.clone()),
-            model_provider: info.and_then(|info| info.model_provider.clone()),
-            reasoning_effort: info.and_then(|info| info.reasoning_effort.clone()),
-            approval_policy: info.and_then(|info| info.approval_policy.clone()),
-            sandbox_mode: info.and_then(|info| info.sandbox_mode.clone()),
+            custom_title: session.custom_title.clone().unwrap_or_default(),
+            model: info.and_then(|info| info.model.clone()).unwrap_or_default(),
+            model_provider: info
+                .and_then(|info| info.model_provider.clone())
+                .unwrap_or_default(),
+            reasoning_effort: info
+                .and_then(|info| info.reasoning_effort.clone())
+                .unwrap_or_default(),
+            approval_policy: info
+                .and_then(|info| info.approval_policy.clone())
+                .unwrap_or_default(),
+            sandbox_mode: info
+                .and_then(|info| info.sandbox_mode.clone())
+                .unwrap_or_default(),
             trashed: file.trashed,
         }
     }
@@ -1276,19 +1284,19 @@ mod tests {
                 id: "s1".to_owned(),
                 agent,
                 project: "/tmp/project".to_owned(),
-                cwd: Some("/tmp/project".to_owned()),
-                branch: None,
+                cwd: "/tmp/project".to_owned(),
+                branch: String::new(),
                 path: "/tmp/session.jsonl".to_owned(),
                 modified_ts: 0,
                 lines: 1,
                 derivation_type: "original",
                 is_sidechain: false,
-                custom_title: None,
-                model: Some("test-spark".to_owned()),
-                model_provider: None,
-                reasoning_effort: None,
-                approval_policy: None,
-                sandbox_mode: None,
+                custom_title: String::new(),
+                model: "test-spark".to_owned(),
+                model_provider: String::new(),
+                reasoning_effort: String::new(),
+                approval_policy: String::new(),
+                sandbox_mode: String::new(),
                 trashed: false,
             },
             turns: RuleTurns {
@@ -1427,19 +1435,19 @@ mod tests {
                 id: "s1".to_owned(),
                 agent: "codex",
                 project: "/tmp/project".to_owned(),
-                cwd: Some("/tmp/project".to_owned()),
-                branch: None,
+                cwd: "/tmp/project".to_owned(),
+                branch: String::new(),
                 path: "/tmp/session.jsonl".to_owned(),
                 modified_ts: 0,
                 lines: 2,
                 derivation_type: "original",
                 is_sidechain: false,
-                custom_title: None,
-                model: Some("test-spark".to_owned()),
-                model_provider: None,
-                reasoning_effort: None,
-                approval_policy: None,
-                sandbox_mode: None,
+                custom_title: String::new(),
+                model: "test-spark".to_owned(),
+                model_provider: String::new(),
+                reasoning_effort: String::new(),
+                approval_policy: String::new(),
+                sandbox_mode: String::new(),
                 trashed: false,
             },
             turns: RuleTurns {
