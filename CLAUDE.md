@@ -29,7 +29,8 @@ Binary name: `aics`
 
 - Idiomatic Rust. Prefer clarity over cleverness.
 - `anyhow` for error propagation. `thiserror` if custom error types are needed.
-- `env_logger` for logging via `RUST_LOG=debug aics` etc.
+- `log4rs` for logging, with built-in `RUST_LOG=debug aics` filtering and an
+  optional `~/.config/aics/log4rs.yaml` override.
 - Parsers must be defensive: skip unrecognized entries, never crash on malformed input.
 - Stream JSONL files line-by-line (`BufReader`), never load whole files into memory.
 - Test fixtures live in `tests/fixtures/sessions/{claude,codex}/`.

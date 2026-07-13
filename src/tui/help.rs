@@ -394,10 +394,8 @@ impl HelpModalState {
                     self.move_selection(MOUSE_SCROLL_STEP);
                 }
             }
-            MouseEventKind::ScrollUp => {
-                if contains(chunks[2], column, row) {
-                    self.move_selection(-MOUSE_SCROLL_STEP);
-                }
+            MouseEventKind::ScrollUp if contains(chunks[2], column, row) => {
+                self.move_selection(-MOUSE_SCROLL_STEP);
             }
             _ => {}
         }
@@ -593,10 +591,8 @@ impl HelpModalState {
                     self.query_scroll = self.query_scroll.saturating_add(MOUSE_SCROLL_STEP as u16);
                 }
             }
-            MouseEventKind::ScrollUp => {
-                if contains(chunks[2], column, row) {
-                    self.query_scroll = self.query_scroll.saturating_sub(MOUSE_SCROLL_STEP as u16);
-                }
+            MouseEventKind::ScrollUp if contains(chunks[2], column, row) => {
+                self.query_scroll = self.query_scroll.saturating_sub(MOUSE_SCROLL_STEP as u16);
             }
             _ => {}
         }

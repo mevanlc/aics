@@ -193,7 +193,7 @@ The MVP story: user runs `aics -g`, sees all conversations sorted by last-modifi
 
 #### M1: Project Scaffold & Data Model
 
-1. **Cargo project scaffold** — `cargo init`, set up `Cargo.toml` with dependencies: `tantivy`, `ratatui`, `crossterm`, `tui-input`, `serde`, `serde_json`, `clap`, `chrono`, `unicode-width`, `unicode-segmentation`, `unicode-truncate`, `directories`, `anyhow`, `env_logger`, `log`. Set binary name to `aics`. Edition 2021. Use `anyhow` for error propagation throughout. Initialize `env_logger` early in `main()` so `RUST_LOG=debug aics` works for diagnostics.
+1. **Cargo project scaffold** — `cargo init`, set up `Cargo.toml` with dependencies: `tantivy`, `ratatui`, `crossterm`, `tui-input`, `serde`, `serde_json`, `clap`, `chrono`, `unicode-width`, `unicode-segmentation`, `unicode-truncate`, `directories`, `anyhow`, `env_logger`, `log`. Set binary name to `aics`. Edition 2021. Use `anyhow` for error propagation throughout. Initialize `env_logger` early in `main()` so `RUST_LOG=debug aics` works for diagnostics. (Historical scaffold note: the current implementation supersedes `env_logger` with `log4rs`; see `PLAN-MIGRATE-ALL-LOGGING-TO-LOG4RS.md`.)
 
 2. **Unified Session model** — Define the `Session` struct that both parsers produce and the index stores. Fields: `session_id`, `agent` (claude/codex), `project`, `branch`, `cwd`, `created`, `modified`, `modified_ts`, `lines`, `file_path`, `first_msg_role`, `first_msg_content`, `last_msg_role`, `last_msg_content`, `first_user_msg_content`, `derivation_type`, `is_sidechain`, `custom_title`. This is the common currency between parsing, indexing, and display.
 

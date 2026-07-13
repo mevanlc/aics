@@ -14,6 +14,7 @@ fn json_mode_emits_valid_jsonl_hits() -> Result<()> {
 
     let output = Command::new(env!("CARGO_BIN_EXE_aics"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CONFIG_ROOT", temp.path().join("config"))
         .env("AICS_CACHE_ROOT", &cache_root)
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.0)
@@ -50,6 +51,7 @@ fn json_mode_accepts_sort_by_relevance() -> Result<()> {
 
     let output = Command::new(env!("CARGO_BIN_EXE_aics"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CONFIG_ROOT", temp.path().join("config"))
         .env("AICS_CACHE_ROOT", &cache_root)
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.0)

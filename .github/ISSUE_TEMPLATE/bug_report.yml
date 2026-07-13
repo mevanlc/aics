@@ -112,7 +112,7 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: Run with `RUST_LOG=debug aics ...` and paste the relevant output. Redact anything sensitive.
+      description: For the TUI, run with `RUST_LOG=debug aics ...` and use the newest `~/.config/aics/logs/aics-<timestamp>-p<PID>.log`; command/JSON invocations log to stderr with the built-in configuration. Redact local paths, commands, and anything else sensitive. If `AICS_CONFIG_ROOT` is set, look under that directory instead.
       render: shell
 
   - type: textarea

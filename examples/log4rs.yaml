@@ -1,0 +1,65 @@
+# Optional AICS log4rs configuration.
+#
+# Enable it by copying this file to the AICS configuration directory:
+#   mkdir -p ~/.config/aics
+#   cp examples/log4rs.yaml ~/.config/aics/log4rs.yaml
+#
+# AICS sets AICS_LOG_DIR and AICS_LOG_INSTANCE before loading this file. The
+# instance is a UTC startup timestamp plus PID, so simultaneous processes never
+# share an active file or archive window. Keep these variables in managed paths
+# if you customize this file.
+#
+# This file is authoritative: its levels and filters replace RUST_LOG. It is
+# read once at startup; edits take effect on the next launch. A refresh_rate
+# field is intentionally omitted because AICS does not enable runtime refresh.
+#
+# Unlike AICS's built-in mode-aware configuration, this copyable template sends
+# every invocation (including command and JSON modes) to files. Never configure
+# stdout as a log destination because that can corrupt JSONL output.
+
+appenders:
+  aics:
+    kind: rolling_file
+    path: "$ENV{AICS_LOG_DIR}/aics-$ENV{AICS_LOG_INSTANCE}.log"
+    encoder:
+      pattern: "{d} {l:<5} [{T}] {t} - {m}{n}"
+    policy:
+      kind: compound
+      trigger:
+        kind: size
+        limit: 2 mib
+      roller:
+        kind: fixed_window
+        base: 1
+        # Keep aics-....log.1 and aics-....log.2.
+        count: 2
+        pattern: "$ENV{AICS_LOG_DIR}/aics-$ENV{AICS_LOG_INSTANCE}.log.{}"
+
+  summary_errors:
+    kind: rolling_file
+    path: "$ENV{AICS_LOG_DIR}/summarizer-errors-$ENV{AICS_LOG_INSTANCE}.log"
+    encoder:
+      pattern: "{d} {l:<5} [{T}] {t} - {m}{n}"
+    policy:
+      kind: compound
+      trigger:
+        kind: size
+        limit: 1 mib
+      roller:
+        kind: fixed_window
+        base: 1
+        # Keep summarizer-errors-....log.1.
+        count: 1
+        pattern: "$ENV{AICS_LOG_DIR}/summarizer-errors-$ENV{AICS_LOG_INSTANCE}.log.{}"
+
+root:
+  level: warn
+  appenders:
+    - aics
+
+loggers:
+  aics::summary::errors:
+    level: warn
+    appenders:
+      - summary_errors
+    additive: true

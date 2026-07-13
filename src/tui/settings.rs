@@ -208,10 +208,8 @@ impl SettingsModalState {
                     self.field.move_next();
                 }
             }
-            MouseEventKind::ScrollUp => {
-                if contains(settings_popup_area(area), column, row) {
-                    self.field.move_prev();
-                }
+            MouseEventKind::ScrollUp if contains(settings_popup_area(area), column, row) => {
+                self.field.move_prev();
             }
             _ => {}
         }
@@ -1657,10 +1655,8 @@ impl TemplatePicker {
                     self.field.move_next();
                 }
             }
-            MouseEventKind::ScrollUp => {
-                if contains(template_picker_popup(host), column, row) {
-                    self.field.move_prev();
-                }
+            MouseEventKind::ScrollUp if contains(template_picker_popup(host), column, row) => {
+                self.field.move_prev();
             }
             _ => {}
         }

@@ -6,7 +6,6 @@ use std::time::Duration;
 use anyhow::{bail, Result};
 use chrono::{Local, NaiveDate, TimeZone, Utc};
 use clap::{Parser, ValueEnum};
-use env_logger::Env;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use ratatui::style::Color;
 
@@ -15,13 +14,14 @@ use aics::index::{
     TrashFilter,
 };
 use aics::live::LiveSessionTracker;
+use aics::logging::{LoggingHandle, LoggingMode};
 use aics::parse::Agent;
 use aics::rules::{
     default_rules_path, print_report, run_rules_with_progress, write_default_rules_dts, RulesMode,
     RulesOptions, RulesProgress,
 };
 use aics::scan::ResolvedPaths;
-use aics::settings::{config_dir, DefaultFilter, DefaultFilterScope, LoadedSettings, Settings};
+use aics::settings::{DefaultFilter, DefaultFilterScope, LoadedSettings, Settings};
 use aics::tui::theme::{PaletteEntry, Theme};
 use aics::tui::{run_app, run_rules_preview_app};
 
@@ -219,31 +219,28 @@ impl From<CliTrashFilter> for TrashFilter {
     }
 }
 
-/// When running in TUI mode redirect log output to a file so it doesn't bleed
-/// through onto the terminal. In `--json` / non-TUI mode keep writing to stderr.
-fn init_logging(cli: &Cli) {
-    let mut builder = env_logger::Builder::from_env(Env::default().default_filter_or("warn"));
-    if !cli.json {
-        // Try to open the log file; fall back silently to stderr if we can't.
-        if let Ok(dir) = config_dir() {
-            if std::fs::create_dir_all(&dir).is_ok() {
-                let log_path = dir.join("aics.log");
-                if let Ok(file) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&log_path)
-                {
-                    builder.target(env_logger::Target::Pipe(Box::new(file)));
-                }
-            }
+impl Cli {
+    fn will_enter_tui(&self) -> bool {
+        !self.json
+            && !self.apply_rules
+            && !self.benchmark_rules
+            && !self.write_rules_dts
+            && !self.delete_index
+            && !self.print_palettes
+    }
+
+    fn logging_mode(&self) -> LoggingMode {
+        if self.will_enter_tui() {
+            LoggingMode::Interactive
+        } else {
+            LoggingMode::Command
         }
     }
-    builder.init();
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    init_logging(&cli);
+    let logging = aics::logging::init(cli.logging_mode())?;
     if cli.print_palettes {
         print!("{}", render_palettes());
         return Ok(());
@@ -263,11 +260,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
     validate_terminal_mode(&cli)?;
-    let LoadedSettings {
-        settings,
-        warning: settings_warning,
-    } = Settings::load_with_recovery();
-    if let Some(warning) = settings_warning.as_deref() {
+    let LoadedSettings { settings, warning } = Settings::load_with_recovery();
+    let settings_warning = combine_startup_warnings(&logging, warning.clone());
+    if let Some(warning) = warning.as_deref() {
         eprintln!("aics: {warning}");
     }
     manager.write_profile_metadata(&resolved_paths)?;
@@ -364,6 +359,14 @@ fn main() -> Result<()> {
         resolved_paths.roots,
         settings_warning,
     )
+}
+
+fn combine_startup_warnings(logging: &LoggingHandle, settings: Option<String>) -> Option<String> {
+    match (logging.bootstrap_warning.as_deref(), settings) {
+        (Some(logging), Some(settings)) => Some(format!("{logging}; {settings}")),
+        (Some(logging), None) => Some(logging.to_owned()),
+        (None, settings) => settings,
+    }
 }
 
 fn validate_terminal_mode(cli: &Cli) -> Result<()> {
@@ -1088,6 +1091,28 @@ mod tests {
     fn parses_write_rules_dts_flag() {
         let cli = Cli::parse_from(["aics", "--write-rules-dts"]);
         assert!(cli.write_rules_dts);
+    }
+
+    #[test]
+    fn classifies_interactive_and_command_logging_modes() {
+        for args in [
+            vec!["aics"],
+            vec!["aics", "deploy"],
+            vec!["aics", "--preview-rules"],
+        ] {
+            assert!(Cli::parse_from(args).will_enter_tui());
+        }
+
+        for args in [
+            vec!["aics", "--json"],
+            vec!["aics", "--apply-rules"],
+            vec!["aics", "--benchmark-rules"],
+            vec!["aics", "--write-rules-dts"],
+            vec!["aics", "--delete-index"],
+            vec!["aics", "--print-palettes"],
+        ] {
+            assert!(!Cli::parse_from(args).will_enter_tui());
+        }
     }
 
     #[test]

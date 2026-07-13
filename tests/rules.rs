@@ -52,6 +52,7 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
 
     let output = Command::new(env!("CARGO_BIN_EXE_aics"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CONFIG_ROOT", temp.path().join("config"))
         .env("AICS_CACHE_ROOT", &cache_root)
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
@@ -103,6 +104,7 @@ fn preview_rules_exposes_reasoning_effort() -> Result<()> {
 
     let output = Command::new(env!("CARGO_BIN_EXE_aics"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CONFIG_ROOT", temp.path().join("config"))
         .env("AICS_CACHE_ROOT", &cache_root)
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
@@ -152,6 +154,7 @@ fn apply_rules_moves_matching_session_to_trash() -> Result<()> {
 
     let output = Command::new(env!("CARGO_BIN_EXE_aics"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CONFIG_ROOT", temp.path().join("config"))
         .env("AICS_CACHE_ROOT", &cache_root)
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
@@ -207,6 +210,7 @@ fn benchmark_rules_evaluates_without_output_or_applying_actions() -> Result<()> 
 
     let output = Command::new(env!("CARGO_BIN_EXE_aics"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CONFIG_ROOT", temp.path().join("config"))
         .env("AICS_CACHE_ROOT", &cache_root)
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
