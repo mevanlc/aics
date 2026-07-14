@@ -10,7 +10,8 @@ use crate::parse::{
 };
 use crate::settings::DisplayOptions;
 use crate::summary::{
-    AicsSummaryPreview, ClaudeAutosummaryPreview, SummaryPreview, SummarySources,
+    AicsSummaryPreview, ClaudeAutosummaryPreview, CodexAutosummaryPreview, SummaryPreview,
+    SummarySources,
 };
 use crate::tui::app::App;
 use crate::tui::markdown::{render_markdown_message, render_markdown_message_with_headings};
@@ -325,6 +326,33 @@ pub fn render_summary_sections_document(
     let mut lines = Vec::new();
     let mut sticky_markers = Vec::new();
 
+    if let Some(summary) = summaries.codex_autosummary.as_ref() {
+        let title = "# Codex Auto-summary";
+        let section_start = lines.len();
+        let body = render_codex_summary_text(summary, theme, highlight_query);
+        lines.extend(render_section(title, &body, theme).lines);
+        let updated_at = summary
+            .updated_at
+            .map(|timestamp| timestamp.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_default();
+        sticky_markers.push(StickyLineMarker {
+            line_index: section_start,
+            header: StickyHeader::new(
+                "Codex autosummary",
+                updated_at.clone(),
+                "Codex Auto-summary",
+            ),
+        });
+        add_summary_heading_markers(
+            &mut sticky_markers,
+            &summary.body,
+            theme,
+            highlight_query,
+            section_start + 2,
+            StickyHeader::new("Codex autosummary", updated_at, ""),
+        );
+    }
+
     for (index, summary) in summaries.claude_autosummaries.iter().enumerate() {
         if !lines.is_empty() {
             lines.push(Line::default());
@@ -515,6 +543,9 @@ pub fn render_summary_text(
         SummaryPreview::ClaudeAutosummary(summary) => {
             render_claude_summary_text(summary, theme, highlight_query)
         }
+        SummaryPreview::CodexAutosummary(summary) => {
+            render_codex_summary_text(summary, theme, highlight_query)
+        }
     }
 }
 
@@ -630,6 +661,43 @@ fn render_claude_summary_text(
         spans.push(Span::styled(" · ", Style::default().fg(theme.muted)));
         spans.push(Span::styled(
             generated_at.format("%Y-%m-%d %H:%M").to_string(),
+            Style::default().fg(theme.muted),
+        ));
+    }
+    let body = render_markdown_message(&summary.body, theme, base, highlight_query);
+
+    let mut lines = Vec::with_capacity(body.lines.len() + 2);
+    lines.push(Line::from(spans));
+    lines.push(Line::default());
+    lines.extend(body.lines);
+    Text::from(lines)
+}
+
+fn render_codex_summary_text(
+    summary: &CodexAutosummaryPreview,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) -> Text<'static> {
+    let base = Style::default().fg(theme.text);
+    let mut spans = vec![
+        Span::styled(
+            "built-in",
+            Style::default()
+                .fg(theme.highlight)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" · ", Style::default().fg(theme.muted)),
+        Span::styled(
+            "codex autosummary",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if let Some(updated_at) = summary.updated_at {
+        spans.push(Span::styled(" · ", Style::default().fg(theme.muted)));
+        spans.push(Span::styled(
+            updated_at.format("%Y-%m-%d %H:%M").to_string(),
             Style::default().fg(theme.muted),
         ));
     }
@@ -1792,8 +1860,8 @@ mod tests {
 
     use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionMessage};
     use crate::summary::{
-        AicsSummaryPreview, ClaudeAutosummaryPreview, Fingerprint, SummarizeBackend,
-        SummaryPreview, SummarySidecar, SummarySources,
+        AicsSummaryPreview, ClaudeAutosummaryPreview, CodexAutosummaryPreview, Fingerprint,
+        SummarizeBackend, SummaryPreview, SummarySidecar, SummarySources,
     };
 
     use super::{
@@ -2549,6 +2617,26 @@ mod tests {
     }
 
     #[test]
+    fn render_summary_text_labels_codex_autosummary_source() {
+        let theme = Theme::default();
+        let summary = SummaryPreview::CodexAutosummary(CodexAutosummaryPreview {
+            body: "Autosummary body".to_owned(),
+            updated_at: Some(Utc.with_ymd_and_hms(2026, 7, 14, 0, 34, 49).unwrap()),
+        });
+
+        let text = render_summary_text(&summary, &theme, None);
+        let header = text.lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(header.contains("built-in"));
+        assert!(header.contains("codex autosummary"));
+        assert!(!header.contains("aics summary"));
+    }
+
+    #[test]
     fn render_summary_missing_only_shows_generate_hint_when_requested() {
         let theme = Theme::default();
         let hidden = render_summary_missing(&theme, "missing", false);
@@ -2643,6 +2731,10 @@ mod tests {
                         generated_at: None,
                     },
                 ],
+                codex_autosummary: Some(CodexAutosummaryPreview {
+                    body: "Codex body".to_owned(),
+                    updated_at: None,
+                }),
             },
             &theme,
             None,
@@ -2660,16 +2752,19 @@ mod tests {
             .collect::<Vec<_>>();
 
         let joined = rendered.join("\n");
+        let codex = joined.find("# Codex Auto-summary").unwrap();
         let claude_one = joined.find("# Claude Auto-summary #1").unwrap();
         let claude_two = joined.find("# Claude Auto-summary #2").unwrap();
         let aics = joined.find("# AICS summary").unwrap();
         let session_log = joined.find("# Session Log").unwrap();
 
+        assert!(codex < claude_one);
         assert!(claude_one < claude_two);
         assert!(claude_two < aics);
         assert!(aics < session_log);
         assert!(joined.contains("Claude body 1"));
         assert!(joined.contains("Claude body 2"));
+        assert!(joined.contains("Codex body"));
         assert!(joined.contains("AICS body"));
         assert!(joined.contains("Assistant"));
     }

@@ -30,19 +30,38 @@ pub struct ClaudeAutosummaryPreview {
     pub generated_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexAutosummaryPreview {
+    pub body: String,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SummarySources {
     pub aics_sidecar: Option<AicsSummaryPreview>,
     pub claude_autosummaries: Vec<ClaudeAutosummaryPreview>,
+    pub codex_autosummary: Option<CodexAutosummaryPreview>,
 }
 
 impl SummarySources {
     pub fn is_empty(&self) -> bool {
-        self.aics_sidecar.is_none() && self.claude_autosummaries.is_empty()
+        self.aics_sidecar.is_none()
+            && self.claude_autosummaries.is_empty()
+            && self.codex_autosummary.is_none()
     }
 
     pub fn latest_claude_autosummary(&self) -> Option<&ClaudeAutosummaryPreview> {
         self.claude_autosummaries.last()
+    }
+
+    pub fn builtin_summary_body(&self) -> Option<&str> {
+        self.latest_claude_autosummary()
+            .map(|summary| summary.body.as_str())
+            .or_else(|| {
+                self.codex_autosummary
+                    .as_ref()
+                    .map(|summary| summary.body.as_str())
+            })
     }
 }
 
@@ -50,6 +69,7 @@ impl SummarySources {
 pub enum SummaryPreview {
     AicsSidecar(AicsSummaryPreview),
     ClaudeAutosummary(ClaudeAutosummaryPreview),
+    CodexAutosummary(CodexAutosummaryPreview),
 }
 
 /// Which CLI the summarizer should invoke.

@@ -7,6 +7,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 ## Features
 
 - Full-text search across Claude Code and Codex CLI sessions
+- Native Claude Code autosummaries and Codex rollout summaries in previews and summary snippets
 - Incremental indexing — only new or changed sessions get re-indexed on startup
 - Interactive TUI with session list, snippet preview, and scrollable full-session viewer
 - Filter modal: scope, agent, date range, minimum length, session kind (original / trimmed / rollover / sub-agent), live sessions
