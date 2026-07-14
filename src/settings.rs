@@ -72,6 +72,8 @@ pub struct Settings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplayOptions {
     #[serde(default)]
+    pub hide_skill_text_injection: bool,
+    #[serde(default)]
     pub hide_tool_calls: bool,
     #[serde(default)]
     pub hide_tool_results: bool,
@@ -210,6 +212,7 @@ impl SettingsPatch {
 impl Default for DisplayOptions {
     fn default() -> Self {
         Self {
+            hide_skill_text_injection: false,
             hide_tool_calls: false,
             hide_tool_results: false,
             hide_agent_replies: false,
@@ -583,14 +586,16 @@ mod tests {
         assert!(parsed.show_preview);
         assert_eq!(parsed.preview_width_pct, 40);
         assert_eq!(parsed.display_options, DisplayOptions::default());
+        assert!(!parsed.display_options.hide_skill_text_injection);
         assert!(parsed.display_options.hide_project_docs_autodump);
     }
 
     #[test]
-    fn display_options_default_missing_project_docs_to_hidden() {
+    fn display_options_defaults_missing_injection_fields() {
         let parsed: DisplayOptions = serde_json::from_str(r#"{"hide_tool_calls":true}"#).unwrap();
 
         assert!(parsed.hide_tool_calls);
+        assert!(!parsed.hide_skill_text_injection);
         assert!(parsed.hide_project_docs_autodump);
     }
 

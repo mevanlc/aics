@@ -37,8 +37,9 @@ const FIELD_ORDER: [FilterField; 14] = [
     FilterField::Sort,
 ];
 
-const DISPLAY_ORDER: [DisplayField; 5] = [
+const DISPLAY_ORDER: [DisplayField; 6] = [
     DisplayField::ProjectDocsAutodump,
+    DisplayField::SkillTextInjection,
     DisplayField::ToolCalls,
     DisplayField::ToolResults,
     DisplayField::AgentReplies,
@@ -69,6 +70,7 @@ pub enum FilterField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DisplayField {
     ProjectDocsAutodump,
+    SkillTextInjection,
     ToolCalls,
     ToolResults,
     AgentReplies,
@@ -437,6 +439,10 @@ impl FilterModalState {
                 self.display_options.hide_project_docs_autodump =
                     !self.display_options.hide_project_docs_autodump;
             }
+            DisplayField::SkillTextInjection => {
+                self.display_options.hide_skill_text_injection =
+                    !self.display_options.hide_skill_text_injection;
+            }
             DisplayField::ToolCalls => {
                 self.display_options.hide_tool_calls = !self.display_options.hide_tool_calls;
             }
@@ -739,6 +745,7 @@ impl DisplayField {
     fn label(self) -> &'static str {
         match self {
             Self::ProjectDocsAutodump => "AGENTS.md/CLAUDE.md",
+            Self::SkillTextInjection => "Skill Text Injection",
             Self::ToolCalls => "Tool Calls",
             Self::ToolResults => "Tool Results",
             Self::AgentReplies => "Agent Replies",
@@ -751,6 +758,7 @@ impl DisplayField {
             Self::ProjectDocsAutodump => {
                 "Hide harness injections of AGENTS.md/CLAUDE.md into session context."
             }
+            Self::SkillTextInjection => "Hide skill definition text injected into session context.",
             Self::ToolCalls => "Hide tool call request blocks from previews and viewers.",
             Self::ToolResults => "Hide tool result blocks from previews and viewers.",
             Self::AgentReplies => "Hide assistant reply messages from previews and viewers.",
@@ -761,6 +769,7 @@ impl DisplayField {
     fn value(self, options: DisplayOptions) -> String {
         let hidden = match self {
             DisplayField::ProjectDocsAutodump => options.hide_project_docs_autodump,
+            DisplayField::SkillTextInjection => options.hide_skill_text_injection,
             DisplayField::ToolCalls => options.hide_tool_calls,
             DisplayField::ToolResults => options.hide_tool_results,
             DisplayField::AgentReplies => options.hide_agent_replies,
@@ -864,6 +873,11 @@ mod tests {
             "AGENTS.md/CLAUDE.md"
         );
         assert_eq!(DisplayField::ProjectDocsAutodump.value(defaults), "off");
+        assert_eq!(
+            DisplayField::SkillTextInjection.label(),
+            "Skill Text Injection"
+        );
+        assert_eq!(DisplayField::SkillTextInjection.value(defaults), "on");
         assert_eq!(DisplayField::ToolResults.label(), "Tool Results");
         assert_eq!(DisplayField::ToolResults.value(defaults), "on");
     }
@@ -1157,8 +1171,11 @@ mod tests {
             rows.y + 1,
         );
 
-        assert_eq!(*state.display_selected.current(), DisplayField::ToolCalls);
-        assert!(!state.display_options.hide_tool_calls);
+        assert_eq!(
+            *state.display_selected.current(),
+            DisplayField::SkillTextInjection
+        );
+        assert!(!state.display_options.hide_skill_text_injection);
     }
 
     #[test]
@@ -1173,7 +1190,9 @@ mod tests {
         let area = Rect::new(0, 0, 120, 40);
         let rows = display_rows_area(area);
         state.selected_side = FilterSide::Display;
-        assert!(state.display_selected.set(&DisplayField::ToolCalls));
+        assert!(state
+            .display_selected
+            .set(&DisplayField::SkillTextInjection));
 
         state.handle_mouse(
             area,
@@ -1182,9 +1201,12 @@ mod tests {
             rows.y + 1,
         );
 
-        assert_eq!(*state.display_selected.current(), DisplayField::ToolCalls);
-        assert!(state.display_options.hide_tool_calls);
+        assert_eq!(
+            *state.display_selected.current(),
+            DisplayField::SkillTextInjection
+        );
+        assert!(state.display_options.hide_skill_text_injection);
         let update = state.build_update(&scope).unwrap();
-        assert!(update.display_options.hide_tool_calls);
+        assert!(update.display_options.hide_skill_text_injection);
     }
 }

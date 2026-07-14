@@ -401,6 +401,11 @@ pub fn is_contextual_user_message_content(role: MessageRole, content: &str) -> b
     role == MessageRole::User && is_contextual_user_message_text(content)
 }
 
+pub fn is_skill_text_injection(role: MessageRole, content: &str) -> bool {
+    role == MessageRole::User
+        && starts_with_marked_block("<skill>", "</skill>", content.trim_start())
+}
+
 pub fn is_contextual_user_message_text(content: &str) -> bool {
     let trimmed = content.trim_start();
     is_project_docs_contextual_user_text(trimmed)
@@ -805,7 +810,8 @@ pub fn system_time_or_epoch(timestamp: Option<SystemTime>) -> SystemTime {
 mod tests {
     use super::{
         decode_claude_project_dir, is_contextual_user_message_content, is_project_docs_autodump,
-        normalize_session_path, strip_project_docs_autodump_preamble, MessageRole,
+        is_skill_text_injection, normalize_session_path, strip_project_docs_autodump_preamble,
+        MessageRole,
     };
 
     #[test]
@@ -894,6 +900,23 @@ mod tests {
         assert!(!is_contextual_user_message_content(
             MessageRole::User,
             "# AGENTS.md instructions for /repo\nThis is quoted text, not a contextual wrapper.",
+        ));
+    }
+
+    #[test]
+    fn detects_skill_text_injections_without_matching_invocations_or_quoted_text() {
+        assert!(is_skill_text_injection(
+            MessageRole::User,
+            "\n<skill>\n<name>commit</name>\nhelper instructions\n</skill>",
+        ));
+        assert!(!is_skill_text_injection(MessageRole::User, "$commit --all",));
+        assert!(!is_skill_text_injection(
+            MessageRole::User,
+            "Please explain the <skill> element and its </skill> end tag.",
+        ));
+        assert!(!is_skill_text_injection(
+            MessageRole::Assistant,
+            "<skill>quoted helper instructions</skill>",
         ));
     }
 }

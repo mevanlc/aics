@@ -822,6 +822,8 @@ fn should_skip_message_row(
 ) -> bool {
     !crate::tui::preview::shows_message_role(options.display_options, role)
         || options.hide_project_docs_autodump && is_project_docs_autodump(role, content)
+        || options.display_options.hide_skill_text_injection
+            && crate::parse::is_skill_text_injection(role, content)
 }
 
 fn message_header_text(message: &crate::parse::SessionMessage) -> String {
@@ -1336,6 +1338,39 @@ mod tests {
 
         assert_eq!(hidden_rows, vec![0]);
         assert_eq!(visible_rows, vec![0, 5]);
+    }
+
+    #[test]
+    fn message_navigation_skips_hidden_skill_text_injection() {
+        let mut session = project_docs_session();
+        let SessionCell::Message { content, .. } = &mut session.cells[0] else {
+            panic!("expected a message cell");
+        };
+        *content = "<skill><name>commit</name>helper instructions</skill>".to_owned();
+        let theme = Theme::default();
+
+        let hidden_rows = collect_message_rows(
+            &session,
+            None,
+            &theme,
+            80,
+            MessageJumpScope::UserOnly,
+            DisplayOptions {
+                hide_skill_text_injection: true,
+                ..DisplayOptions::default()
+            },
+        );
+        let visible_rows = collect_message_rows(
+            &session,
+            None,
+            &theme,
+            80,
+            MessageJumpScope::UserOnly,
+            DisplayOptions::default(),
+        );
+
+        assert_eq!(hidden_rows.len(), 1);
+        assert_eq!(visible_rows.len(), 2);
     }
 
     #[test]

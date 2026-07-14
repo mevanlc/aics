@@ -5,8 +5,8 @@ use ratatui::widgets::{Block, BorderType, Borders};
 use ratatui::Frame;
 
 use crate::parse::{
-    is_project_docs_autodump, Agent, ExecStatus, MessageRole, PatchFile, PatchOp, PlanItemStatus,
-    RuntimeMetrics, Session, SessionCell, SessionInfo, ToolStatus,
+    is_project_docs_autodump, is_skill_text_injection, Agent, ExecStatus, MessageRole, PatchFile,
+    PatchOp, PlanItemStatus, RuntimeMetrics, Session, SessionCell, SessionInfo, ToolStatus,
 };
 use crate::settings::DisplayOptions;
 use crate::summary::{
@@ -233,6 +233,8 @@ pub fn render_session_document_with_options(
 fn should_hide_message(role: MessageRole, content: &str, options: SessionRenderOptions) -> bool {
     !shows_message_role(options.display_options, role)
         || options.hide_project_docs_autodump && is_project_docs_autodump(role, content)
+        || options.display_options.hide_skill_text_injection
+            && is_skill_text_injection(role, content)
 }
 
 fn should_hide_cell(cell: &SessionCell, options: SessionRenderOptions) -> bool {
@@ -1897,6 +1899,49 @@ mod tests {
         assert!(visible_text.contains("CLAUDE.md instructions"));
         assert!(visible_text.contains("Prefer lat."));
         assert!(visible_text.contains("real request"));
+    }
+
+    #[test]
+    fn preview_honors_skill_text_injection_display_option() {
+        let theme = Theme::default();
+        let session = empty_session(
+            Agent::Codex,
+            vec![
+                SessionCell::Message {
+                    role: MessageRole::User,
+                    content: "$commit --all".to_owned(),
+                    timestamp: None,
+                },
+                SessionCell::Message {
+                    role: MessageRole::User,
+                    content: "<skill><name>commit</name>helper instructions</skill>".to_owned(),
+                    timestamp: None,
+                },
+            ],
+        );
+
+        let visible = super::render_session_text_with_options(
+            &session,
+            &theme,
+            None,
+            DisplayOptions::default(),
+        );
+        let visible_text = rendered_lines(&visible).join("\n");
+        assert!(visible_text.contains("$commit --all"));
+        assert!(visible_text.contains("helper instructions"));
+
+        let hidden = super::render_session_text_with_options(
+            &session,
+            &theme,
+            None,
+            DisplayOptions {
+                hide_skill_text_injection: true,
+                ..DisplayOptions::default()
+            },
+        );
+        let hidden_text = rendered_lines(&hidden).join("\n");
+        assert!(hidden_text.contains("$commit --all"));
+        assert!(!hidden_text.contains("helper instructions"));
     }
 
     #[test]

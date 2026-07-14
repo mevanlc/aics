@@ -4618,7 +4618,7 @@ mod tests {
         ))
         .unwrap();
 
-        assert!(app.settings.display_options.hide_tool_calls);
+        assert!(app.settings.display_options.hide_skill_text_injection);
         assert!(app.settings.default_filter.is_some());
         assert!(matches!(app.overlay, super::Overlay::Filters(_, None)));
     }
