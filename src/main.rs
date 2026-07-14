@@ -180,7 +180,11 @@ struct Cli {
     codex_home: Option<PathBuf>,
     #[arg(long = "delete-index", conflicts_with = "rebuild_index")]
     delete_index: bool,
-    #[arg(long = "progress", value_enum, default_value_t = CliProgress::Err)]
+    #[arg(
+        long = "progress",
+        value_enum,
+        default_value_t = CliProgress::Stderr
+    )]
     progress: CliProgress,
     #[arg(help = "Optional search query to run immediately or prefill in the TUI")]
     query: Option<String>,
@@ -195,8 +199,8 @@ enum CliSort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliProgress {
     None,
-    Err,
-    Out,
+    Stderr,
+    Stdout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -376,8 +380,8 @@ fn combine_startup_warnings(logging: &LoggingHandle, settings: Option<String>) -
 }
 
 fn validate_terminal_mode(cli: &Cli) -> Result<()> {
-    if cli.json && cli.progress == CliProgress::Out {
-        bail!("--progress out conflicts with --json because stdout is reserved for JSON output");
+    if cli.json && cli.progress == CliProgress::Stdout {
+        bail!("--progress stdout conflicts with --json because stdout is reserved for JSON output");
     }
 
     if cli.rules.is_some() && rules_mode(cli).is_none() {
@@ -416,11 +420,11 @@ fn rules_mode(cli: &Cli) -> Option<RulesMode> {
 fn progress_draw_target(mode: CliProgress, json_mode: bool) -> Option<ProgressDrawTarget> {
     match mode {
         CliProgress::None => None,
-        CliProgress::Err => std::io::stderr()
+        CliProgress::Stderr => std::io::stderr()
             .is_terminal()
             .then(ProgressDrawTarget::stderr),
-        CliProgress::Out if json_mode => None,
-        CliProgress::Out => std::io::stdout()
+        CliProgress::Stdout if json_mode => None,
+        CliProgress::Stdout => std::io::stdout()
             .is_terminal()
             .then(ProgressDrawTarget::stdout),
     }
@@ -1087,16 +1091,24 @@ mod tests {
     #[test]
     fn defaults_progress_to_stderr() {
         let cli = Cli::parse_from(["aics", "deploy"]);
-        assert_eq!(cli.progress, CliProgress::Err);
+        assert_eq!(cli.progress, CliProgress::Stderr);
     }
 
     #[test]
     fn rejects_stdout_progress_in_json_mode() {
-        let cli = Cli::parse_from(["aics", "--json", "--progress", "out", "deploy"]);
+        let cli = Cli::parse_from(["aics", "--json", "--progress", "stdout", "deploy"]);
         let error = validate_terminal_mode(&cli).unwrap_err();
         assert!(error
             .to_string()
-            .contains("--progress out conflicts with --json"));
+            .contains("--progress stdout conflicts with --json"));
+    }
+
+    #[test]
+    fn rejects_short_progress_value_forms() {
+        for value in ["err", "out"] {
+            let error = Cli::try_parse_from(["aics", "--progress", value]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+        }
     }
 
     #[test]
