@@ -30,7 +30,7 @@ use aics::tui::{run_app, run_rules_preview_app};
     name = "aics",
     version,
     about = "Search local Claude Code and Codex CLI session history",
-    after_help = "Examples:\n  aics deploy\n      Search sessions for the current directory and open the TUI.\n\n  aics -g --agent claude --after 2026-03-01 deploy\n      Search all Claude sessions after 2026-03-01.\n\n  aics --json -g --sort-by relevance \"vector db\"\n      Print matching sessions as JSONL instead of launching the TUI.\n\nDate filters:\n  --after and --before accept YYYY-MM-DD or RFC3339 timestamps.\n\nScope:\n  By default, searches are scoped to the current directory.\n  Use --global to search everything, or --dir PATH[:BRANCH] to target a project."
+    after_help = "Examples:\n  aics deploy\n      Search sessions for the current directory and open the TUI.\n\n  aics -g --agent claude --after 2026-03-01 deploy\n      Search all Claude sessions after 2026-03-01.\n\n  aics --json -g --sort-by relevance \"vector db\"\n      Print matching sessions as JSONL instead of launching the TUI.\n\nDate filters:\n  --after and --before accept YYYY-MM-DD or RFC3339 timestamps.\n\nScope:\n  By default, searches are scoped to the current directory.\n  Use --global to search everything, --no-global to override a saved global startup scope,\n  or --dir PATH[:BRANCH] to target a project."
 )]
 struct Cli {
     #[arg(
@@ -44,6 +44,12 @@ struct Cli {
         help = "Search across all indexed sessions instead of scoping to the current directory"
     )]
     global: bool,
+    #[arg(
+        long = "no-global",
+        conflicts_with = "global",
+        help = "Start in project-local mode even when the saved default scope is global"
+    )]
+    no_global: bool,
     #[arg(
         long = "dir",
         value_name = "PATH[:BRANCH]",
@@ -541,6 +547,7 @@ fn apply_default_filter_to_request(
     };
 
     if !cli.global
+        && !cli.no_global
         && cli.dir.is_none()
         && matches!(default_filter.scope, DefaultFilterScope::Global)
     {
@@ -1003,6 +1010,28 @@ mod tests {
         assert!(!request.filters.include_trimmed);
         assert!(request.filters.include_sub_agents);
         assert_eq!(request.filters.trashed, TrashFilter::Both);
+    }
+
+    #[test]
+    fn no_global_overrides_saved_global_startup_scope() {
+        let cli = Cli::parse_from(["aics", "--no-global", "deploy"]);
+        let mut request = build_request(&cli).unwrap();
+        let default_filter = DefaultFilter {
+            scope: DefaultFilterScope::Global,
+            sort: SortMode::Time,
+            filters: SearchFilters::default(),
+        };
+
+        apply_default_filter_to_request(&mut request, &cli, Some(&default_filter));
+
+        assert!(matches!(request.scope, Scope::CurrentDir(..)));
+    }
+
+    #[test]
+    fn global_and_no_global_conflict() {
+        let error = Cli::try_parse_from(["aics", "--global", "--no-global"]).unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

@@ -58,7 +58,7 @@ Run `aics --help` for the full flag list.
 
 ### Scope
 
-By default, searches are scoped to the current working directory. Use `-g` / `--global` to search everything, or `--dir PATH[:BRANCH]` to target a specific project (optionally filtered by branch).
+By default, searches are scoped to the current working directory. Use `-g` / `--global` to search everything, `--no-global` to start in project-local mode even when the saved default scope is global, or `--dir PATH[:BRANCH]` to target a specific project (optionally filtered by branch). `--no-global` only selects the startup scope; it does not prevent switching between global and local scope in the TUI.
 
 ### Date filters
 
