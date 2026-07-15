@@ -99,6 +99,7 @@ fn rules_expose_missing_session_strings_as_empty() -> Result<()> {
         &session_roots,
         &RulesOptions {
             rules_path: rules,
+            cache_path: None,
             mode: RulesMode::Preview,
             json: true,
             scope: Scope::Global,
@@ -162,6 +163,12 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
     assert_eq!(value["action"], "trash");
     assert_eq!(value["reason"], "matched fixture");
     assert_eq!(value["agent"], "claude");
+    let rules_caches = profile_rules_caches(&cache_root)?;
+    assert_eq!(rules_caches.len(), 1);
+    let cache: serde_json::Value = serde_json::from_slice(&fs::read(&rules_caches[0])?)?;
+    assert!(cache["aics_bin"]["byte_len"].is_u64());
+    assert!(cache["rules_js"]["crc32"].is_u64());
+    assert!(!cache["sessions"].as_object().unwrap().is_empty());
     Ok(())
 }
 
@@ -311,6 +318,7 @@ fn benchmark_rules_evaluates_without_output_or_applying_actions() -> Result<()> 
     assert!(roots.claude_session.exists());
     assert_eq!(fs::read_to_string(data_root.join("trash.jsonl"))?, "");
     assert_eq!(fs::read_dir(data_root.join("trash"))?.count(), 0);
+    assert!(profile_rules_caches(&cache_root)?.is_empty());
     Ok(())
 }
 
@@ -335,6 +343,7 @@ fn rules_progress_reports_processing_count() -> Result<()> {
         &session_roots,
         &RulesOptions {
             rules_path: rules,
+            cache_path: None,
             mode: RulesMode::Preview,
             json: true,
             scope: Scope::Global,
@@ -408,4 +417,16 @@ fn copy_fixture(temp: &TempDir, from: &str, to: &str) -> Result<PathBuf> {
 
 fn fixture_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+}
+
+fn profile_rules_caches(cache_root: &Path) -> Result<Vec<PathBuf>> {
+    let profiles = cache_root.join("profiles");
+    let mut caches = fs::read_dir(profiles)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|entry| entry.path().join("rules-cache.json"))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    caches.sort();
+    Ok(caches)
 }

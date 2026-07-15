@@ -262,9 +262,9 @@ fn main() -> Result<()> {
     }
     let resolved_paths =
         ResolvedPaths::discover(cli.claude_home.as_deref(), cli.codex_home.as_deref())?;
-    let manager = IndexManager::with_paths(aics::index::IndexPaths::discover_for_roots(
-        &resolved_paths.roots,
-    )?);
+    let index_paths = aics::index::IndexPaths::discover_for_roots(&resolved_paths.roots)?;
+    let rules_cache_path = index_paths.cache_root.join("rules-cache.json");
+    let manager = IndexManager::with_paths(index_paths);
     if cli.delete_index {
         manager.delete_index()?;
         return Ok(());
@@ -302,6 +302,7 @@ fn main() -> Result<()> {
         let rules_filters = request.filters.clone();
         let rules_options = RulesOptions {
             rules_path,
+            cache_path: (!cli.benchmark_rules).then_some(rules_cache_path.clone()),
             mode,
             json: cli.json,
             scope: rules_scope.clone(),

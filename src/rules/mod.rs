@@ -21,6 +21,10 @@ use crate::scan::{scan_session_files, SessionFile, SessionRoots};
 use crate::settings::config_dir;
 use crate::trash::TrashStore;
 
+mod cache;
+
+use cache::{fingerprint_file, CachedDetermination, ContentFingerprint, RulesCache};
+
 const RULE_STACK_LIMIT: usize = 512 * 1024;
 const BOA_RULE_LOOP_ITERATION_LIMIT: u64 = 10_000_000;
 const BOA_RULE_RECURSION_LIMIT: usize = 512;
@@ -268,6 +272,7 @@ pub enum RulesMode {
 #[derive(Debug, Clone)]
 pub struct RulesOptions {
     pub rules_path: PathBuf,
+    pub cache_path: Option<PathBuf>,
     pub mode: RulesMode,
     pub json: bool,
     pub scope: Scope,
@@ -379,7 +384,20 @@ where
         );
     }
 
-    let engine = JsRuleEngine::load(&options.rules_path)?;
+    let mut cache = options.cache_path.clone().and_then(|path| {
+        match RulesCache::open(path, &options.rules_path) {
+            Ok(cache) => Some(cache),
+            Err(error) => {
+                warn!("rules cache disabled for this run: {error:#}");
+                None
+            }
+        }
+    });
+    let mut engine = if cache.as_ref().is_some_and(RulesCache::was_reused) {
+        None
+    } else {
+        Some(JsRuleEngine::load(&options.rules_path)?)
+    };
     let files = scan_session_files(roots)?;
     let total = files.len();
     on_progress(RulesProgress::ProcessingStarted { total });
@@ -388,47 +406,97 @@ where
         on_progress(RulesProgress::ProcessingProgress { processed, total });
     };
 
-    for (index, file) in files.into_iter().enumerate() {
+    for (index, file) in files.iter().enumerate() {
         let processed = index + 1;
-        if !file_matches_filters(&file, &options.filters) {
-            mark_processed(processed);
-            continue;
-        }
-        let parsed = match parse_session_file(file.agent, &file.path) {
-            Ok(Some(session)) => session,
-            Ok(None) => {
-                mark_processed(processed);
-                continue;
-            }
-            Err(error) => {
-                warn!(
-                    "failed to parse {} for rules: {error:#}",
-                    file.path.display()
-                );
-                mark_processed(processed);
-                continue;
-            }
-        };
-        if !session_matches_scope(&options.scope, &parsed) {
-            mark_processed(processed);
-            continue;
-        }
-        if !session_matches_filters(&parsed, &file, &options.filters) {
+        if !file_matches_filters(file, &options.filters) {
             mark_processed(processed);
             continue;
         }
 
-        let input = RuleInput::from_session(&parsed, &file);
-        let details = RuleDetails::from_session(&parsed);
-        match engine.evaluate(&input, details) {
-            Ok(outcomes) => collect_outcomes(&mut report, &parsed, &file, outcomes),
-            Err(error) => report.errors.push(RuleEvaluationError {
-                rule: None,
-                path: file.path.clone(),
+        let fingerprint_attempted = cache
+            .as_ref()
+            .and_then(|cache| cache.cached_byte_len(&file.path))
+            .is_some_and(|cached_len| cached_len == file.size);
+        let mut content_fingerprint = if fingerprint_attempted {
+            fingerprint_session_for_cache(file)
+        } else {
+            None
+        };
+        let cached = cache
+            .as_ref()
+            .zip(content_fingerprint)
+            .and_then(|(cache, fingerprint)| cache.get(&file.path, fingerprint))
+            .cloned();
+        if let Some(determination) = cached.as_ref() {
+            collect_determination(
+                &mut report,
+                file,
+                determination,
+                &options.scope,
+                &options.filters,
+            );
+            mark_processed(processed);
+            continue;
+        }
+
+        let determination = match parse_session_file(file.agent, &file.path) {
+            Ok(Some(session)) => {
+                let stored = stored_rule_session(&session, file);
+                if !session_matches_scope(&options.scope, &stored)
+                    || !session_matches_filters(&stored, file, &options.filters)
+                {
+                    mark_processed(processed);
+                    continue;
+                }
+
+                let input = RuleInput::from_session(&session, file);
+                let details = RuleDetails::from_session(&session);
+                let engine = match engine.as_ref() {
+                    Some(engine) => engine,
+                    None => {
+                        engine = Some(JsRuleEngine::load(&options.rules_path)?);
+                        engine.as_ref().expect("rules engine was just initialized")
+                    }
+                };
+                match engine.evaluate(&input, details) {
+                    Ok(outcomes) => CachedDetermination::Evaluated {
+                        session: stored,
+                        outcomes,
+                    },
+                    Err(error) => CachedDetermination::EvaluationError {
+                        session: stored,
+                        error: format!("{error:#}"),
+                    },
+                }
+            }
+            Ok(None) => CachedDetermination::Ignored,
+            Err(error) => CachedDetermination::ParseError {
                 error: format!("{error:#}"),
-            }),
+            },
+        };
+        collect_determination(
+            &mut report,
+            file,
+            &determination,
+            &options.scope,
+            &options.filters,
+        );
+        if let Some(cache) = cache.as_mut() {
+            if content_fingerprint.is_none() && !fingerprint_attempted {
+                content_fingerprint = fingerprint_session_for_cache(file);
+            }
+            if let Some(fingerprint) = content_fingerprint {
+                cache.insert(&file.path, fingerprint, determination);
+            }
         }
         mark_processed(processed);
+    }
+
+    if let Some(cache) = cache.as_mut() {
+        cache.retain_files(files.iter().map(|file| file.path.as_path()));
+        if let Err(error) = cache.save() {
+            warn!("failed to save rules cache: {error:#}");
+        }
     }
 
     report.preview_matches = dedupe_preview_matches(std::mem::take(&mut report.preview_matches));
@@ -443,6 +511,19 @@ where
     }
 
     Ok(report)
+}
+
+fn fingerprint_session_for_cache(file: &SessionFile) -> Option<ContentFingerprint> {
+    match fingerprint_file(&file.path) {
+        Ok(fingerprint) => Some(fingerprint),
+        Err(error) => {
+            warn!(
+                "could not fingerprint {} for the rules cache: {error:#}",
+                file.path.display()
+            );
+            None
+        }
+    }
 }
 
 pub fn print_report(report: &RulesReport, json: bool, mode: RulesMode) -> Result<()> {
@@ -650,7 +731,7 @@ fn boa_error(error: boa_engine::JsError) -> anyhow::Error {
     anyhow!("{error}")
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RawRuleOutcome {
     rule: String,
     action: Option<String>,
@@ -660,16 +741,16 @@ struct RawRuleOutcome {
 
 fn collect_outcomes(
     report: &mut RulesReport,
-    session: &Session,
+    session: &StoredSession,
     file: &SessionFile,
-    outcomes: Vec<RawRuleOutcome>,
+    outcomes: &[RawRuleOutcome],
 ) {
     for outcome in outcomes {
-        if let Some(error) = outcome.error {
+        if let Some(error) = outcome.error.as_ref() {
             report.errors.push(RuleEvaluationError {
-                rule: Some(outcome.rule),
+                rule: Some(outcome.rule.clone()),
                 path: file.path.clone(),
-                error,
+                error: error.clone(),
             });
             continue;
         }
@@ -677,21 +758,21 @@ fn collect_outcomes(
         match outcome.action.as_deref() {
             Some("trash") => {
                 let proposal = RuleProposal {
-                    rule: outcome.rule,
+                    rule: outcome.rule.clone(),
                     session_id: session.session_id.clone(),
                     path: file.path.clone(),
                     agent: file.agent,
                     action: RuleAction::Trash {
-                        reason: outcome.reason,
+                        reason: outcome.reason.clone(),
                     },
                 };
                 report.preview_matches.push(RulePreviewMatch {
                     proposal,
-                    hit: rule_search_hit(session, file),
+                    hit: rule_search_hit(session.clone()),
                 });
             }
             Some(action) => report.errors.push(RuleEvaluationError {
-                rule: Some(outcome.rule),
+                rule: Some(outcome.rule.clone()),
                 path: file.path.clone(),
                 error: format!("unsupported rule action: {action}"),
             }),
@@ -700,16 +781,53 @@ fn collect_outcomes(
     }
 }
 
-fn rule_search_hit(session: &Session, file: &SessionFile) -> SearchHit {
+fn stored_rule_session(session: &Session, file: &SessionFile) -> StoredSession {
     let mut stored = StoredSession::from(session);
     stored.trashed = file.trashed;
     stored.original_path = file.original_path.clone();
-    let snippet_html = fallback_snippet(&stored, "");
+    stored
+}
+
+fn rule_search_hit(session: StoredSession) -> SearchHit {
+    let snippet_html = fallback_snippet(&session, "");
     SearchHit {
-        score: stored.modified_ts as f32,
+        score: session.modified_ts as f32,
         is_live: false,
-        session: stored,
+        session,
         snippet_html,
+    }
+}
+
+fn collect_determination(
+    report: &mut RulesReport,
+    file: &SessionFile,
+    determination: &CachedDetermination,
+    scope: &Scope,
+    filters: &SearchFilters,
+) {
+    match determination {
+        CachedDetermination::Ignored => {}
+        CachedDetermination::ParseError { error } => {
+            warn!("failed to parse {} for rules: {error}", file.path.display())
+        }
+        CachedDetermination::Evaluated { session, outcomes } => {
+            if session_matches_scope(scope, session)
+                && session_matches_filters(session, file, filters)
+            {
+                collect_outcomes(report, session, file, outcomes);
+            }
+        }
+        CachedDetermination::EvaluationError { session, error } => {
+            if session_matches_scope(scope, session)
+                && session_matches_filters(session, file, filters)
+            {
+                report.errors.push(RuleEvaluationError {
+                    rule: None,
+                    path: file.path.clone(),
+                    error: error.clone(),
+                });
+            }
+        }
     }
 }
 
@@ -807,7 +925,7 @@ fn file_matches_filters(file: &SessionFile, filters: &SearchFilters) -> bool {
     true
 }
 
-fn session_matches_scope(scope: &Scope, session: &Session) -> bool {
+fn session_matches_scope(scope: &Scope, session: &StoredSession) -> bool {
     match scope {
         Scope::Global => true,
         Scope::CurrentDir(original, canonical) => {
@@ -823,7 +941,11 @@ fn session_matches_scope(scope: &Scope, session: &Session) -> bool {
     }
 }
 
-fn session_matches_filters(session: &Session, file: &SessionFile, filters: &SearchFilters) -> bool {
+fn session_matches_filters(
+    session: &StoredSession,
+    file: &SessionFile,
+    filters: &SearchFilters,
+) -> bool {
     if let Some(session_id) = filters.session_id.as_deref() {
         if session.session_id != session_id {
             return false;

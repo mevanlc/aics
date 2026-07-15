@@ -70,6 +70,8 @@ By default, searches are scoped to the current working directory. Use `-g` / `--
 Rules live at `~/.config/aics/rules.js` by default. Use `--preview-rules` to review proposed actions in the TUI without changing files, or add `--json` to print proposed actions as JSONL. Use `--apply-rules` to apply supported actions non-interactively. Use `--rules PATH` to test another rules file. Run `aics --write-rules-dts` to write TypeScript declarations for the rules API to `~/.config/aics/rules.d.ts`.
 Rules receive session metadata such as `session.model`, `session.modelProvider`, `session.reasoningEffort`, `session.approvalPolicy`, and `session.sandboxMode`. Optional string properties on `session` are empty strings when their values are unavailable.
 
+Rule determinations are cached per cache profile so unchanged sessions do not need to be parsed or evaluated again. The cache tracks the byte length and CRC32 of the running `aics` binary, `rules.js`, and each session file; a byte-length difference is an immediate miss, while CRC32 detects same-length rewrites. `--benchmark-rules` bypasses this cache so it continues to measure rule evaluation.
+
 ```js
 rule("trash short commit helper sessions", ({ turns, re }) => {
   return turns.user.length === 2 &&
@@ -124,6 +126,7 @@ Each profile stores:
 - `index_state.json`
 - `profile.json`
 - `hashed-input.txt`
+- `rules-cache.json` (created after rules are evaluated)
 
 Override the index/cache root with `AICS_CACHE_ROOT`.
 

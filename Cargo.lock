@@ -27,6 +27,7 @@ dependencies = [
  "boa_engine",
  "chrono",
  "clap",
+ "crc32fast",
  "criterion",
  "crossterm",
  "directories",
