@@ -23,7 +23,7 @@ use crate::trash::TrashStore;
 
 mod cache;
 
-use cache::{fingerprint_file, CachedDetermination, ContentFingerprint, RulesCache};
+use cache::{fingerprint_file, CacheLookup, CachedDetermination, ContentFingerprint, RulesCache};
 
 const RULE_STACK_LIMIT: usize = 512 * 1024;
 const BOA_RULE_LOOP_ITERATION_LIMIT: u64 = 10_000_000;
@@ -413,30 +413,47 @@ where
             continue;
         }
 
-        let fingerprint_attempted = cache
-            .as_ref()
-            .and_then(|cache| cache.cached_byte_len(&file.path))
-            .is_some_and(|cached_len| cached_len == file.size);
-        let mut content_fingerprint = if fingerprint_attempted {
-            fingerprint_session_for_cache(file)
-        } else {
-            None
-        };
-        let cached = cache
-            .as_ref()
-            .zip(content_fingerprint)
-            .and_then(|(cache, fingerprint)| cache.get(&file.path, fingerprint))
-            .cloned();
-        if let Some(determination) = cached.as_ref() {
-            collect_determination(
-                &mut report,
-                file,
+        let mut content_fingerprint = None;
+        let cached = cache.as_mut().and_then(|cache| match cache.lookup(file) {
+            Ok(CacheLookup::Hit {
                 determination,
-                &options.scope,
-                &options.filters,
-            );
-            mark_processed(processed);
-            continue;
+                fingerprint,
+            }) => {
+                content_fingerprint = Some(fingerprint);
+                Some(determination)
+            }
+            Ok(CacheLookup::Miss(fingerprint)) => {
+                content_fingerprint = fingerprint;
+                None
+            }
+            Err(error) => {
+                warn!(
+                    "could not validate {} against the rules cache: {error:#}",
+                    file.path.display()
+                );
+                None
+            }
+        });
+        if let Some(determination) = cached.as_ref() {
+            if matches!(
+                determination,
+                CachedDetermination::Unevaluated { session }
+                    if session_matches_scope(&options.scope, session)
+                        && session_matches_filters(session, file, &options.filters)
+            ) {
+                // This session was outside the scope or filters when first cached,
+                // but the current invocation needs its actual rule determination.
+            } else {
+                collect_determination(
+                    &mut report,
+                    file,
+                    determination,
+                    &options.scope,
+                    &options.filters,
+                );
+                mark_processed(processed);
+                continue;
+            }
         }
 
         let determination = match parse_session_file(file.agent, &file.path) {
@@ -445,28 +462,30 @@ where
                 if !session_matches_scope(&options.scope, &stored)
                     || !session_matches_filters(&stored, file, &options.filters)
                 {
-                    mark_processed(processed);
-                    continue;
-                }
-
-                let input = RuleInput::from_session(&session, file);
-                let details = RuleDetails::from_session(&session);
-                let engine = match engine.as_ref() {
-                    Some(engine) => engine,
-                    None => {
-                        engine = Some(JsRuleEngine::load(&options.rules_path)?);
-                        engine.as_ref().expect("rules engine was just initialized")
+                    CachedDetermination::Unevaluated {
+                        session: Box::new(stored),
                     }
-                };
-                match engine.evaluate(&input, details) {
-                    Ok(outcomes) => CachedDetermination::Evaluated {
-                        session: stored,
-                        outcomes,
-                    },
-                    Err(error) => CachedDetermination::EvaluationError {
-                        session: stored,
-                        error: format!("{error:#}"),
-                    },
+                } else {
+                    let input = RuleInput::from_session(&session, file);
+                    let details = RuleDetails::from_session(&session);
+                    let engine = match engine.as_ref() {
+                        Some(engine) => engine,
+                        None => {
+                            engine = Some(JsRuleEngine::load(&options.rules_path)?);
+                            engine.as_ref().expect("rules engine was just initialized")
+                        }
+                    };
+                    match engine.evaluate(&input, details) {
+                        Ok(outcomes) if outcomes.is_empty() => CachedDetermination::NoMatch,
+                        Ok(outcomes) => CachedDetermination::Evaluated {
+                            session: Box::new(stored),
+                            outcomes,
+                        },
+                        Err(error) => CachedDetermination::EvaluationError {
+                            session: Box::new(stored),
+                            error: format!("{error:#}"),
+                        },
+                    }
                 }
             }
             Ok(None) => CachedDetermination::Ignored,
@@ -482,7 +501,7 @@ where
             &options.filters,
         );
         if let Some(cache) = cache.as_mut() {
-            if content_fingerprint.is_none() && !fingerprint_attempted {
+            if content_fingerprint.is_none() {
                 content_fingerprint = fingerprint_session_for_cache(file);
             }
             if let Some(fingerprint) = content_fingerprint {
@@ -806,7 +825,9 @@ fn collect_determination(
     filters: &SearchFilters,
 ) {
     match determination {
-        CachedDetermination::Ignored => {}
+        CachedDetermination::Ignored
+        | CachedDetermination::NoMatch
+        | CachedDetermination::Unevaluated { .. } => {}
         CachedDetermination::ParseError { error } => {
             warn!("failed to parse {} for rules: {error}", file.path.display())
         }

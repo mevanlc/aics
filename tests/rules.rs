@@ -167,6 +167,7 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
     assert_eq!(rules_caches.len(), 1);
     let cache: serde_json::Value = serde_json::from_slice(&fs::read(&rules_caches[0])?)?;
     assert!(cache["aics_bin"]["byte_len"].is_u64());
+    assert!(cache["aics_bin"]["modified_ns"].is_u64());
     assert!(cache["rules_js"]["crc32"].is_u64());
     assert!(!cache["sessions"].as_object().unwrap().is_empty());
     Ok(())

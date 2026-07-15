@@ -2,26 +2,51 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use crc32fast::Hasher;
 use log::warn;
 use serde::{Deserialize, Serialize};
 
 use super::RawRuleOutcome;
 use crate::index::StoredSession;
+use crate::scan::SessionFile;
 
-const RULES_CACHE_FORMAT_VERSION: u32 = 1;
+const RULES_CACHE_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct ContentFingerprint {
     byte_len: u64,
+    modified_ns: u64,
     crc32: u32,
 }
 
 impl ContentFingerprint {
-    pub(super) fn byte_len(self) -> u64 {
-        self.byte_len
+    fn metadata(self) -> FileMetadataFingerprint {
+        FileMetadataFingerprint {
+            byte_len: self.byte_len,
+            modified_ns: self.modified_ns,
+        }
+    }
+
+    fn has_same_content(self, other: Self) -> bool {
+        self.byte_len == other.byte_len && self.crc32 == other.crc32
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileMetadataFingerprint {
+    byte_len: u64,
+    modified_ns: u64,
+}
+
+impl FileMetadataFingerprint {
+    fn from_session(file: &SessionFile) -> Self {
+        Self {
+            byte_len: file.size,
+            modified_ns: modified_ns(file.modified),
+        }
     }
 }
 
@@ -29,17 +54,29 @@ impl ContentFingerprint {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(super) enum CachedDetermination {
     Ignored,
+    NoMatch,
+    Unevaluated {
+        session: Box<StoredSession>,
+    },
     ParseError {
         error: String,
     },
     Evaluated {
-        session: StoredSession,
+        session: Box<StoredSession>,
         outcomes: Vec<RawRuleOutcome>,
     },
     EvaluationError {
-        session: StoredSession,
+        session: Box<StoredSession>,
         error: String,
     },
+}
+
+pub(super) enum CacheLookup {
+    Hit {
+        determination: CachedDetermination,
+        fingerprint: ContentFingerprint,
+    },
+    Miss(Option<ContentFingerprint>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,17 +108,7 @@ impl RulesCache {
     }
 
     fn open_with_binary(path: PathBuf, rules_path: &Path, aics_bin_path: &Path) -> Result<Self> {
-        let aics_bin = fingerprint_file(aics_bin_path).with_context(|| {
-            format!(
-                "failed to fingerprint aics binary {}",
-                aics_bin_path.display()
-            )
-        })?;
-        let rules_js = fingerprint_file(rules_path).with_context(|| {
-            format!("failed to fingerprint rules file {}", rules_path.display())
-        })?;
-
-        let loaded = match load_state(&path) {
+        let mut loaded = match load_state(&path) {
             Ok(state) => state,
             Err(error) => {
                 warn!(
@@ -91,13 +118,42 @@ impl RulesCache {
                 None
             }
         };
-        let reusable = loaded.as_ref().is_some_and(|state| {
-            state.format_version == RULES_CACHE_FORMAT_VERSION
-                && state.aics_bin == aics_bin
-                && state.rules_js == rules_js
-        });
+
+        let mut metadata_refreshed = false;
+        let (reusable, aics_bin, rules_js) = if let Some(state) = loaded
+            .as_mut()
+            .filter(|state| state.format_version == RULES_CACHE_FORMAT_VERSION)
+        {
+            let current_aics_bin = validate_cached_file(aics_bin_path, state.aics_bin)
+                .with_context(|| {
+                    format!("failed to validate aics binary {}", aics_bin_path.display())
+                })?;
+            let current_rules_js =
+                validate_cached_file(rules_path, state.rules_js).with_context(|| {
+                    format!("failed to validate rules file {}", rules_path.display())
+                })?;
+            let reusable = state.aics_bin.has_same_content(current_aics_bin)
+                && state.rules_js.has_same_content(current_rules_js);
+            metadata_refreshed = reusable
+                && (state.aics_bin != current_aics_bin || state.rules_js != current_rules_js);
+            (reusable, current_aics_bin, current_rules_js)
+        } else {
+            let aics_bin = fingerprint_file(aics_bin_path).with_context(|| {
+                format!(
+                    "failed to fingerprint aics binary {}",
+                    aics_bin_path.display()
+                )
+            })?;
+            let rules_js = fingerprint_file(rules_path).with_context(|| {
+                format!("failed to fingerprint rules file {}", rules_path.display())
+            })?;
+            (false, aics_bin, rules_js)
+        };
         let state = if reusable {
-            loaded.expect("reusable cache state must be present")
+            let mut state = loaded.expect("reusable cache state must be present");
+            state.aics_bin = aics_bin;
+            state.rules_js = rules_js;
+            state
         } else {
             RulesCacheState {
                 format_version: RULES_CACHE_FORMAT_VERSION,
@@ -110,7 +166,7 @@ impl RulesCache {
         Ok(Self {
             path,
             state,
-            dirty: !reusable,
+            dirty: !reusable || metadata_refreshed,
             reused: reusable,
         })
     }
@@ -119,23 +175,32 @@ impl RulesCache {
         self.reused
     }
 
-    pub(super) fn get(
-        &self,
-        path: &Path,
-        content: ContentFingerprint,
-    ) -> Option<&CachedDetermination> {
-        self.state
-            .sessions
-            .get(&normalize_path_key(path))
-            .filter(|cached| cached.content == content)
-            .map(|cached| &cached.determination)
-    }
+    pub(super) fn lookup(&mut self, file: &SessionFile) -> Result<CacheLookup> {
+        let Some(cached) = self.state.sessions.get_mut(&normalize_path_key(&file.path)) else {
+            return Ok(CacheLookup::Miss(None));
+        };
+        let current_metadata = FileMetadataFingerprint::from_session(file);
+        if cached.content.metadata() == current_metadata {
+            return Ok(CacheLookup::Hit {
+                determination: cached.determination.clone(),
+                fingerprint: cached.content,
+            });
+        }
+        if cached.content.byte_len != current_metadata.byte_len {
+            return Ok(CacheLookup::Miss(None));
+        }
 
-    pub(super) fn cached_byte_len(&self, path: &Path) -> Option<u64> {
-        self.state
-            .sessions
-            .get(&normalize_path_key(path))
-            .map(|cached| cached.content.byte_len())
+        let current = fingerprint_file(&file.path)?;
+        if cached.content.has_same_content(current) {
+            cached.content = current;
+            self.dirty = true;
+            Ok(CacheLookup::Hit {
+                determination: cached.determination.clone(),
+                fingerprint: current,
+            })
+        } else {
+            Ok(CacheLookup::Miss(Some(current)))
+        }
     }
 
     pub(super) fn insert(
@@ -179,6 +244,7 @@ impl RulesCache {
 }
 
 pub(super) fn fingerprint_file(path: &Path) -> Result<ContentFingerprint> {
+    let metadata_before = fingerprint_metadata(path)?;
     let mut file = fs::File::open(path)
         .with_context(|| format!("failed to open {} for fingerprinting", path.display()))?;
     let mut hasher = Hasher::new();
@@ -198,10 +264,48 @@ pub(super) fn fingerprint_file(path: &Path) -> Result<ContentFingerprint> {
             .context("file length overflow while fingerprinting")?;
     }
 
+    let metadata_after = fingerprint_metadata(path)?;
+    if metadata_before != metadata_after || metadata_after.byte_len != byte_len {
+        bail!(
+            "{} changed while it was being fingerprinted",
+            path.display()
+        );
+    }
+
     Ok(ContentFingerprint {
-        byte_len,
+        byte_len: metadata_after.byte_len,
+        modified_ns: metadata_after.modified_ns,
         crc32: hasher.finalize(),
     })
+}
+
+fn validate_cached_file(path: &Path, cached: ContentFingerprint) -> Result<ContentFingerprint> {
+    let metadata = fingerprint_metadata(path)?;
+    if cached.metadata() == metadata {
+        return Ok(cached);
+    }
+    fingerprint_file(path)
+}
+
+fn fingerprint_metadata(path: &Path) -> Result<FileMetadataFingerprint> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed to stat {} for fingerprinting", path.display()))?;
+    let modified = metadata
+        .modified()
+        .with_context(|| format!("failed to read modification time for {}", path.display()))?;
+    Ok(FileMetadataFingerprint {
+        byte_len: metadata.len(),
+        modified_ns: modified_ns(modified),
+    })
+}
+
+fn modified_ns(modified: SystemTime) -> u64 {
+    modified
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn load_state(path: &Path) -> Result<Option<RulesCacheState>> {
@@ -246,9 +350,22 @@ fn normalize_path_key(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::index::{Scope, SearchFilters};
+    use crate::parse::Agent;
     use crate::rules::{run_rules, RulesMode, RulesOptions};
-    use crate::scan::SessionRoots;
+    use crate::scan::{SessionFile, SessionRoots};
     use tempfile::TempDir;
+
+    fn scanned_session(path: &Path) -> Result<SessionFile> {
+        let metadata = fs::metadata(path)?;
+        Ok(SessionFile {
+            path: path.to_path_buf(),
+            agent: Agent::Claude,
+            modified: metadata.modified()?,
+            size: metadata.len(),
+            trashed: false,
+            original_path: None,
+        })
+    }
 
     #[test]
     fn cache_reuses_unchanged_session_and_rejects_same_length_rewrite() -> Result<()> {
@@ -269,11 +386,62 @@ mod tests {
         );
         cache.save()?;
 
-        let cache = RulesCache::open_with_binary(cache_path, &rules, &binary)?;
-        assert!(cache.get(&session, fingerprint_file(&session)?).is_some());
+        let mut cache = RulesCache::open_with_binary(cache_path, &rules, &binary)?;
+        assert!(matches!(
+            cache.lookup(&scanned_session(&session)?)?,
+            CacheLookup::Hit {
+                determination: CachedDetermination::Ignored,
+                ..
+            }
+        ));
 
+        cache
+            .state
+            .sessions
+            .get_mut(&normalize_path_key(&session))
+            .unwrap()
+            .content
+            .modified_ns = 0;
         fs::write(&session, b"bravo")?;
-        assert!(cache.get(&session, fingerprint_file(&session)?).is_none());
+        assert!(matches!(
+            cache.lookup(&scanned_session(&session)?)?,
+            CacheLookup::Miss(Some(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn cache_trusts_matching_metadata_without_recomputing_crc32() -> Result<()> {
+        let temp = TempDir::new()?;
+        let binary = temp.path().join("aics");
+        let rules = temp.path().join("rules.js");
+        let session = temp.path().join("session.jsonl");
+        let cache_path = temp.path().join("rules-cache.json");
+        fs::write(&binary, b"binary-v1")?;
+        fs::write(&rules, b"rules-v1")?;
+        fs::write(&session, b"alpha")?;
+
+        let mut cache = RulesCache::open_with_binary(cache_path, &rules, &binary)?;
+        cache.insert(
+            &session,
+            fingerprint_file(&session)?,
+            CachedDetermination::Ignored,
+        );
+        cache
+            .state
+            .sessions
+            .get_mut(&normalize_path_key(&session))
+            .unwrap()
+            .content
+            .crc32 ^= u32::MAX;
+
+        assert!(matches!(
+            cache.lookup(&scanned_session(&session)?)?,
+            CacheLookup::Hit {
+                determination: CachedDetermination::Ignored,
+                ..
+            }
+        ));
         Ok(())
     }
 
@@ -294,21 +462,30 @@ mod tests {
             fingerprint_file(&session)?,
             CachedDetermination::Ignored,
         );
+        cache.state.aics_bin.modified_ns = 0;
+        cache.state.rules_js.modified_ns = 0;
         cache.save()?;
 
         fs::write(&binary, b"bin-two")?;
         let mut cache = RulesCache::open_with_binary(cache_path.clone(), &rules, &binary)?;
-        assert!(cache.get(&session, fingerprint_file(&session)?).is_none());
+        assert!(matches!(
+            cache.lookup(&scanned_session(&session)?)?,
+            CacheLookup::Miss(None)
+        ));
         cache.insert(
             &session,
             fingerprint_file(&session)?,
             CachedDetermination::Ignored,
         );
+        cache.state.rules_js.modified_ns = 0;
         cache.save()?;
 
         fs::write(&rules, b"rules-b")?;
-        let cache = RulesCache::open_with_binary(cache_path, &rules, &binary)?;
-        assert!(cache.get(&session, fingerprint_file(&session)?).is_none());
+        let mut cache = RulesCache::open_with_binary(cache_path, &rules, &binary)?;
+        assert!(matches!(
+            cache.lookup(&scanned_session(&session)?)?,
+            CacheLookup::Miss(None)
+        ));
         Ok(())
     }
 
@@ -332,9 +509,12 @@ mod tests {
         cache.save()?;
 
         let state: serde_json::Value = serde_json::from_slice(&fs::read(cache_path)?)?;
+        assert_eq!(state["format_version"], RULES_CACHE_FORMAT_VERSION);
         assert_eq!(state["aics_bin"]["byte_len"], 6);
+        assert!(state["aics_bin"]["modified_ns"].is_u64());
         assert!(state["aics_bin"]["crc32"].is_u64());
         assert_eq!(state["rules_js"]["byte_len"], 5);
+        assert!(state["rules_js"]["modified_ns"].is_u64());
         let cached_session = state["sessions"]
             .as_object()
             .unwrap()
@@ -342,7 +522,68 @@ mod tests {
             .next()
             .unwrap();
         assert_eq!(cached_session["content"]["byte_len"], 7);
+        assert!(cached_session["content"]["modified_ns"].is_u64());
         assert!(cached_session["content"]["crc32"].is_u64());
+        Ok(())
+    }
+
+    #[test]
+    fn no_match_determination_has_compact_serialization() -> Result<()> {
+        let serialized = serde_json::to_value(CachedDetermination::NoMatch)?;
+        assert_eq!(serialized, serde_json::json!({ "status": "no_match" }));
+        Ok(())
+    }
+
+    #[test]
+    fn rules_runner_defers_filtered_session_until_filter_includes_it() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session = temp
+            .path()
+            .join(".claude/projects/-tmp-project/sidechain.jsonl");
+        fs::create_dir_all(session.parent().unwrap())?;
+        fs::write(
+            &session,
+            concat!(
+                r#"{"type":"user","sessionId":"sidechain","isSidechain":true,"message":{"role":"user","content":"first"}}"#,
+                "\n",
+            ),
+        )?;
+        let rules = temp.path().join("rules.js");
+        fs::write(&rules, r#"rule("match", () => trash("evaluated"));"#)?;
+        let cache_path = temp.path().join("rules-cache.json");
+        let roots = SessionRoots {
+            claude_projects: temp.path().join(".claude/projects"),
+            codex_sessions: temp.path().join(".codex/sessions"),
+            trash: None,
+        };
+        let mut options = RulesOptions {
+            rules_path: rules,
+            cache_path: Some(cache_path.clone()),
+            mode: RulesMode::Preview,
+            json: true,
+            scope: Scope::Global,
+            filters: SearchFilters::default(),
+        };
+
+        let filtered = run_rules(&roots, &options)?;
+        assert!(filtered.proposals.is_empty());
+        let state: serde_json::Value = serde_json::from_slice(&fs::read(&cache_path)?)?;
+        assert_eq!(
+            state["sessions"][normalize_path_key(&session)]["determination"]["status"],
+            "unevaluated"
+        );
+
+        let cached = run_rules(&roots, &options)?;
+        assert!(cached.proposals.is_empty());
+
+        options.filters.include_sub_agents = true;
+        let included = run_rules(&roots, &options)?;
+        assert_eq!(included.proposals.len(), 1);
+        let state: serde_json::Value = serde_json::from_slice(&fs::read(cache_path)?)?;
+        assert_eq!(
+            state["sessions"][normalize_path_key(&session)]["determination"]["status"],
+            "evaluated"
+        );
         Ok(())
     }
 
