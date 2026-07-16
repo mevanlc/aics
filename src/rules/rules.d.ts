@@ -16,24 +16,6 @@ interface AicsRuleContext {
 
   /** Parsed transcript turns grouped by kind. */
   turns: AicsRuleTurns;
-
-  /** Creates a JavaScript regular expression. */
-  re(pattern: string, flags?: string): RegExp;
-
-  /**
-   * Fetches transcript text by internal turn kind and cell index.
-   * Prefer the typed text accessors on `session` and individual turns.
-   *
-   * @param kind Internal kind such as `user`, `contextual_user`, `agent`,
-   * `system`, `tool_result`, `exec`, or `patch`.
-   * @param index Original session-cell index, available as `turn.index`.
-   * @param field Text field to fetch; defaults to `text`.
-   * @param limit Maximum source-text UTF-8 bytes before truncation. Omit for the runtime default.
-   */
-  text(kind: string, index: number, field?: string, limit?: number): string;
-
-  /** Alias for `text`. */
-  turnText(kind: string, index: number, field?: string, limit?: number): string;
 }
 
 /** Session metadata available to rules. */
@@ -88,24 +70,6 @@ interface AicsRuleSession {
 
   /** Whether this file is currently in the AICS trash store. */
   trashed: boolean;
-
-  /**
-   * Lazily returns the first parsed user message.
-   * @param limit Maximum source-text UTF-8 bytes before truncation. Omit for the runtime default.
-   */
-  firstUserText(limit?: number): string;
-
-  /**
-   * Lazily returns the first parsed message text.
-   * @param limit Maximum source-text UTF-8 bytes before truncation. Omit for the runtime default.
-   */
-  firstText(limit?: number): string;
-
-  /**
-   * Lazily returns the last parsed message text.
-   * @param limit Maximum source-text UTF-8 bytes before truncation. Omit for the runtime default.
-   */
-  lastText(limit?: number): string;
 }
 
 /** Parsed transcript turns grouped for convenient rule matching. */

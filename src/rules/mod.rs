@@ -96,22 +96,6 @@ function __aicsNormalizeLimit(limit) {
 
 globalThis.__aicsRunRules = function(contextJson, applyAtStartupOnly) {
   const context = JSON.parse(contextJson);
-  context.re = function(pattern, flags) {
-    return new RegExp(pattern, flags);
-  };
-  context.text = function(kind, index, field, limit) {
-    return globalThis.__aicsFetchText(String(kind), Number(index), field == null ? "text" : String(field), __aicsNormalizeLimit(limit));
-  };
-  context.turnText = context.text;
-  context.session.firstUserText = function(limit) {
-    return globalThis.__aicsFetchText("session", 0, "firstUserText", __aicsNormalizeLimit(limit));
-  };
-  context.session.firstText = function(limit) {
-    return globalThis.__aicsFetchText("session", 0, "firstText", __aicsNormalizeLimit(limit));
-  };
-  context.session.lastText = function(limit) {
-    return globalThis.__aicsFetchText("session", 0, "lastText", __aicsNormalizeLimit(limit));
-  };
 
   for (const kind of ["user", "contextualUser", "agent", "system", "toolResults"]) {
     for (const turn of context.turns[kind] || []) {
@@ -1040,15 +1024,6 @@ struct RuleDetails {
 impl RuleDetails {
     fn from_session(session: &Session) -> Self {
         let mut details = Self::default();
-        details.insert(
-            "session",
-            0,
-            "firstUserText",
-            &session.first_user_msg_content,
-        );
-        details.insert("session", 0, "firstText", &session.first_msg_content);
-        details.insert("session", 0, "lastText", &session.last_msg_content);
-
         let cells = rule_cells(session);
         for (index, cell) in cells.iter().enumerate() {
             match cell {
@@ -1498,8 +1473,8 @@ mod tests {
         std::fs::write(
             &rules,
             r#"
-            rule("commit sessions", ({ turns, re }) => {
-              return re(String.raw`\s*[/$](gdf-)?commit\b`, "m").test(turns.user[0].text(4096))
+            rule("commit sessions", ({ turns }) => {
+              return /\s*[/$](?:gdf-)?commit\b/m.test(turns.user[0].text(4096))
                 ? trash("commit helper")
                 : nothing();
             });
@@ -1519,6 +1494,46 @@ mod tests {
         assert_eq!(outcomes[0].rule, "commit sessions");
         assert_eq!(outcomes[0].action.as_deref(), Some("trash"));
         assert_eq!(outcomes[0].reason.as_deref(), Some("commit helper"));
+    }
+
+    #[test]
+    fn js_rule_context_omits_removed_helpers() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = dir.path().join("rules.js");
+        std::fs::write(
+            &rules,
+            r#"
+            rule("removed helpers are absent", (context) => {
+              const contextHelpersAbsent =
+                !("re" in context) &&
+                !("text" in context) &&
+                !("turnText" in context);
+              const sessionHelpersAbsent =
+                !("firstUserText" in context.session) &&
+                !("firstText" in context.session) &&
+                !("lastText" in context.session);
+              return contextHelpersAbsent && sessionHelpersAbsent
+                ? trash("removed helpers are absent")
+                : nothing();
+            });
+            "#,
+        )
+        .unwrap();
+
+        let engine = JsRuleEngine::load(&rules).unwrap();
+        let outcomes = engine
+            .evaluate(
+                &input("codex", "preview"),
+                details("preview"),
+                RuleSelection::All,
+            )
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].action.as_deref(), Some("trash"));
+        assert_eq!(
+            outcomes[0].reason.as_deref(),
+            Some("removed helpers are absent")
+        );
     }
 
     #[test]
@@ -1569,15 +1584,15 @@ mod tests {
     }
 
     #[test]
-    fn js_rule_first_user_text_ignores_contextual_user_messages() {
+    fn js_rule_user_turns_exclude_contextual_user_messages() {
         let dir = tempfile::tempdir().unwrap();
         let rules = dir.path().join("rules.js");
         std::fs::write(
             &rules,
             r#"
-            rule("commit sessions", ({ turns, re }) => {
+            rule("commit sessions", ({ turns }) => {
               return turns.user.length > 0 &&
-                re(String.raw`\s*[/$](gdf-)?commit\b`, "m").test(turns.user[0].text(4096))
+                /\s*[/$](?:gdf-)?commit\b/m.test(turns.user[0].text(4096))
                 ? trash("commit helper")
                 : nothing();
             });

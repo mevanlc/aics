@@ -74,9 +74,9 @@ Rules may be registered as either `rule(name, callback)` or `rule(name, config, 
 Rule determinations from the default `~/.config/aics/rules.js` are cached per cache profile so unchanged sessions do not need to be parsed or evaluated again. Explicit all-rules evaluation and automatic startup evaluation use separate caches. Each cache tracks the byte length, modification time, and CRC32 of the running `aics` binary, `rules.js`, and each session file. Matching byte length and modification time provide a metadata-only fast path; a byte-length difference is an immediate miss, while CRC32 checks same-length files whose modification time changed. `--rules PATH` and `--benchmark-rules` bypass the cache so they always evaluate the selected rules.
 
 ```js
-rule("trash short commit helper sessions", ({ turns, re }) => {
+rule("trash short commit helper sessions", ({ turns }) => {
   return turns.user.length === 2 &&
-    re(String.raw`\s*[/$](gdf-)?commit\b`, "m").test(turns.user[0].text(4096))
+    /\s*[/$](?:gdf-)?commit\b/m.test(turns.user[0].text(4096))
     ? trash("commit helper")
     : nothing();
 });
@@ -86,7 +86,6 @@ Rules can return `nothing()`, `trash(reason)`, or `untrash(reason)`. To evaluate
 
 Large transcript fields are fetched from Rust only when a rule calls one of the lazy methods. The limit argument is optional; omitting it uses a practically unbounded default for stress testing, but normal rules should pass an explicit byte limit:
 
-- `session.firstUserText(limit)`, `session.firstText(limit)`, `session.lastText(limit)`
 - `turns.user[n].text(limit)`, `turns.contextualUser[n].text(limit)`, `turns.agent[n].text(limit)`, `turns.system[n].text(limit)`, `turns.toolResults[n].text(limit)`
 - `turns.exec[n].stdout(limit)`, `turns.exec[n].stderr(limit)`
 - `turns.patches[n].files[m].content(limit)`
