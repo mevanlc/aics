@@ -154,7 +154,7 @@ struct Cli {
     #[arg(
         long = "rules",
         value_name = "PATH",
-        help = "Override the JavaScript rules file used for startup, preview, or explicit application"
+        help = "Use a custom JavaScript rules file without reading or writing the rules cache"
     )]
     rules: Option<PathBuf>,
     #[arg(
@@ -310,7 +310,8 @@ fn main() -> Result<()> {
         let rules_filters = request.filters.clone();
         let rules_options = RulesOptions {
             rules_path,
-            cache_path: (!cli.benchmark_rules).then_some(rules_cache_path.clone()),
+            cache_path: (!cli.benchmark_rules && cli.rules.is_none())
+                .then_some(rules_cache_path.clone()),
             mode,
             selection: RuleSelection::All,
             json: cli.json,
@@ -367,7 +368,7 @@ fn main() -> Result<()> {
         if let Some(rules_path) = rules_path {
             let startup_options = RulesOptions {
                 rules_path,
-                cache_path: Some(startup_rules_cache_path),
+                cache_path: cli.rules.is_none().then_some(startup_rules_cache_path),
                 mode: RulesMode::Apply,
                 selection: RuleSelection::ApplyAtStartup,
                 json: false,

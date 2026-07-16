@@ -126,6 +126,16 @@ fn rules_expose_missing_session_strings_as_empty() -> Result<()> {
 fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
+    let config_root = temp.path().join("config");
+    fs::create_dir_all(&config_root)?;
+    fs::write(
+        config_root.join("rules.js"),
+        r#"
+        rule("default codex rule", ({ session }) => {
+          return session.agent === "codex" ? trash("default cache") : nothing();
+        });
+        "#,
+    )?;
     let rules = write_rules(
         &temp,
         r#"
@@ -139,9 +149,23 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
     let cache_root = temp.path().join("cache");
     let data_root = temp.path().join("data");
 
+    let default_output = Command::new(env!("CARGO_BIN_EXE_aics"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CONFIG_ROOT", &config_root)
+        .env("AICS_CACHE_ROOT", &cache_root)
+        .env("AICS_DATA_ROOT", &data_root)
+        .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
+        .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .args(["--preview-rules", "--json", "--progress", "none", "-g"])
+        .output()?;
+    assert!(default_output.status.success(), "{default_output:#?}");
+    let rules_caches = profile_rules_caches(&cache_root)?;
+    assert_eq!(rules_caches.len(), 1);
+    let cached_default_rules = fs::read(&rules_caches[0])?;
+
     let output = Command::new(env!("CARGO_BIN_EXE_aics"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("AICS_CONFIG_ROOT", temp.path().join("config"))
+        .env("AICS_CONFIG_ROOT", &config_root)
         .env("AICS_CACHE_ROOT", &cache_root)
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
@@ -171,13 +195,8 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
     assert_eq!(value["action"], "trash");
     assert_eq!(value["reason"], "matched fixture");
     assert_eq!(value["agent"], "claude");
-    let rules_caches = profile_rules_caches(&cache_root)?;
-    assert_eq!(rules_caches.len(), 1);
-    let cache: serde_json::Value = serde_json::from_slice(&fs::read(&rules_caches[0])?)?;
-    assert!(cache["aics_bin"]["byte_len"].is_u64());
-    assert!(cache["aics_bin"]["modified_ns"].is_u64());
-    assert!(cache["rules_js"]["crc32"].is_u64());
-    assert!(!cache["sessions"].as_object().unwrap().is_empty());
+    assert_eq!(profile_rules_caches(&cache_root)?, rules_caches);
+    assert_eq!(fs::read(&rules_caches[0])?, cached_default_rules);
     Ok(())
 }
 
@@ -185,6 +204,14 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
 fn ordinary_json_startup_applies_only_rules_enabled_at_startup() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
+    let config_root = temp.path().join("config");
+    fs::create_dir_all(&config_root)?;
+    fs::write(
+        config_root.join("rules.js"),
+        r#"
+        rule("default startup rule", { applyAtStartup: true }, () => nothing());
+        "#,
+    )?;
     let rules = write_rules(
         &temp,
         r#"
@@ -199,9 +226,23 @@ fn ordinary_json_startup_applies_only_rules_enabled_at_startup() -> Result<()> {
     let cache_root = temp.path().join("cache");
     let data_root = temp.path().join("data");
 
+    let default_output = Command::new(env!("CARGO_BIN_EXE_aics"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CONFIG_ROOT", &config_root)
+        .env("AICS_CACHE_ROOT", &cache_root)
+        .env("AICS_DATA_ROOT", &data_root)
+        .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
+        .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .args(["--json", "--progress", "none", "-g"])
+        .output()?;
+    assert!(default_output.status.success(), "{default_output:#?}");
+    let startup_caches = profile_startup_rules_caches(&cache_root)?;
+    assert_eq!(startup_caches.len(), 1);
+    let cached_default_rules = fs::read(&startup_caches[0])?;
+
     let output = Command::new(env!("CARGO_BIN_EXE_aics"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("AICS_CONFIG_ROOT", temp.path().join("config"))
+        .env("AICS_CONFIG_ROOT", &config_root)
         .env("AICS_CACHE_ROOT", &cache_root)
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
@@ -209,7 +250,6 @@ fn ordinary_json_startup_applies_only_rules_enabled_at_startup() -> Result<()> {
         .args([
             "--rules",
             rules.to_str().unwrap(),
-            "--rebuild-index",
             "--json",
             "--progress",
             "none",
@@ -220,7 +260,8 @@ fn ordinary_json_startup_applies_only_rules_enabled_at_startup() -> Result<()> {
     assert!(!roots.claude_session.exists());
     assert!(roots.codex_session.exists());
     assert!(fs::read_to_string(data_root.join("trash.jsonl"))?.contains("basic_session.jsonl"));
-    assert_eq!(profile_startup_rules_caches(&cache_root)?.len(), 1);
+    assert_eq!(profile_startup_rules_caches(&cache_root)?, startup_caches);
+    assert_eq!(fs::read(&startup_caches[0])?, cached_default_rules);
     assert!(profile_rules_caches(&cache_root)?.is_empty());
     Ok(())
 }
