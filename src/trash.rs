@@ -152,6 +152,53 @@ impl TrashStore {
             .with_context(|| format!("failed to delete original {}", path.display()))?;
         Ok(entry)
     }
+
+    pub fn restore_file(&self, path: &Path) -> Result<PathBuf> {
+        let mut entries = self.sync()?;
+        let entry_index = entries
+            .iter()
+            .position(|entry| entry.trash_path(&self.paths) == path)
+            .with_context(|| format!("trash metadata not found for {}", path.display()))?;
+        let target = entries[entry_index]
+            .original_path()
+            .with_context(|| format!("original path is unknown for {}", path.display()))?;
+        let parent = target.parent().with_context(|| {
+            format!(
+                "restore target {} has no parent directory",
+                target.display()
+            )
+        })?;
+
+        if !parent.is_dir() {
+            anyhow::bail!("restore parent does not exist: {}", parent.display());
+        }
+        if target.exists() {
+            anyhow::bail!("restore target already exists: {}", target.display());
+        }
+
+        fs::copy(path, &target).with_context(|| {
+            format!(
+                "failed to restore {} to {}",
+                path.display(),
+                target.display()
+            )
+        })?;
+        if let Err(error) = fs::remove_file(path) {
+            let _ = fs::remove_file(&target);
+            return Err(error).with_context(|| {
+                format!("failed to remove restored trash item {}", path.display())
+            });
+        }
+
+        entries.remove(entry_index);
+        if let Err(error) = write_metadata(&self.paths.metadata_file, &entries) {
+            warn!(
+                "failed to update trash metadata after restoring {}: {error:#}",
+                target.display()
+            );
+        }
+        Ok(target)
+    }
 }
 
 fn read_metadata(path: &Path) -> Result<Vec<TrashEntry>> {
@@ -318,6 +365,25 @@ mod tests {
         );
         let metadata = std::fs::read_to_string(paths.metadata_file)?;
         assert!(metadata.contains(r#""tn":"codex""#));
+        Ok(())
+    }
+
+    #[test]
+    fn restore_file_returns_session_to_original_path() -> Result<()> {
+        let temp = TempDir::new()?;
+        let paths = TrashPaths::from_data_root(temp.path().join("data"));
+        let original = temp.path().join("session.jsonl");
+        std::fs::write(&original, "{}\n")?;
+        let store = TrashStore::new(paths.clone());
+        let entry = store.trash_file(&original, Agent::Codex)?;
+        let trashed = entry.trash_path(&paths);
+
+        let restored = store.restore_file(&trashed)?;
+
+        assert_eq!(restored, original.canonicalize()?);
+        assert_eq!(std::fs::read_to_string(&restored)?, "{}\n");
+        assert!(!trashed.exists());
+        assert_eq!(std::fs::read_to_string(paths.metadata_file)?, "");
         Ok(())
     }
 }

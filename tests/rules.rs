@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use aics::index::{Scope, SearchFilters};
+use aics::parse::Agent;
 use aics::rules::{run_rules_with_progress, RuleSelection, RulesMode, RulesOptions, RulesProgress};
 use aics::scan::SessionRoots;
+use aics::trash::{TrashPaths, TrashStore};
 use anyhow::Result;
 use tempfile::TempDir;
 
@@ -53,6 +55,7 @@ fn write_rules_dts_creates_default_config_file() -> Result<()> {
     assert!(contents.contains("applyAtStartup?: boolean;"));
     assert!(contents.contains("config: AicsRuleConfig,"));
     assert!(contents.contains("declare function trash(reason?: string): AicsTrashAction;"));
+    assert!(contents.contains("declare function untrash(reason?: string): AicsUntrashAction;"));
     Ok(())
 }
 
@@ -360,6 +363,99 @@ fn apply_rules_moves_matching_session_to_trash() -> Result<()> {
     let value: serde_json::Value = serde_json::from_str(lines[0])?;
     assert_eq!(value["action"], "trash");
     assert_eq!(value["reason"], "cleanup");
+    Ok(())
+}
+
+#[test]
+fn apply_rules_restores_matching_trashed_session() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let original = roots.claude_session.clone();
+    let data_root = temp.path().join("data");
+    let trash_paths = TrashPaths::from_data_root(&data_root);
+    let entry = TrashStore::new(trash_paths.clone()).trash_file(&original, Agent::Claude)?;
+    let trashed = entry.trash_path(&trash_paths);
+    let rules = write_rules(
+        &temp,
+        r#"
+        rule("restore claude basic", ({ session }) => {
+          return session.trashed ? untrash("restore") : nothing();
+        });
+        "#,
+    )?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_aics"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CONFIG_ROOT", temp.path().join("config"))
+        .env("AICS_CACHE_ROOT", temp.path().join("cache"))
+        .env("AICS_DATA_ROOT", &data_root)
+        .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
+        .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .args([
+            "--apply-rules",
+            "--rules",
+            rules.to_str().unwrap(),
+            "--trashed",
+            "yes",
+            "--json",
+            "--progress",
+            "none",
+            "-g",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:#?}");
+    assert!(original.exists());
+    assert!(!trashed.exists());
+    assert_eq!(fs::read_to_string(data_root.join("trash.jsonl"))?, "");
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())?;
+    assert_eq!(value["rule"], "restore claude basic");
+    assert_eq!(value["action"], "untrash");
+    assert_eq!(value["reason"], "restore");
+    Ok(())
+}
+
+#[test]
+fn apply_rules_skips_untrash_for_normal_session() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let rules = write_rules(
+        &temp,
+        r#"
+        rule("restore claude basic", ({ session }) => {
+          return session.agent === "claude" ? untrash("restore") : nothing();
+        });
+        "#,
+    )?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_aics"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CONFIG_ROOT", temp.path().join("config"))
+        .env("AICS_CACHE_ROOT", temp.path().join("cache"))
+        .env("AICS_DATA_ROOT", temp.path().join("data"))
+        .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
+        .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .args([
+            "--apply-rules",
+            "--rules",
+            rules.to_str().unwrap(),
+            "--json",
+            "--progress",
+            "none",
+            "-g",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:#?}");
+    assert!(roots.claude_session.exists());
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())?;
+    assert_eq!(value["action"], "untrash");
+    assert_eq!(value["reason"], "restore");
+    assert_eq!(value["skip_reason"], "session is already untrashed");
     Ok(())
 }
 

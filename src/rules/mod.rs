@@ -72,6 +72,13 @@ globalThis.trash = function(reason) {
   };
 };
 
+globalThis.untrash = function(reason) {
+  return {
+    action: "untrash",
+    reason: reason == null ? null : String(reason),
+  };
+};
+
 globalThis.__aicsRuleNames = function() {
   return JSON.stringify(__aicsRules.map((entry) => entry.name));
 };
@@ -256,7 +263,7 @@ interface AicsPatchFile {
   content(limit?: number): string;
 }
 
-type AicsRuleAction = AicsNothingAction | AicsTrashAction;
+type AicsRuleAction = AicsNothingAction | AicsTrashAction | AicsUntrashAction;
 interface AicsRuleConfig {
   applyAtStartup?: boolean;
   [key: string]: unknown;
@@ -271,6 +278,11 @@ interface AicsTrashAction {
   reason: string | null;
 }
 
+interface AicsUntrashAction {
+  action: "untrash";
+  reason: string | null;
+}
+
 declare function rule(
   name: string,
   callback: (context: AicsRuleContext) => AicsRuleAction | AicsRuleAction[] | null | undefined,
@@ -282,6 +294,7 @@ declare function rule(
 ): void;
 declare function nothing(): AicsNothingAction;
 declare function trash(reason?: string): AicsTrashAction;
+declare function untrash(reason?: string): AicsUntrashAction;
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,6 +355,10 @@ pub struct RuleProposal {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RuleAction {
     Trash {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    Untrash {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
@@ -824,6 +841,21 @@ fn collect_outcomes(
                     hit: rule_search_hit(session.clone()),
                 });
             }
+            Some("untrash") => {
+                let proposal = RuleProposal {
+                    rule: outcome.rule.clone(),
+                    session_id: session.session_id.clone(),
+                    path: file.path.clone(),
+                    agent: file.agent,
+                    action: RuleAction::Untrash {
+                        reason: outcome.reason.clone(),
+                    },
+                };
+                report.preview_matches.push(RulePreviewMatch {
+                    proposal,
+                    hit: rule_search_hit(session.clone()),
+                });
+            }
             Some(action) => report.errors.push(RuleEvaluationError {
                 rule: Some(outcome.rule.clone()),
                 path: file.path.clone(),
@@ -959,6 +991,36 @@ pub fn apply_rule_proposals(
                     }),
                 }
             }
+            RuleAction::Untrash { .. } => {
+                if !proposal.path.starts_with(store.paths().trash_dir.as_path()) {
+                    skipped.push(SkippedRuleAction {
+                        rule: proposal.rule.clone(),
+                        session_id: proposal.session_id.clone(),
+                        path: proposal.path.clone(),
+                        agent: proposal.agent,
+                        action: proposal.action.clone(),
+                        skip_reason: "session is already untrashed".to_owned(),
+                    });
+                    continue;
+                }
+                match store.restore_file(&proposal.path) {
+                    Ok(_) => applied.push(AppliedRuleAction {
+                        rule: proposal.rule.clone(),
+                        session_id: proposal.session_id.clone(),
+                        path: proposal.path.clone(),
+                        agent: proposal.agent,
+                        action: proposal.action.clone(),
+                    }),
+                    Err(error) => skipped.push(SkippedRuleAction {
+                        rule: proposal.rule.clone(),
+                        session_id: proposal.session_id.clone(),
+                        path: proposal.path.clone(),
+                        agent: proposal.agent,
+                        action: proposal.action.clone(),
+                        skip_reason: format!("{error:#}"),
+                    }),
+                }
+            }
         }
     }
     (applied, skipped)
@@ -1070,12 +1132,13 @@ impl RuleAction {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Trash { .. } => "trash",
+            Self::Untrash { .. } => "untrash",
         }
     }
 
     pub fn reason(&self) -> Option<&str> {
         match self {
-            Self::Trash { reason } => reason.as_deref(),
+            Self::Trash { reason } | Self::Untrash { reason } => reason.as_deref(),
         }
     }
 }

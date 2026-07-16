@@ -82,7 +82,7 @@ rule("trash short commit helper sessions", ({ turns, re }) => {
 });
 ```
 
-For the first implementation, rules can return `nothing()` or `trash(reason)`. Rules mode honors the usual scope/filter flags such as `-g`, `--dir`, `--agent`, `--after`, `--before`, `--min-lines`, and `--sub-agent`, but it does not accept a text search query yet.
+Rules can return `nothing()`, `trash(reason)`, or `untrash(reason)`. To evaluate trashed sessions for `untrash`, use `--trashed yes` or `--trashed both`. Applying `untrash` to a normal session is skipped as already untrashed. Rules mode honors the usual scope/filter flags such as `-g`, `--dir`, `--agent`, `--after`, `--before`, `--min-lines`, and `--sub-agent`, but it does not accept a text search query yet.
 
 Large transcript fields are fetched from Rust only when a rule calls one of the lazy methods. The limit argument is optional; omitting it uses a practically unbounded default for stress testing, but normal rules should pass an explicit byte limit:
 
