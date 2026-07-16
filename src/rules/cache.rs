@@ -351,7 +351,7 @@ mod tests {
     use super::*;
     use crate::index::{Scope, SearchFilters};
     use crate::parse::Agent;
-    use crate::rules::{run_rules, RulesMode, RulesOptions};
+    use crate::rules::{run_rules, RuleSelection, RulesMode, RulesOptions};
     use crate::scan::{SessionFile, SessionRoots};
     use tempfile::TempDir;
 
@@ -560,6 +560,7 @@ mod tests {
             rules_path: rules,
             cache_path: Some(cache_path.clone()),
             mode: RulesMode::Preview,
+            selection: RuleSelection::All,
             json: true,
             scope: Scope::Global,
             filters: SearchFilters::default(),
@@ -615,6 +616,7 @@ mod tests {
             rules_path: rules.clone(),
             cache_path: Some(cache_path.clone()),
             mode: RulesMode::Preview,
+            selection: RuleSelection::All,
             json: true,
             scope: Scope::Global,
             filters: SearchFilters::default(),

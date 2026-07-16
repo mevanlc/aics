@@ -38,9 +38,18 @@ const RULES_HARNESS: &str = r#"
 const __aicsRules = [];
 const __aicsRuleNames = new Set();
 
-globalThis.rule = function(name, callback) {
+globalThis.rule = function(name, configOrCallback, callback) {
   if (typeof name !== "string" || name.trim() === "") {
     throw new TypeError("rule name must be a non-empty string");
+  }
+  const hasConfig = arguments.length >= 3;
+  const config = hasConfig ? configOrCallback : {};
+  callback = hasConfig ? callback : configOrCallback;
+  if (config === null || typeof config !== "object" || Array.isArray(config)) {
+    throw new TypeError(`rule ${name} config must be an object`);
+  }
+  if (config.applyAtStartup !== undefined && typeof config.applyAtStartup !== "boolean") {
+    throw new TypeError(`rule ${name} config.applyAtStartup must be a boolean`);
   }
   if (typeof callback !== "function") {
     throw new TypeError(`rule ${name} callback must be a function`);
@@ -49,7 +58,7 @@ globalThis.rule = function(name, callback) {
     throw new Error(`duplicate rule name: ${name}`);
   }
   __aicsRuleNames.add(name);
-  __aicsRules.push({ name, callback });
+  __aicsRules.push({ name, config, callback });
 };
 
 globalThis.nothing = function() {
@@ -78,7 +87,7 @@ function __aicsNormalizeLimit(limit) {
   return Math.floor(n);
 }
 
-globalThis.__aicsRunRules = function(contextJson) {
+globalThis.__aicsRunRules = function(contextJson, applyAtStartupOnly) {
   const context = JSON.parse(contextJson);
   context.re = function(pattern, flags) {
     return new RegExp(pattern, flags);
@@ -126,6 +135,9 @@ globalThis.__aicsRunRules = function(contextJson) {
 
   const outcomes = [];
   for (const entry of __aicsRules) {
+    if (applyAtStartupOnly && entry.config.applyAtStartup !== true) {
+      continue;
+    }
     try {
       const raw = entry.callback(context);
       const actions = Array.isArray(raw) ? raw : [raw];
@@ -245,6 +257,10 @@ interface AicsPatchFile {
 }
 
 type AicsRuleAction = AicsNothingAction | AicsTrashAction;
+interface AicsRuleConfig {
+  applyAtStartup?: boolean;
+  [key: string]: unknown;
+}
 
 interface AicsNothingAction {
   action: "nothing";
@@ -259,6 +275,11 @@ declare function rule(
   name: string,
   callback: (context: AicsRuleContext) => AicsRuleAction | AicsRuleAction[] | null | undefined,
 ): void;
+declare function rule(
+  name: string,
+  config: AicsRuleConfig,
+  callback: (context: AicsRuleContext) => AicsRuleAction | AicsRuleAction[] | null | undefined,
+): void;
 declare function nothing(): AicsNothingAction;
 declare function trash(reason?: string): AicsTrashAction;
 "#;
@@ -269,11 +290,18 @@ pub enum RulesMode {
     Apply,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleSelection {
+    All,
+    ApplyAtStartup,
+}
+
 #[derive(Debug, Clone)]
 pub struct RulesOptions {
     pub rules_path: PathBuf,
     pub cache_path: Option<PathBuf>,
     pub mode: RulesMode,
+    pub selection: RuleSelection,
     pub json: bool,
     pub scope: Scope,
     pub filters: SearchFilters,
@@ -475,7 +503,7 @@ where
                             engine.as_ref().expect("rules engine was just initialized")
                         }
                     };
-                    match engine.evaluate(&input, details) {
+                    match engine.evaluate(&input, details, options.selection) {
                         Ok(outcomes) if outcomes.is_empty() => CachedDetermination::NoMatch,
                         Ok(outcomes) => CachedDetermination::Evaluated {
                             session: Box::new(stored),
@@ -671,11 +699,17 @@ impl JsRuleEngine {
         serde_json::from_str(&json).context("rules runtime returned invalid rule-name JSON")
     }
 
-    fn evaluate(&self, input: &RuleInput, details: RuleDetails) -> Result<Vec<RawRuleOutcome>> {
+    fn evaluate(
+        &self,
+        input: &RuleInput,
+        details: RuleDetails,
+        selection: RuleSelection,
+    ) -> Result<Vec<RawRuleOutcome>> {
         let input_json = serde_json::to_string(input).context("failed to serialize rule input")?;
         let input_literal =
             serde_json::to_string(&input_json).context("failed to quote rule input")?;
-        let script = format!("globalThis.__aicsRunRules({input_literal})");
+        let apply_at_startup_only = matches!(selection, RuleSelection::ApplyAtStartup);
+        let script = format!("globalThis.__aicsRunRules({input_literal}, {apply_at_startup_only})");
         BOA_RULE_DETAILS.with(|slot| {
             *slot.borrow_mut() = Some(details);
         });
@@ -1417,7 +1451,7 @@ struct RulePatchFile {
 
 #[cfg(test)]
 mod tests {
-    use super::{JsRuleEngine, RuleDetails, RuleInput, RuleSession, RuleTurns};
+    use super::{JsRuleEngine, RuleDetails, RuleInput, RuleSelection, RuleSession, RuleTurns};
     use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionCell};
     use std::path::PathBuf;
 
@@ -1541,12 +1575,60 @@ mod tests {
             .evaluate(
                 &input("codex", "$gdf-commit --all"),
                 details("$gdf-commit --all"),
+                RuleSelection::All,
             )
             .unwrap();
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].rule, "commit sessions");
         assert_eq!(outcomes[0].action.as_deref(), Some("trash"));
         assert_eq!(outcomes[0].reason.as_deref(), Some("commit helper"));
+    }
+
+    #[test]
+    fn js_rule_accepts_config_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = dir.path().join("rules.js");
+        std::fs::write(
+            &rules,
+            r#"
+            rule("configured", { applyAtStartup: true }, ({ session }) => {
+              return session.agent === "codex" ? trash("configured rule") : nothing();
+            });
+            rule("disabled", { applyAtStartup: false }, () => trash("disabled rule"));
+            rule("unconfigured", () => trash("unconfigured rule"));
+            "#,
+        )
+        .unwrap();
+
+        let engine = JsRuleEngine::load(&rules).unwrap();
+        assert_eq!(
+            engine.rule_names().unwrap(),
+            vec!["configured", "disabled", "unconfigured"]
+        );
+
+        let all_outcomes = engine
+            .evaluate(
+                &input("codex", "preview"),
+                details("preview"),
+                RuleSelection::All,
+            )
+            .unwrap();
+        assert_eq!(all_outcomes.len(), 3);
+
+        let startup_outcomes = engine
+            .evaluate(
+                &input("codex", "preview"),
+                details("preview"),
+                RuleSelection::ApplyAtStartup,
+            )
+            .unwrap();
+        assert_eq!(startup_outcomes.len(), 1);
+        assert_eq!(startup_outcomes[0].rule, "configured");
+        assert_eq!(startup_outcomes[0].action.as_deref(), Some("trash"));
+        assert_eq!(
+            startup_outcomes[0].reason.as_deref(),
+            Some("configured rule")
+        );
     }
 
     #[test]
@@ -1615,7 +1697,9 @@ mod tests {
         details.insert("user", 1, "text", "real first user request");
 
         let engine = JsRuleEngine::load(&rules).unwrap();
-        let outcomes = engine.evaluate(&input, details).unwrap();
+        let outcomes = engine
+            .evaluate(&input, details, RuleSelection::All)
+            .unwrap();
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].rule, "context available");
@@ -1641,7 +1725,11 @@ mod tests {
 
         let engine = JsRuleEngine::load(&rules).unwrap();
         let outcomes = engine
-            .evaluate(&input("codex", "preview"), details("full-only marker"))
+            .evaluate(
+                &input("codex", "preview"),
+                details("full-only marker"),
+                RuleSelection::All,
+            )
             .unwrap();
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].rule, "lazy");

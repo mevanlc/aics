@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use aics::index::{Scope, SearchFilters};
-use aics::rules::{run_rules_with_progress, RulesMode, RulesOptions, RulesProgress};
+use aics::rules::{run_rules_with_progress, RuleSelection, RulesMode, RulesOptions, RulesProgress};
 use aics::scan::SessionRoots;
 use anyhow::Result;
 use tempfile::TempDir;
@@ -49,6 +49,9 @@ fn write_rules_dts_creates_default_config_file() -> Result<()> {
         assert!(!session_declaration.contains(&format!("{field}: string | null;")));
     }
     assert!(contents.contains("declare function rule("));
+    assert!(contents.contains("interface AicsRuleConfig"));
+    assert!(contents.contains("applyAtStartup?: boolean;"));
+    assert!(contents.contains("config: AicsRuleConfig,"));
     assert!(contents.contains("declare function trash(reason?: string): AicsTrashAction;"));
     Ok(())
 }
@@ -101,6 +104,7 @@ fn rules_expose_missing_session_strings_as_empty() -> Result<()> {
             rules_path: rules,
             cache_path: None,
             mode: RulesMode::Preview,
+            selection: RuleSelection::All,
             json: true,
             scope: Scope::Global,
             filters: SearchFilters::default(),
@@ -121,7 +125,7 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
     let rules = write_rules(
         &temp,
         r#"
-        rule("trash claude basic", ({ session }) => {
+        rule("trash claude basic", { applyAtStartup: false }, ({ session }) => {
           return session.agent === "claude" && session.id === "c0d1e2f3-a4b5-4c6d-8e7f-9a0b1c2d3e4f"
             ? trash("matched fixture")
             : nothing();
@@ -170,6 +174,84 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
     assert!(cache["aics_bin"]["modified_ns"].is_u64());
     assert!(cache["rules_js"]["crc32"].is_u64());
     assert!(!cache["sessions"].as_object().unwrap().is_empty());
+    Ok(())
+}
+
+#[test]
+fn ordinary_json_startup_applies_only_rules_enabled_at_startup() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let rules = write_rules(
+        &temp,
+        r#"
+        rule("startup claude", { applyAtStartup: true }, ({ session }) => {
+          return session.agent === "claude" ? trash("startup cleanup") : nothing();
+        });
+        rule("manual codex", { applyAtStartup: false }, ({ session }) => {
+          return session.agent === "codex" ? trash("manual cleanup") : nothing();
+        });
+        "#,
+    )?;
+    let cache_root = temp.path().join("cache");
+    let data_root = temp.path().join("data");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_aics"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CONFIG_ROOT", temp.path().join("config"))
+        .env("AICS_CACHE_ROOT", &cache_root)
+        .env("AICS_DATA_ROOT", &data_root)
+        .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
+        .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .args([
+            "--rules",
+            rules.to_str().unwrap(),
+            "--rebuild-index",
+            "--json",
+            "--progress",
+            "none",
+        ])
+        .output()?;
+
+    assert!(output.status.success(), "{output:#?}");
+    assert!(!roots.claude_session.exists());
+    assert!(roots.codex_session.exists());
+    assert!(fs::read_to_string(data_root.join("trash.jsonl"))?.contains("basic_session.jsonl"));
+    assert_eq!(profile_startup_rules_caches(&cache_root)?.len(), 1);
+    assert!(profile_rules_caches(&cache_root)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn no_apply_rules_disables_automatic_startup_rules() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let config_root = temp.path().join("config");
+    fs::create_dir_all(&config_root)?;
+    fs::write(
+        config_root.join("rules.js"),
+        r#"
+        rule("startup claude", { applyAtStartup: true }, ({ session }) => {
+          return session.agent === "claude" ? trash("startup cleanup") : nothing();
+        });
+        "#,
+    )?;
+    let cache_root = temp.path().join("cache");
+    let data_root = temp.path().join("data");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_aics"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("AICS_CONFIG_ROOT", config_root)
+        .env("AICS_CACHE_ROOT", &cache_root)
+        .env("AICS_DATA_ROOT", &data_root)
+        .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
+        .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .args(["--no-apply-rules", "--json", "--progress", "none"])
+        .output()?;
+
+    assert!(output.status.success(), "{output:#?}");
+    assert!(roots.claude_session.exists());
+    assert!(roots.codex_session.exists());
+    assert!(profile_startup_rules_caches(&cache_root)?.is_empty());
     Ok(())
 }
 
@@ -232,7 +314,7 @@ fn apply_rules_moves_matching_session_to_trash() -> Result<()> {
     let rules = write_rules(
         &temp,
         r#"
-        rule("trash claude basic", ({ session }) => {
+        rule("trash claude basic", { applyAtStartup: false }, ({ session }) => {
           return session.agent === "claude" ? trash("cleanup") : nothing();
         });
         "#,
@@ -346,6 +428,7 @@ fn rules_progress_reports_processing_count() -> Result<()> {
             rules_path: rules,
             cache_path: None,
             mode: RulesMode::Preview,
+            selection: RuleSelection::All,
             json: true,
             scope: Scope::Global,
             filters: SearchFilters::default(),
@@ -385,6 +468,7 @@ struct FixtureRoots {
     claude_projects: PathBuf,
     codex_sessions: PathBuf,
     claude_session: PathBuf,
+    codex_session: PathBuf,
 }
 
 fn fixture_roots(temp: &TempDir) -> Result<FixtureRoots> {
@@ -393,7 +477,7 @@ fn fixture_roots(temp: &TempDir) -> Result<FixtureRoots> {
         "tests/fixtures/sessions/claude/basic_session.jsonl",
         ".claude/projects/-Users-testuser-projects-myapp/basic_session.jsonl",
     )?;
-    copy_fixture(
+    let codex_session = copy_fixture(
         temp,
         "tests/fixtures/sessions/codex/new_format.jsonl",
         ".codex/sessions/2025/12/10/rollout-new.jsonl",
@@ -403,6 +487,7 @@ fn fixture_roots(temp: &TempDir) -> Result<FixtureRoots> {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         claude_session,
+        codex_session,
     })
 }
 
@@ -421,11 +506,19 @@ fn fixture_path(relative: &str) -> PathBuf {
 }
 
 fn profile_rules_caches(cache_root: &Path) -> Result<Vec<PathBuf>> {
+    profile_cache_files(cache_root, "rules-cache.json")
+}
+
+fn profile_startup_rules_caches(cache_root: &Path) -> Result<Vec<PathBuf>> {
+    profile_cache_files(cache_root, "startup-rules-cache.json")
+}
+
+fn profile_cache_files(cache_root: &Path, filename: &str) -> Result<Vec<PathBuf>> {
     let profiles = cache_root.join("profiles");
     let mut caches = fs::read_dir(profiles)?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .map(|entry| entry.path().join("rules-cache.json"))
+        .map(|entry| entry.path().join(filename))
         .filter(|path| path.is_file())
         .collect::<Vec<_>>();
     caches.sort();

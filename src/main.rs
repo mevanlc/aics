@@ -7,6 +7,7 @@ use anyhow::{bail, Result};
 use chrono::{Local, NaiveDate, TimeZone, Utc};
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use log::warn;
 use ratatui::style::Color;
 
 use aics::index::{
@@ -17,8 +18,8 @@ use aics::live::LiveSessionTracker;
 use aics::logging::{LoggingHandle, LoggingMode};
 use aics::parse::Agent;
 use aics::rules::{
-    default_rules_path, print_report, run_rules_with_progress, write_default_rules_dts, RulesMode,
-    RulesOptions, RulesProgress,
+    default_rules_path, print_report, run_rules_with_progress, write_default_rules_dts,
+    RuleSelection, RulesMode, RulesOptions, RulesProgress,
 };
 use aics::scan::ResolvedPaths;
 use aics::settings::{DefaultFilter, DefaultFilterScope, LoadedSettings, Settings};
@@ -139,6 +140,12 @@ struct Cli {
     )]
     apply_rules: bool,
     #[arg(
+        long = "no-apply-rules",
+        conflicts_with_all = ["preview_rules", "apply_rules", "benchmark_rules", "rules"],
+        help = "Disable automatic application of rules configured with applyAtStartup: true"
+    )]
+    no_apply_rules: bool,
+    #[arg(
         long = "benchmark-rules",
         hide = true,
         conflicts_with_all = ["preview_rules", "apply_rules"]
@@ -147,7 +154,7 @@ struct Cli {
     #[arg(
         long = "rules",
         value_name = "PATH",
-        help = "Override the JavaScript rules file used by --preview-rules or --apply-rules"
+        help = "Override the JavaScript rules file used for startup, preview, or explicit application"
     )]
     rules: Option<PathBuf>,
     #[arg(
@@ -264,6 +271,7 @@ fn main() -> Result<()> {
         ResolvedPaths::discover(cli.claude_home.as_deref(), cli.codex_home.as_deref())?;
     let index_paths = aics::index::IndexPaths::discover_for_roots(&resolved_paths.roots)?;
     let rules_cache_path = index_paths.cache_root.join("rules-cache.json");
+    let startup_rules_cache_path = index_paths.cache_root.join("startup-rules-cache.json");
     let manager = IndexManager::with_paths(index_paths);
     if cli.delete_index {
         manager.delete_index()?;
@@ -271,7 +279,7 @@ fn main() -> Result<()> {
     }
     validate_terminal_mode(&cli)?;
     let LoadedSettings { settings, warning } = Settings::load_with_recovery();
-    let settings_warning = combine_startup_warnings(&logging, warning.clone());
+    let mut settings_warning = combine_startup_warnings(&logging, warning.clone());
     if let Some(warning) = warning.as_deref() {
         eprintln!("aics: {warning}");
     }
@@ -304,6 +312,7 @@ fn main() -> Result<()> {
             rules_path,
             cache_path: (!cli.benchmark_rules).then_some(rules_cache_path.clone()),
             mode,
+            selection: RuleSelection::All,
             json: cli.json,
             scope: rules_scope.clone(),
             filters: rules_filters.clone(),
@@ -347,6 +356,63 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    if !cli.no_apply_rules {
+        let rules_path = match cli.rules.clone() {
+            Some(path) => Some(path),
+            None => {
+                let path = default_rules_path()?;
+                path.exists().then_some(path)
+            }
+        };
+        if let Some(rules_path) = rules_path {
+            let startup_options = RulesOptions {
+                rules_path,
+                cache_path: Some(startup_rules_cache_path),
+                mode: RulesMode::Apply,
+                selection: RuleSelection::ApplyAtStartup,
+                json: false,
+                scope: Scope::Global,
+                filters: SearchFilters::default(),
+            };
+            let report = if let Some(draw_target) = progress_draw_target(cli.progress, cli.json) {
+                let mut progress = RulesProcessingProgress::new(draw_target);
+                let report =
+                    run_rules_with_progress(&resolved_paths.roots, &startup_options, |event| {
+                        progress.update(event)
+                    });
+                progress.finish();
+                report?
+            } else {
+                run_rules_with_progress(&resolved_paths.roots, &startup_options, |_| {})?
+            };
+
+            for error in &report.errors {
+                warn!(
+                    "startup rule failed for {}: {}",
+                    error.path.display(),
+                    error.error
+                );
+            }
+            for skipped in &report.skipped {
+                warn!(
+                    "startup rule action skipped for {}: {}",
+                    skipped.path.display(),
+                    skipped.skip_reason
+                );
+            }
+            let startup_issue_count = report.errors.len() + report.skipped.len();
+            if startup_issue_count > 0 {
+                append_startup_warning(
+                    &mut settings_warning,
+                    format!("{startup_issue_count} startup rule actions failed or were skipped"),
+                );
+            }
+            if !report.applied.is_empty() {
+                manager.sync_with_roots_best_effort(&resolved_paths.roots, false)?;
+            }
+        }
+    }
+
     let search_engine = manager.open_search_engine_with_live_sessions(
         LiveSessionTracker::from_claude_sessions_dir(resolved_paths.claude_sessions.clone()),
     )?;
@@ -380,13 +446,16 @@ fn combine_startup_warnings(logging: &LoggingHandle, settings: Option<String>) -
     }
 }
 
+fn append_startup_warning(warning: &mut Option<String>, extra: String) {
+    *warning = Some(match warning.take() {
+        Some(existing) => format!("{existing}; {extra}"),
+        None => extra,
+    });
+}
+
 fn validate_terminal_mode(cli: &Cli) -> Result<()> {
     if cli.json && cli.progress == CliProgress::Stdout {
         bail!("--progress stdout conflicts with --json because stdout is reserved for JSON output");
-    }
-
-    if cli.rules.is_some() && rules_mode(cli).is_none() {
-        bail!("--rules requires --preview-rules or --apply-rules");
     }
 
     if rules_mode(cli).is_some() && cli.query.is_some() {
@@ -1140,6 +1209,7 @@ mod tests {
         for args in [
             vec!["aics"],
             vec!["aics", "deploy"],
+            vec!["aics", "--no-apply-rules"],
             vec!["aics", "--preview-rules"],
         ] {
             assert!(Cli::parse_from(args).will_enter_tui());
@@ -1158,12 +1228,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_rules_path_without_rules_mode() {
-        let cli = Cli::parse_from(["aics", "--rules", "rules.js"]);
-        let error = validate_terminal_mode(&cli).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("--rules requires --preview-rules or --apply-rules"));
+    fn accepts_rules_path_for_ordinary_startup() {
+        let cli = Cli::parse_from(["aics", "--rules", "rules.js", "--json"]);
+        assert!(rules_mode(&cli).is_none());
+        assert_eq!(cli.rules.as_deref(), Some(std::path::Path::new("rules.js")));
+        validate_terminal_mode(&cli).unwrap();
+    }
+
+    #[test]
+    fn no_apply_rules_conflicts_with_explicit_rules_options() {
+        for conflicting in [
+            "--preview-rules",
+            "--apply-rules",
+            "--benchmark-rules",
+            "--rules",
+        ] {
+            let mut args = vec!["aics", "--no-apply-rules", conflicting];
+            if conflicting == "--rules" {
+                args.push("rules.js");
+            }
+            let error = Cli::try_parse_from(args).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
     }
 
     #[test]
@@ -1200,6 +1286,7 @@ mod tests {
         assert!(help.contains("Optional search query to run immediately"));
         assert!(help.contains("--claude-home <PATH>"));
         assert!(help.contains("--codex-home <PATH>"));
+        assert!(help.contains("--no-apply-rules"));
         assert!(!help.contains("--benchmark-rules"));
         assert!(help.contains("Examples:"));
         assert!(help.contains("YYYY-MM-DD or RFC3339"));
