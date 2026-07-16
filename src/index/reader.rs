@@ -251,7 +251,9 @@ impl SearchEngine {
             let batch_size = PAGE_SIZE.min(candidate_limit.saturating_sub(offset));
             let docs = searcher.search(
                 &*final_query,
-                &TopDocs::with_limit(batch_size).and_offset(offset),
+                &TopDocs::with_limit(batch_size)
+                    .and_offset(offset)
+                    .order_by_score(),
             )?;
             if docs.is_empty() {
                 break;
