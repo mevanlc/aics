@@ -29,6 +29,7 @@ fn write_rules_dts_creates_default_config_file() -> Result<()> {
     assert_eq!(stdout.trim(), rules_dts.display().to_string());
 
     let contents = fs::read_to_string(rules_dts)?;
+    assert_eq!(contents, include_str!("../src/rules/rules.d.ts"));
     assert!(contents.contains("interface AicsRuleSession"));
     let session_declaration = contents
         .split_once("interface AicsRuleSession {")
