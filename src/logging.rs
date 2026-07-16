@@ -18,6 +18,7 @@ use log4rs::append::rolling_file::RollingFileAppender;
 use log4rs::config::{Appender, Config, Deserializers, Logger, Root};
 use log4rs::encode::pattern::PatternEncoder;
 use log4rs::filter::{Filter, Response};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::settings::config_dir;
 
@@ -291,75 +292,94 @@ enum ProcessState {
 }
 
 trait ProcessLiveness {
-    fn state(&self, pid: u32) -> ProcessState;
+    fn observe(&self, pids: &[u32]) -> BTreeMap<u32, ProcessObservation>;
 }
 
 struct SystemProcessLiveness;
 
 impl ProcessLiveness for SystemProcessLiveness {
-    fn state(&self, pid: u32) -> ProcessState {
-        process_state(pid)
+    fn observe(&self, pids: &[u32]) -> BTreeMap<u32, ProcessObservation> {
+        if pids.is_empty() {
+            return BTreeMap::new();
+        }
+        let indeterminate = || {
+            pids.iter()
+                .copied()
+                .map(|pid| (pid, ProcessObservation::indeterminate()))
+                .collect()
+        };
+        if !sysinfo::IS_SUPPORTED_SYSTEM {
+            return indeterminate();
+        }
+
+        let mut system = System::new();
+        let Ok(current_pid) = sysinfo::get_current_pid() else {
+            return indeterminate();
+        };
+        let mut system_pids = pids.iter().copied().map(Pid::from_u32).collect::<Vec<_>>();
+        system_pids.push(current_pid);
+        system_pids.sort_unstable();
+        system_pids.dedup();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&system_pids),
+            true,
+            ProcessRefreshKind::nothing().without_tasks(),
+        );
+
+        // A targeted refresh has no error result. Seeing our own process proves the
+        // platform snapshot succeeded; otherwise absence cannot safely mean death.
+        if system.process(current_pid).is_none() {
+            return indeterminate();
+        }
+
+        pids.iter()
+            .copied()
+            .map(|pid| {
+                let observation = match system.process(Pid::from_u32(pid)) {
+                    Some(process) => ProcessObservation::live(process.start_time()),
+                    None => ProcessObservation::dead(),
+                };
+                (pid, observation)
+            })
+            .collect()
     }
 }
 
-#[cfg(unix)]
-fn process_state(pid: u32) -> ProcessState {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return ProcessState::Indeterminate;
-    };
-    // SAFETY: signal 0 performs only an existence/permission check.
-    if unsafe { libc::kill(pid, 0) } == 0 {
-        ProcessState::Live
-    } else {
-        match io::Error::last_os_error().raw_os_error() {
-            Some(libc::ESRCH) => ProcessState::Dead,
-            _ => ProcessState::Indeterminate,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessObservation {
+    state: ProcessState,
+    started_at_epoch_seconds: Option<u64>,
+}
+
+impl ProcessObservation {
+    fn live(started_at_epoch_seconds: u64) -> Self {
+        Self {
+            state: ProcessState::Live,
+            started_at_epoch_seconds: (started_at_epoch_seconds != 0)
+                .then_some(started_at_epoch_seconds),
         }
     }
-}
 
-#[cfg(windows)]
-fn process_state(pid: u32) -> ProcessState {
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, STILL_ACTIVE,
-    };
-    use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-
-    // SAFETY: the returned handle is checked and closed before returning.
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle.is_null() {
-        // SAFETY: immediately reads the calling thread's last-error value.
-        return if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER {
-            ProcessState::Dead
-        } else {
-            ProcessState::Indeterminate
-        };
+    const fn dead() -> Self {
+        Self {
+            state: ProcessState::Dead,
+            started_at_epoch_seconds: None,
+        }
     }
-    let mut exit_code = 0;
-    // SAFETY: handle is valid and exit_code points to writable storage.
-    let result = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
-    // SAFETY: handle was returned by OpenProcess and has not yet been closed.
-    unsafe { CloseHandle(handle) };
-    if result == 0 {
-        ProcessState::Indeterminate
-    } else if exit_code == STILL_ACTIVE {
-        ProcessState::Live
-    } else {
-        ProcessState::Dead
-    }
-}
 
-#[cfg(not(any(unix, windows)))]
-fn process_state(_pid: u32) -> ProcessState {
-    ProcessState::Indeterminate
+    const fn indeterminate() -> Self {
+        Self {
+            state: ProcessState::Indeterminate,
+            started_at_epoch_seconds: None,
+        }
+    }
 }
 
 #[derive(Debug)]
 struct ManagedFile {
     instance: String,
     pid: u32,
+    started: chrono::DateTime<Utc>,
 }
 
 fn parse_managed_file(name: &str) -> Option<ManagedFile> {
@@ -371,22 +391,38 @@ fn parse_managed_file(name: &str) -> Option<ManagedFile> {
         (!archive.is_empty() && archive.bytes().all(|byte| byte.is_ascii_digit())).then_some(base)
     })?;
     let (stamp, pid) = instance.rsplit_once("-p")?;
-    if stamp.len() != 20
-        || chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%S%.3fZ").is_err()
-    {
+    if stamp.len() != 20 {
         return None;
     }
+    let started = chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%S%.3fZ")
+        .ok()?
+        .and_utc();
     let pid = pid.parse::<u32>().ok().filter(|pid| *pid != 0)?;
     Some(ManagedFile {
         instance: instance.to_owned(),
         pid,
+        started,
     })
 }
 
 #[derive(Debug)]
 struct LogGroup {
     pid: u32,
+    started: chrono::DateTime<Utc>,
     files: Vec<PathBuf>,
+}
+
+fn group_process_state(group: &LogGroup, observation: ProcessObservation) -> ProcessState {
+    if observation.state == ProcessState::Live
+        && observation
+            .started_at_epoch_seconds
+            .zip(u64::try_from(group.started.timestamp()).ok())
+            .is_some_and(|(process_started, group_started)| process_started > group_started)
+    {
+        ProcessState::Dead
+    } else {
+        observation.state
+    }
 }
 
 fn reap_stopped_process_logs(log_dir: &Path, liveness: &dyn ProcessLiveness) -> Result<usize> {
@@ -430,15 +466,24 @@ fn reap_stopped_process_logs(log_dir: &Path, liveness: &dyn ProcessLiveness) -> 
         };
         let group = groups.entry(managed.instance).or_insert_with(|| LogGroup {
             pid: managed.pid,
+            started: managed.started,
             files: Vec::new(),
         });
         group.files.push(entry.path());
     }
 
+    let mut pids = groups.values().map(|group| group.pid).collect::<Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+    let observations = liveness.observe(&pids);
     let groups = groups
         .into_iter()
         .map(|(instance, group)| {
-            let state = liveness.state(group.pid);
+            let observation = observations
+                .get(&group.pid)
+                .copied()
+                .unwrap_or_else(ProcessObservation::indeterminate);
+            let state = group_process_state(&group, observation);
             if state == ProcessState::Indeterminate {
                 log::warn!(
                     "could not determine whether pid {} is live; retaining log group {}",
@@ -498,11 +543,23 @@ mod tests {
     struct FakeLiveness(HashMap<u32, ProcessState>);
 
     impl ProcessLiveness for FakeLiveness {
-        fn state(&self, pid: u32) -> ProcessState {
-            self.0
-                .get(&pid)
+        fn observe(&self, pids: &[u32]) -> BTreeMap<u32, ProcessObservation> {
+            pids.iter()
                 .copied()
-                .unwrap_or(ProcessState::Indeterminate)
+                .map(|pid| {
+                    let observation = match self
+                        .0
+                        .get(&pid)
+                        .copied()
+                        .unwrap_or(ProcessState::Indeterminate)
+                    {
+                        ProcessState::Live => ProcessObservation::live(0),
+                        ProcessState::Dead => ProcessObservation::dead(),
+                        ProcessState::Indeterminate => ProcessObservation::indeterminate(),
+                    };
+                    (pid, observation)
+                })
+                .collect()
         }
     }
 
@@ -512,11 +569,14 @@ mod tests {
     }
 
     impl ProcessLiveness for RemoveDuringCheck {
-        fn state(&self, _pid: u32) -> ProcessState {
+        fn observe(&self, pids: &[u32]) -> BTreeMap<u32, ProcessObservation> {
             self.removed.call_once(|| {
                 fs::remove_file(&self.path).unwrap();
             });
-            ProcessState::Dead
+            pids.iter()
+                .copied()
+                .map(|pid| (pid, ProcessObservation::dead()))
+                .collect()
         }
     }
 
@@ -596,6 +656,18 @@ mod tests {
     }
 
     #[test]
+    fn system_liveness_observes_current_process_and_start_time() {
+        if !sysinfo::IS_SUPPORTED_SYSTEM {
+            return;
+        }
+        let pid = std::process::id();
+        let observations = SystemProcessLiveness.observe(&[pid]);
+        let observation = observations.get(&pid).unwrap();
+        assert_eq!(observation.state, ProcessState::Live);
+        assert!(observation.started_at_epoch_seconds.is_some());
+    }
+
+    #[test]
     fn managed_active_and_archive_names_round_trip() {
         let id = "20260713T142530.417Z-p12345";
         for name in [
@@ -607,6 +679,11 @@ mod tests {
             let parsed = parse_managed_file(&name).unwrap();
             assert_eq!(parsed.instance, id);
             assert_eq!(parsed.pid, 12345);
+            assert_eq!(
+                parsed.started,
+                Utc.with_ymd_and_hms(2026, 7, 13, 14, 25, 30).unwrap()
+                    + chrono::Duration::milliseconds(417)
+            );
         }
         assert!(parse_managed_file(&format!("other-{id}.log")).is_none());
         assert!(parse_managed_file(&format!("aics-{id}.log.old")).is_none());
@@ -831,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn reused_live_pid_protects_every_timestamped_group() {
+    fn live_pid_without_start_time_protects_every_timestamped_group() {
         let temp = TempDir::new().unwrap();
         let log_dir = temp.path().join("logs");
         fs::create_dir(&log_dir).unwrap();
@@ -843,5 +920,39 @@ mod tests {
 
         assert_eq!(reap_stopped_process_logs(&log_dir, &liveness).unwrap(), 0);
         assert_eq!(fs::read_dir(log_dir).unwrap().count(), 12);
+    }
+
+    #[test]
+    fn live_pid_started_after_log_group_is_reused_and_therefore_dead() {
+        let group = LogGroup {
+            pid: 4242,
+            started: Utc.with_ymd_and_hms(2026, 5, 1, 1, 2, 3).unwrap(),
+            files: Vec::new(),
+        };
+        let reused = Utc.with_ymd_and_hms(2026, 5, 2, 1, 2, 3).unwrap();
+        assert_eq!(
+            group_process_state(
+                &group,
+                ProcessObservation::live(reused.timestamp().try_into().unwrap()),
+            ),
+            ProcessState::Dead
+        );
+    }
+
+    #[test]
+    fn live_pid_started_before_log_group_stays_live() {
+        let group = LogGroup {
+            pid: 4242,
+            started: Utc.with_ymd_and_hms(2026, 5, 2, 1, 2, 3).unwrap(),
+            files: Vec::new(),
+        };
+        let same_process = Utc.with_ymd_and_hms(2026, 5, 1, 1, 2, 3).unwrap();
+        assert_eq!(
+            group_process_state(
+                &group,
+                ProcessObservation::live(same_process.timestamp().try_into().unwrap()),
+            ),
+            ProcessState::Live
+        );
     }
 }

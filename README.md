@@ -17,7 +17,8 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Configurable claude/codex launch commands so `aics` can hand off to resume a session
 - `--json` mode for scripting
 - JavaScript rules for previewing or applying batch session cleanup actions
-- Cross-platform: Linux, macOS, Windows (path matching handles symlinks and Windows case-insensitivity)
+- Cross-platform: Windows, macOS, Linux, Android (Termux), FreeBSD, and NetBSD
+  (path matching handles symlinks and Windows case-insensitivity)
 
 ## Install
 
@@ -177,10 +178,12 @@ logs/summarizer-errors-<UTC-startup-timestamp>-p<PID>.log.<archive-index>
 ```
 
 The main file rolls at 2 MiB and keeps two archives; the summary-error file
-rolls at 1 MiB and keeps one. At startup AICS removes the oldest log groups for
-processes that are definitely no longer running until at most 10 groups remain.
-More than 10 groups are retained when their PIDs are still live or cannot be
-checked safely. PID reuse may conservatively retain an older timestamped group.
+rolls at 1 MiB and keeps one. At startup AICS takes one system process snapshot
+and removes the oldest log groups for processes that are definitely no longer
+running until at most 10 groups remain. More than 10 groups are retained when
+their PIDs are still live or cannot be checked safely. When available, process
+start times distinguish an old log group from a newer process that reused its
+PID; an unavailable start time is handled conservatively by retaining the group.
 
 Built-in command and JSON modes send diagnostics to stderr, leaving stdout safe
 for JSONL and other command output. `AICS_CONFIG_ROOT` relocates the log
