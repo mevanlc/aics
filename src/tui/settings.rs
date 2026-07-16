@@ -2635,7 +2635,7 @@ mod tests {
 
         let rendered = spans_text(&state.render_theme_selector(80, &Theme::default(), false));
 
-        assert_eq!(rendered, "   < ● lazygit  ○ aics  ○ sunset  ○ late.sh > ");
+        assert_eq!(rendered, "   < ● lazygit  ○ aics  ○ sunset  ○ late > ");
     }
 
     #[test]

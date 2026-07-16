@@ -1212,7 +1212,7 @@ mod tests {
         assert!(rendered.contains("lazygit"));
         assert!(rendered.contains("aics"));
         assert!(rendered.contains("sunset"));
-        assert!(rendered.contains("late.sh"));
+        assert!(rendered.contains("late"));
         assert!(rendered.contains("fg="));
         assert!(rendered.contains("bg="));
     }

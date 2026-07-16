@@ -13,7 +13,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Filter modal: scope, agent, date range, minimum length, session kind (original / trimmed / rollover / sub-agent), live sessions
 - Sort by time or text relevance
 - Markdown rendering with syntax highlighting and search-term highlighting in the viewer
-- Multiple themes (lazygit, aics, sunset, late.sh), configurable via settings modal
+- Multiple themes (lazygit, aics, sunset, late), configurable via settings modal
 - Configurable claude/codex launch commands so `aics` can hand off to resume a session
 - `--json` mode for scripting
 - JavaScript rules for previewing or applying batch session cleanup actions
@@ -145,7 +145,7 @@ to stderr and shown in the TUI statusline.
 
 Available options:
 
-- `theme` (`lazygit`, `aics`, `sunset`, `late.sh`)
+- `theme` (`lazygit`, `aics`, `sunset`, `late`)
 - `claude_command` default: `claude`, `claude_args` default: `--dangerously-skip-permissions`
 - `codex_command` default: `codex`, `codex_args` default: `--yolo`
 - `show_preview`

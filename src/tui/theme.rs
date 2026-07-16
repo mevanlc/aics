@@ -51,7 +51,7 @@ impl Theme {
             ThemeName::Lazygit => Self::lazygit(),
             ThemeName::Aics => Self::aics(),
             ThemeName::Sunset => Self::sunset(),
-            ThemeName::LateSh => Self::late_sh(),
+            ThemeName::Late => Self::late(),
         }
     }
 
@@ -181,10 +181,10 @@ impl Theme {
         }
     }
 
-    /// Theme sampled from the user's "late.sh" screenshots with Pillow:
+    /// Theme sampled from the user's source screenshots with Pillow:
     /// black surfaces, copper framing, ash text, amber highlights, and muted
     /// olive/violet secondary accents.
-    pub fn late_sh() -> Self {
+    pub fn late() -> Self {
         let border = Color::Rgb(96, 64, 32);
         let focus_border = Color::Rgb(184, 120, 40);
         let text = Color::Rgb(136, 128, 120);
@@ -415,8 +415,8 @@ mod tests {
     }
 
     #[test]
-    fn late_sh_selected_textarea_fg_is_brighter_than_text() {
-        let theme = Theme::late_sh();
+    fn late_selected_textarea_fg_is_brighter_than_text() {
+        let theme = Theme::late();
 
         assert_eq!(theme.selected_textarea_fg, theme.text.brighten(0.5));
     }

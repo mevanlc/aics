@@ -14,11 +14,12 @@ use crate::summary::prompt::DEFAULT_PROMPT;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeName {
-    #[default]
-    Lazygit,
     Aics,
     Sunset,
-    LateSh,
+    Late,
+    #[default]
+    #[serde(other)]
+    Lazygit,
 }
 
 impl ThemeName {
@@ -26,7 +27,7 @@ impl ThemeName {
         ThemeName::Lazygit,
         ThemeName::Aics,
         ThemeName::Sunset,
-        ThemeName::LateSh,
+        ThemeName::Late,
     ];
 
     pub fn label(self) -> &'static str {
@@ -34,7 +35,7 @@ impl ThemeName {
             ThemeName::Lazygit => "lazygit",
             ThemeName::Aics => "aics",
             ThemeName::Sunset => "sunset",
-            ThemeName::LateSh => "late.sh",
+            ThemeName::Late => "late",
         }
     }
 }
@@ -766,9 +767,9 @@ mod tests {
         assert_eq!(*theme.current(), ThemeName::Lazygit);
         assert_eq!(*theme.move_next(), ThemeName::Aics);
         assert_eq!(*theme.move_next(), ThemeName::Sunset);
-        assert_eq!(*theme.move_next(), ThemeName::LateSh);
+        assert_eq!(*theme.move_next(), ThemeName::Late);
         assert_eq!(*theme.move_next(), ThemeName::Lazygit);
-        assert_eq!(*theme.move_prev(), ThemeName::LateSh);
+        assert_eq!(*theme.move_prev(), ThemeName::Late);
         assert_eq!(*theme.move_prev(), ThemeName::Sunset);
     }
 
@@ -777,6 +778,25 @@ mod tests {
         let json = r#"{"theme": "aics", "unknown_field": 42}"#;
         let settings: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(settings.theme, ThemeName::Aics);
+    }
+
+    #[test]
+    fn invalid_theme_uses_default_without_discarding_settings() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"theme":"missing","show_preview":false,"claude_command":"custom-claude"}"#,
+        )
+        .unwrap();
+
+        let loaded = Settings::load_with_recovery_from_path(&path);
+
+        assert_eq!(loaded.settings.theme, ThemeName::Lazygit);
+        assert!(!loaded.settings.show_preview);
+        assert_eq!(loaded.settings.claude_command, "custom-claude");
+        assert!(loaded.warning.is_none());
+        assert!(path.exists());
     }
 
     #[test]
