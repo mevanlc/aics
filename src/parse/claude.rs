@@ -30,6 +30,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
     let mut lines = 0usize;
     let mut session_id = None::<String>;
     let mut cwd = None::<String>;
+    let mut relocated_cwd = None::<String>;
     let mut branch = None::<String>;
     let mut created = None::<DateTime<Utc>>;
     let mut modified = None::<DateTime<Utc>>;
@@ -80,6 +81,11 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
 
         session_id = session_id.or_else(|| string_field(&value, "sessionId"));
         cwd = cwd.or_else(|| string_field(&value, "cwd"));
+        if entry_type == "relocated" {
+            if let Some(value) = string_field(&value, "relocatedCwd").and_then(nonempty_trimmed) {
+                relocated_cwd = Some(value);
+            }
+        }
         branch = branch.or_else(|| string_field(&value, "gitBranch"));
 
         if value
@@ -191,6 +197,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
     let modified = modified.or_else(|| metadata_modified(path)).or(created);
 
     let session_id = session_id.unwrap_or_else(|| fallback_session_id(path));
+    let cwd = relocated_cwd.or(cwd);
     let project = cwd.clone().unwrap_or_else(|| session_id.clone());
     let derivation_type = infer_derivation_type(path, is_sidechain);
     let (first_msg_role, first_msg_content) = first_message_fields(&messages);

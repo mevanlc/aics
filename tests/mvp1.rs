@@ -170,6 +170,30 @@ fn claude_uses_initial_cwd_for_project_on_termux_paths() -> Result<()> {
 }
 
 #[test]
+fn claude_prefers_last_valid_relocated_cwd() -> Result<()> {
+    let temp = TempDir::new()?;
+    let path = temp
+        .path()
+        .join(".claude/projects/-Users-testuser-projects-new/relocated-session.jsonl");
+    write_text_file(
+        &path,
+        concat!(
+            "{\"type\":\"user\",\"sessionId\":\"relocated-session\",\"cwd\":\"/Users/testuser/projects/old\",\"message\":{\"role\":\"user\",\"content\":\"move this session\"}}\n",
+            "{\"type\":\"relocated\",\"sessionId\":\"relocated-session\",\"relocatedCwd\":\"/Users/testuser/projects/intermediate\"}\n",
+            "{\"type\":\"relocated\",\"sessionId\":\"relocated-session\",\"relocatedCwd\":\" /Users/testuser/projects/new \"}\n",
+            "{\"type\":\"relocated\",\"sessionId\":\"relocated-session\",\"relocatedCwd\":\"   \"}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"relocated-session\",\"cwd\":\"/Users/testuser/projects/old\",\"message\":{\"role\":\"assistant\",\"content\":\"moved\"}}\n",
+        ),
+    )?;
+
+    let session = parse_claude_session_file(&path)?.expect("expected Claude session");
+
+    assert_eq!(session.cwd.as_deref(), Some("/Users/testuser/projects/new"));
+    assert_eq!(session.project, "/Users/testuser/projects/new");
+    Ok(())
+}
+
+#[test]
 fn claude_falls_back_to_session_id_when_cwd_is_missing() -> Result<()> {
     let temp = TempDir::new()?;
     let path = temp
