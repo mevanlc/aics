@@ -504,7 +504,7 @@ fn searchable_content(session: &Session) -> String {
 
 /// Bump when stored fields or searchable-content semantics change so old state
 /// files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 4;
+const INDEX_FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {

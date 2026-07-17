@@ -84,6 +84,26 @@ fn search_excludes_codex_developer_messages() -> Result<()> {
 }
 
 #[test]
+fn search_excludes_claude_exit_command_artifacts() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+
+    let hits = engine.search(&SearchRequest {
+        query: "Bye".to_owned(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Relevance,
+        filters: SearchFilters::default(),
+    })?;
+
+    assert!(hits.is_empty());
+    Ok(())
+}
+
+#[test]
 fn multi_word_queries_default_to_and() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;

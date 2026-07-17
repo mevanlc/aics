@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -42,6 +43,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
     let mut messages = Vec::new();
     let mut content_chunks = Vec::new();
     let mut summary_chunks = Vec::new();
+    let mut exit_command_uuids = HashSet::new();
 
     for line in reader.lines() {
         let line = match line {
@@ -102,6 +104,16 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             modified,
             entry_timestamp.or_else(|| extract_snapshot_timestamp(&value)),
         );
+
+        if is_exit_command_entry(&value) {
+            if let Some(uuid) = value.get("uuid").and_then(Value::as_str) {
+                exit_command_uuids.insert(uuid.to_owned());
+            }
+            continue;
+        }
+        if is_exit_command_output_entry(&value, &exit_command_uuids) {
+            continue;
+        }
 
         match entry_type {
             "system" if is_away_summary(&value) => {
@@ -298,6 +310,42 @@ fn extract_message_role(value: &Value) -> Option<MessageRole> {
 
 fn is_away_summary(value: &Value) -> bool {
     value.get("subtype").and_then(Value::as_str) == Some("away_summary")
+}
+
+fn is_exit_command_entry(value: &Value) -> bool {
+    let Some(content) = user_message_text(value) else {
+        return false;
+    };
+
+    is_claude_wrapper_markup(content) && content.contains("<command-name>/exit</command-name>")
+}
+
+fn is_exit_command_output_entry(value: &Value, exit_command_uuids: &HashSet<String>) -> bool {
+    let Some(parent_uuid) = value.get("parentUuid").and_then(Value::as_str) else {
+        return false;
+    };
+    if !exit_command_uuids.contains(parent_uuid) {
+        return false;
+    }
+
+    let Some(content) = user_message_text(value) else {
+        return false;
+    };
+
+    is_claude_wrapper_markup(content)
+        && (content.contains("<local-command-stdout>")
+            || content.contains("<local-command-stderr>"))
+}
+
+fn user_message_text(value: &Value) -> Option<&str> {
+    if value.get("type").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+
+    value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
 }
 
 fn extract_claude_summary_text(value: &Value) -> Option<String> {
@@ -592,6 +640,32 @@ mod tests {
         assert_eq!(normalized, text.trim());
         assert!(normalized.contains("\n\n## Global Instructions\n\n"));
         assert!(normalized.contains("+</mxfile>\n```\n\n# Instructions"));
+    }
+
+    #[test]
+    fn parser_excludes_exit_command_and_its_local_output_without_hiding_resumed_messages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let body = concat!(
+            "{\"type\":\"user\",\"sessionId\":\"s1\",\"uuid\":\"user-1\",\"message\":{\"role\":\"user\",\"content\":\"before exit\"}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"parentUuid\":\"user-1\",\"uuid\":\"assistant-1\",\"message\":{\"role\":\"assistant\",\"content\":\"ready\"}}\n",
+            "{\"type\":\"user\",\"sessionId\":\"s1\",\"parentUuid\":\"assistant-1\",\"uuid\":\"exit-1\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/exit</command-name>\\n<command-message>exit</command-message>\\n<command-args></command-args>\"}}\n",
+            "{\"type\":\"user\",\"sessionId\":\"s1\",\"parentUuid\":\"exit-1\",\"uuid\":\"goodbye-1\",\"message\":{\"role\":\"user\",\"content\":\"<local-command-stdout>Goodbye!</local-command-stdout>\"}}\n",
+            "{\"type\":\"user\",\"sessionId\":\"s1\",\"parentUuid\":\"goodbye-1\",\"uuid\":\"user-2\",\"message\":{\"role\":\"user\",\"content\":\"resumed later\"}}\n",
+        );
+        std::fs::write(&path, body).expect("write fixture");
+
+        let session = parse_claude_session_file(&path)
+            .expect("parse")
+            .expect("session");
+
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.messages[0].content, "before exit");
+        assert_eq!(session.messages[1].content, "ready");
+        assert_eq!(session.messages[2].content, "resumed later");
+        assert_eq!(session.cells.len(), 3);
+        assert!(!session.content.contains("/exit"));
+        assert!(!session.content.contains("Goodbye!"));
     }
 
     #[test]
