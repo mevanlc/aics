@@ -40,31 +40,24 @@ From source: `cargo install --path .`
 ## Usage
 
 ```bash
-# Search sessions for the current directory, open the TUI
+# Search sessions for the current directory and open the TUI
 aics
-# Search across all indexed sessions
-aics -g
-# Emit JSONL instead of launching the TUI
-aics --json -g "vector db"
-# Review JavaScript cleanup rules from ~/.config/aics/rules.js in the TUI
+
+# Search globally with an initial query
+aics -g "vector db"
+
+# Emit relevance-sorted JSONL instead of opening the TUI
+aics --json -g --sort-by relevance "vector db"
+
+# Review JavaScript cleanup proposals in the TUI
 aics --preview-rules -g
-# Print rule proposals as JSONL instead
-aics --preview-rules --json -g
-# Write TypeScript declarations for JavaScript cleanup rules
-aics --write-rules-dts
-# Delete or rebuild the index
-aics <--rebuild-index|--delete-index>
 ```
 
-Run `aics --help` for the full flag list.
+The optional `QUERY` starts a search immediately or prefills the TUI. Searches
+default to the current directory; use `-g` / `--global` to search all indexed
+sessions. Run `aics --help` for a compact flag list.
 
-### Scope
-
-By default, searches are scoped to the current working directory. Use `-g` / `--global` to search everything, `--no-global` to start in project-local mode even when the saved default scope is global, or `--dir PATH[:BRANCH]` to target a specific project (optionally filtered by branch). `--no-global` only selects the startup scope; it does not prevent switching between global and local scope in the TUI.
-
-### Date filters
-
-`--after` and `--before` accept `YYYY-MM-DD` or RFC3339 timestamps.
+[See command-line usage, filters, modes, and the complete flag reference.](docs/command-line.md)
 
 ### JavaScript rules
 
@@ -78,17 +71,14 @@ JavaScript rules automate repeatable session cleanup. Rules live at
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓` | Move selection |
-| `PgUp` / `PgDn` | Scroll preview / viewer |
-| `⏎` | Open actions menu for selected session |
-| `^F` | Filters modal, including preview/viewer display toggles (`^S` inside the modal saves startup defaults) |
-| `^S` | Settings modal |
-| `^T` | Toggle preview panel |
-| `^Y` | Cycle the session-card snippet between session text and summaries |
-| `Shift+←` / `Shift+→` | Resize list/preview split |
-| `Shift+↑` / `Shift+↓` | Jump between messages in the preview / viewer |
-| `?` / `^L` | Help |
-| `Esc` | Cancel / close modal |
+| `↑` / `↓` (Arrows) | Move selection |
+| `⏎` (Enter) | Show actions for selected session |
+| `PgUp` / `PgDn` | Preview/viewer page scroll |
+| `Home` / `End` | Preview/viewer jump to beginning/end |
+| `Esc` | Cancel / close modal / go back |
+| `^F` | Edit Filters |
+| `^S` | Edit Settings |
+| `^L` | Help |
 | `^C` | Quit |
 
 [See detailed session-list and viewer keybindings.](docs/keybindings.md)
