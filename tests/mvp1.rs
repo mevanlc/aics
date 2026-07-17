@@ -37,13 +37,17 @@ fn parses_claude_basic_session() -> Result<()> {
         "Show me the current git status and recent commits"
     );
     assert_eq!(session.custom_title.as_deref(), Some("test-basic-session"));
+    assert!(!session.content.contains("Caveat:"));
     assert!(!session.content.contains("/exit"));
     assert!(!session.content.contains("Bye!"));
     assert!(session
         .messages
         .iter()
-        .all(|message| !message.content.contains("/exit") && !message.content.contains("Bye!")));
+        .all(|message| !message.content.contains("Caveat:")
+            && !message.content.contains("/exit")
+            && !message.content.contains("Bye!")));
     assert_eq!(session.cells.len(), session.messages.len());
+    assert!(session.last_msg_content.contains("working tree is clean"));
     Ok(())
 }
 

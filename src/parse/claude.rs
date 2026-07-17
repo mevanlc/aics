@@ -105,6 +105,9 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             entry_timestamp.or_else(|| extract_snapshot_timestamp(&value)),
         );
 
+        if is_local_command_caveat_entry(&value) {
+            continue;
+        }
         if is_exit_command_entry(&value) {
             if let Some(uuid) = value.get("uuid").and_then(Value::as_str) {
                 exit_command_uuids.insert(uuid.to_owned());
@@ -310,6 +313,15 @@ fn extract_message_role(value: &Value) -> Option<MessageRole> {
 
 fn is_away_summary(value: &Value) -> bool {
     value.get("subtype").and_then(Value::as_str) == Some("away_summary")
+}
+
+fn is_local_command_caveat_entry(value: &Value) -> bool {
+    const OPEN: &str = "<local-command-caveat>";
+    const CLOSE: &str = "</local-command-caveat>";
+
+    user_message_text(value)
+        .and_then(|content| content.strip_prefix(OPEN))
+        .is_some_and(|content| content.ends_with(CLOSE))
 }
 
 fn is_exit_command_entry(value: &Value) -> bool {
@@ -609,13 +621,34 @@ fn stringify_json(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_claude_text, parse_claude_session_file};
+    use super::{is_local_command_caveat_entry, normalize_claude_text, parse_claude_session_file};
 
     #[test]
     fn normalizes_claude_local_command_wrappers() {
         let text = "<local-command-stdout>Bye!</local-command-stdout>";
 
         assert_eq!(normalize_claude_text(text), "Bye!");
+    }
+
+    #[test]
+    fn local_command_caveat_filter_requires_full_content_wrapper() {
+        let caveat = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": "<local-command-caveat>ignore this</local-command-caveat>"
+            }
+        });
+        let mention = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": "Explain <local-command-caveat>this</local-command-caveat> markup"
+            }
+        });
+
+        assert!(is_local_command_caveat_entry(&caveat));
+        assert!(!is_local_command_caveat_entry(&mention));
     }
 
     #[test]
@@ -643,13 +676,14 @@ mod tests {
     }
 
     #[test]
-    fn parser_excludes_exit_command_and_its_local_output_without_hiding_resumed_messages() {
+    fn parser_excludes_local_command_caveat_exit_and_output_without_hiding_resumed_messages() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("session.jsonl");
         let body = concat!(
             "{\"type\":\"user\",\"sessionId\":\"s1\",\"uuid\":\"user-1\",\"message\":{\"role\":\"user\",\"content\":\"before exit\"}}\n",
             "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"parentUuid\":\"user-1\",\"uuid\":\"assistant-1\",\"message\":{\"role\":\"assistant\",\"content\":\"ready\"}}\n",
-            "{\"type\":\"user\",\"sessionId\":\"s1\",\"parentUuid\":\"assistant-1\",\"uuid\":\"exit-1\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/exit</command-name>\\n<command-message>exit</command-message>\\n<command-args></command-args>\"}}\n",
+            "{\"type\":\"user\",\"sessionId\":\"s1\",\"parentUuid\":\"assistant-1\",\"uuid\":\"caveat-1\",\"message\":{\"role\":\"user\",\"content\":\"<local-command-caveat>Caveat: ignore local command messages.</local-command-caveat>\"}}\n",
+            "{\"type\":\"user\",\"sessionId\":\"s1\",\"parentUuid\":\"caveat-1\",\"uuid\":\"exit-1\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/exit</command-name>\\n<command-message>exit</command-message>\\n<command-args></command-args>\"}}\n",
             "{\"type\":\"user\",\"sessionId\":\"s1\",\"parentUuid\":\"exit-1\",\"uuid\":\"goodbye-1\",\"message\":{\"role\":\"user\",\"content\":\"<local-command-stdout>Goodbye!</local-command-stdout>\"}}\n",
             "{\"type\":\"user\",\"sessionId\":\"s1\",\"parentUuid\":\"goodbye-1\",\"uuid\":\"user-2\",\"message\":{\"role\":\"user\",\"content\":\"resumed later\"}}\n",
         );
@@ -664,6 +698,7 @@ mod tests {
         assert_eq!(session.messages[1].content, "ready");
         assert_eq!(session.messages[2].content, "resumed later");
         assert_eq!(session.cells.len(), 3);
+        assert!(!session.content.contains("Caveat:"));
         assert!(!session.content.contains("/exit"));
         assert!(!session.content.contains("Goodbye!"));
     }
