@@ -524,7 +524,10 @@ fn build_phrase_boosted_query(
     query_text: &str,
     base_query: Box<dyn Query>,
 ) -> Box<dyn Query> {
-    if extract_highlight_terms(query_text).len() < 2 || has_explicit_boolean_operators(query_text) {
+    if query_text.contains('"')
+        || extract_highlight_terms(query_text).len() < 2
+        || has_explicit_boolean_operators(query_text)
+    {
         return base_query;
     }
 
@@ -1013,5 +1016,12 @@ mod tests {
         assert!(highlighted.contains("<b>wordB</b> appears first"));
         assert!(highlighted.contains("<b>wordA</b> appears by itself"));
         assert!(!highlighted.contains("<b>wordA wordB</b>"));
+    }
+
+    #[test]
+    fn emphasize_terms_highlights_phrase_tokens_across_punctuation() {
+        let highlighted = emphasize_terms("commit /commit --all", "\"commit all\"");
+
+        assert_eq!(highlighted, "<b>commit</b> /<b>commit</b> --<b>all</b>");
     }
 }

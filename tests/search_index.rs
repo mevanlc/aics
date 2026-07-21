@@ -54,6 +54,32 @@ fn search_query_returns_matching_sessions() -> Result<()> {
 }
 
 #[test]
+fn quoted_phrase_search_highlights_each_normalized_token() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+
+    let hits = engine.search(&SearchRequest {
+        query: "\"current git status\"".to_owned(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Relevance,
+        filters: SearchFilters::default(),
+    })?;
+
+    let hit = hits
+        .iter()
+        .find(|hit| hit.session.file_path.ends_with("basic_session.jsonl"))
+        .expect("basic_session should match the quoted phrase");
+    assert!(hit.snippet_html.contains("<b>current</b>"));
+    assert!(hit.snippet_html.contains("<b>git</b>"));
+    assert!(hit.snippet_html.contains("<b>status</b>"));
+    Ok(())
+}
+
+#[test]
 fn search_excludes_codex_developer_messages() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;

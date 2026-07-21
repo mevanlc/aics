@@ -23,9 +23,9 @@ pub fn extract_highlight_terms(query: &str) -> Vec<String> {
                 push_term(&mut terms, &mut token, token_quoted);
                 token_quoted = false;
             }
-            ch if ch.is_whitespace() && !in_quotes => {
+            ch if ch.is_whitespace() => {
                 push_term(&mut terms, &mut token, token_quoted);
-                token_quoted = false;
+                token_quoted = in_quotes;
             }
             _ => token.push(ch),
         }
@@ -121,6 +121,18 @@ mod tests {
     fn keeps_quoted_boolean_tokens_as_search_terms() {
         let terms = extract_highlight_terms("\"AND\" OR beta");
         assert_eq!(terms, ["and", "beta"]);
+    }
+
+    #[test]
+    fn splits_quoted_phrases_into_independent_highlight_terms() {
+        let terms = extract_highlight_terms("\"commit all\"");
+        assert_eq!(terms, ["commit", "all"]);
+    }
+
+    #[test]
+    fn keeps_boolean_words_inside_quoted_phrases() {
+        let terms = extract_highlight_terms("\"alpha OR beta\"");
+        assert_eq!(terms, ["alpha", "or", "beta"]);
     }
 
     #[test]
