@@ -307,7 +307,7 @@ impl FilterModalState {
             KeymapHint::new("←↑↓→", "nav"),
             KeymapHint::new("Space", "toggle"),
             KeymapHint::new("Enter", "apply"),
-            KeymapHint::new("^S", "save default"),
+            KeymapHint::new("^S", "apply + save default"),
             KeymapHint::new("^R", "reset"),
             KeymapHint::new("Esc", "cancel"),
         ];

@@ -74,7 +74,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 20] = [
     HelpItem::new(
         "^F",
         "filters",
-        "Open the filter modal to change search filters and preview/viewer display toggles. Enter applies the current modal values; ^S saves them as startup defaults.",
+        "Open the filter modal to change search filters and preview/viewer display toggles. Enter applies the current modal values; ^S applies them and also saves them as startup defaults.",
     ),
     HelpItem::new(
         "^G",

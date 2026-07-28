@@ -1295,15 +1295,11 @@ impl App {
                             .unwrap_or(Overlay::None);
                     }
                     FilterOutcome::Apply(update) => {
-                        self.scope = update.scope;
-                        self.filters = update.filters;
-                        self.sort = update.sort;
-                        self.set_display_options(update.display_options);
-                        self.overlay = Overlay::None;
-                        self.trigger_search_now()?;
+                        self.apply_filter_update(update)?;
                     }
                     FilterOutcome::SaveDefault(update) => {
                         self.save_default_filter(&update);
+                        self.apply_filter_update(update)?;
                     }
                 }
             }
@@ -1526,15 +1522,11 @@ impl App {
                             .unwrap_or(Overlay::None);
                     }
                     FilterOutcome::Apply(update) => {
-                        self.scope = update.scope;
-                        self.filters = update.filters;
-                        self.sort = update.sort;
-                        self.set_display_options(update.display_options);
-                        self.overlay = Overlay::None;
-                        self.trigger_search_now()?;
+                        self.apply_filter_update(update)?;
                     }
                     FilterOutcome::SaveDefault(update) => {
                         self.save_default_filter(&update);
+                        self.apply_filter_update(update)?;
                     }
                 }
             }
@@ -2104,6 +2096,18 @@ impl App {
             self.statusline = Some(statusline::Entry::completed("settings saved"));
         }
         Ok(())
+    }
+
+    /// Adopt the filter modal's values as the live search state and re-run the
+    /// search. Closing the modal here keeps `Enter` and `^S` behaving alike, so
+    /// reopening it always shows the values that were last committed.
+    fn apply_filter_update(&mut self, update: FilterUpdate) -> Result<()> {
+        self.scope = update.scope;
+        self.filters = update.filters;
+        self.sort = update.sort;
+        self.set_display_options(update.display_options);
+        self.overlay = Overlay::None;
+        self.trigger_search_now()
     }
 
     fn save_default_filter(&mut self, update: &FilterUpdate) {
@@ -4690,7 +4694,50 @@ mod tests {
 
         assert!(app.settings.display_options.hide_skill_text_injection);
         assert!(app.settings.default_filter.is_some());
-        assert!(matches!(app.overlay, super::Overlay::Filters(_, None)));
+    }
+
+    #[test]
+    fn filter_save_default_also_applies_and_closes() {
+        let mut app = test_app();
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        // Jump to Sub-agents and turn it on, then save as default.
+        app.handle_key(crossterm_key(KeyCode::Char('u'))).unwrap();
+        app.handle_key(crossterm_key(KeyCode::Char(' '))).unwrap();
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::None));
+        assert!(
+            app.filters.include_sub_agents,
+            "^S must apply, not just save"
+        );
+        assert!(
+            app.settings
+                .default_filter
+                .as_ref()
+                .expect("default filter saved")
+                .filters
+                .include_sub_agents
+        );
+
+        // Reopening the modal seeds it with the saved values: applying without
+        // touching anything must not silently revert them.
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
+
+        assert!(app.filters.include_sub_agents);
     }
 
     #[test]

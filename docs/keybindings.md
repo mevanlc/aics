@@ -15,7 +15,7 @@ In the tables below, `^` means Ctrl.
 | `PgUp` / `PgDn` | Scroll the preview, or page through the list when preview is hidden |
 | `Home` / `End` | Jump within the preview, or to the first/last result when preview is hidden |
 | `⏎` | Open the selected session's actions menu |
-| `^F` | Open filters and display options; `^S` in the modal saves startup defaults |
+| `^F` | Open filters and display options; `^S` in the modal applies them and saves them as startup defaults |
 | `^G` | Toggle between global and current-directory scope |
 | `^S` | Open settings |
 | `^T` | Show or hide the preview panel |
