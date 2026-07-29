@@ -1,6 +1,6 @@
 use std::env;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Result};
@@ -10,19 +10,20 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use log::warn;
 use ratatui::style::Color;
 
+use aics::export::write_session_markdown;
 use aics::index::{
-    IndexManager, Scope, SearchFilters, SearchRequest, SortMode, SyncOutcome, SyncProgress,
-    TrashFilter,
+    IndexManager, Scope, SearchFilters, SearchHit, SearchRequest, SortMode, SyncOutcome,
+    SyncProgress, TrashFilter,
 };
 use aics::live::LiveSessionTracker;
 use aics::logging::{LoggingHandle, LoggingMode};
-use aics::parse::Agent;
+use aics::parse::{parse_session_file, Agent};
 use aics::rules::{
     default_rules_path, print_report, run_rules_with_progress, write_default_rules_dts,
     RuleSelection, RulesMode, RulesOptions, RulesProgress,
 };
 use aics::scan::ResolvedPaths;
-use aics::settings::{DefaultFilter, DefaultFilterScope, LoadedSettings, Settings};
+use aics::settings::{DefaultFilter, DefaultFilterScope, DisplayOptions, LoadedSettings, Settings};
 use aics::tui::theme::{PaletteEntry, Theme};
 use aics::tui::{run_app, run_rules_preview_app};
 
@@ -31,7 +32,7 @@ use aics::tui::{run_app, run_rules_preview_app};
     name = "aics",
     version,
     about = "Search local Claude Code and Codex CLI session history",
-    after_help = "Examples:\n  aics deploy\n      Search sessions for the current directory and open the TUI.\n\n  aics -g --agent claude --after 2026-03-01 deploy\n      Search all Claude sessions after 2026-03-01.\n\n  aics --json -g --sort-by relevance \"vector db\"\n      Print matching sessions as JSONL instead of launching the TUI.\n\nDate filters:\n  --after and --before accept YYYY-MM-DD or RFC3339 timestamps.\n\nScope:\n  By default, searches are scoped to the current directory.\n  Use --global to search everything, --no-global to override a saved global startup scope,\n  or --dir PATH[:BRANCH] to target a project."
+    after_help = "Examples:\n  aics deploy\n      Search sessions for the current directory and open the TUI.\n\n  aics -g --agent claude --after 2026-03-01 deploy\n      Search all Claude sessions after 2026-03-01.\n\n  aics --json -g --sort-by relevance \"vector db\"\n      Print matching sessions as JSONL instead of launching the TUI.\n\n  aics -g --export ./transcripts \"vector db\"\n      Write every matching session to ./transcripts as Markdown.\n\nDate filters:\n  --after and --before accept YYYY-MM-DD or RFC3339 timestamps.\n\nScope:\n  By default, searches are scoped to the current directory.\n  Use --global to search everything, --no-global to override a saved global startup scope,\n  or --dir PATH[:BRANCH] to target a project."
 )]
 struct Cli {
     #[arg(
@@ -128,6 +129,20 @@ struct Cli {
     )]
     json: bool,
     #[arg(
+        long = "export",
+        value_name = "DIR",
+        conflicts_with_all = ["json", "preview_rules", "apply_rules", "benchmark_rules"],
+        help = "Write every matching session to DIR as Markdown instead of launching the TUI"
+    )]
+    export: Option<PathBuf>,
+    #[arg(
+        long = "hide",
+        value_name = "ITEM",
+        value_enum,
+        help = "Hide a transcript part; repeatable. Adds to saved display options in the TUI, and is the only thing hidden from an export"
+    )]
+    hide: Vec<CliHideItem>,
+    #[arg(
         long = "preview-rules",
         conflicts_with = "apply_rules",
         help = "Evaluate JavaScript rules and review proposed actions without changing files"
@@ -217,6 +232,43 @@ enum CliTrashFilter {
     Both,
 }
 
+/// The six transcript parts the filter modal can toggle. Each name is the
+/// matching `display_options` settings key with `hide_` stripped, so what is
+/// typed here is greppable in `settings.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliHideItem {
+    ProjectDocsAutodump,
+    SkillTextInjection,
+    ToolCalls,
+    ToolResults,
+    AgentReplies,
+    UserMessages,
+}
+
+impl CliHideItem {
+    /// Turn hiding on for this item. `--hide` never turns hiding *off*, so it
+    /// composes the same way against an all-visible export baseline and against
+    /// the saved display options the TUI starts from.
+    fn apply(self, options: &mut DisplayOptions) {
+        match self {
+            Self::ProjectDocsAutodump => options.hide_project_docs_autodump = true,
+            Self::SkillTextInjection => options.hide_skill_text_injection = true,
+            Self::ToolCalls => options.hide_tool_calls = true,
+            Self::ToolResults => options.hide_tool_results = true,
+            Self::AgentReplies => options.hide_agent_replies = true,
+            Self::UserMessages => options.hide_user_messages = true,
+        }
+    }
+}
+
+fn hidden_from(base: DisplayOptions, items: &[CliHideItem]) -> DisplayOptions {
+    let mut options = base;
+    for item in items {
+        item.apply(&mut options);
+    }
+    options
+}
+
 impl From<CliSort> for SortMode {
     fn from(value: CliSort) -> Self {
         match value {
@@ -239,11 +291,17 @@ impl From<CliTrashFilter> for TrashFilter {
 impl Cli {
     fn will_enter_tui(&self) -> bool {
         !self.json
+            && self.export.is_none()
             && !self.apply_rules
             && !self.benchmark_rules
             && !self.write_rules_dts
             && !self.delete_index
             && !self.print_palettes
+    }
+
+    /// Modes that own stdout, so progress bars and other chatter must not go there.
+    fn stdout_reserved(&self) -> bool {
+        self.json || self.export.is_some()
     }
 
     fn logging_mode(&self) -> LoggingMode {
@@ -284,18 +342,19 @@ fn main() -> Result<()> {
         eprintln!("aics: {warning}");
     }
     manager.write_profile_metadata(&resolved_paths)?;
-    let sync_outcome = if let Some(draw_target) = progress_draw_target(cli.progress, cli.json) {
-        let mut progress = StartupProgress::new(draw_target);
-        let outcome = manager.sync_with_roots_and_progress(
-            &resolved_paths.roots,
-            cli.rebuild_index,
-            |event| progress.update(event),
-        );
-        progress.finish();
-        SyncOutcome::Completed(outcome?)
-    } else {
-        manager.sync_with_roots_best_effort(&resolved_paths.roots, cli.rebuild_index)?
-    };
+    let sync_outcome =
+        if let Some(draw_target) = progress_draw_target(cli.progress, cli.stdout_reserved()) {
+            let mut progress = StartupProgress::new(draw_target);
+            let outcome = manager.sync_with_roots_and_progress(
+                &resolved_paths.roots,
+                cli.rebuild_index,
+                |event| progress.update(event),
+            );
+            progress.finish();
+            SyncOutcome::Completed(outcome?)
+        } else {
+            manager.sync_with_roots_best_effort(&resolved_paths.roots, cli.rebuild_index)?
+        };
     match sync_outcome {
         SyncOutcome::Completed(_) | SyncOutcome::Busy => {}
     }
@@ -318,7 +377,9 @@ fn main() -> Result<()> {
             scope: rules_scope.clone(),
             filters: rules_filters.clone(),
         };
-        let report = if let Some(draw_target) = progress_draw_target(cli.progress, cli.json) {
+        let report = if let Some(draw_target) =
+            progress_draw_target(cli.progress, cli.stdout_reserved())
+        {
             let mut progress = RulesProcessingProgress::new(draw_target);
             let report = run_rules_with_progress(&resolved_paths.roots, &rules_options, |event| {
                 progress.update(event)
@@ -375,7 +436,9 @@ fn main() -> Result<()> {
                 scope: Scope::Global,
                 filters: SearchFilters::default(),
             };
-            let report = if let Some(draw_target) = progress_draw_target(cli.progress, cli.json) {
+            let report = if let Some(draw_target) =
+                progress_draw_target(cli.progress, cli.stdout_reserved())
+            {
                 let mut progress = RulesProcessingProgress::new(draw_target);
                 let report =
                     run_rules_with_progress(&resolved_paths.roots, &startup_options, |event| {
@@ -425,8 +488,22 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Both non-interactive modes run before the saved startup filter is applied,
+    // so a scripted search selects exactly what its flags asked for. Exports
+    // likewise start from an all-visible baseline rather than saved display
+    // options, so only an explicit `--hide` removes anything.
+    if let Some(export_dir) = cli.export.as_deref() {
+        return export_sessions(
+            search_engine.search(&request)?,
+            export_dir,
+            hidden_from(DisplayOptions::SHOW_ALL, &cli.hide),
+        );
+    }
+
     let mut request = request;
     apply_default_filter_to_request(&mut request, &cli, settings.default_filter.as_ref());
+    let mut settings = settings;
+    settings.display_options = hidden_from(settings.display_options, &cli.hide);
 
     run_app(
         manager,
@@ -437,6 +514,51 @@ fn main() -> Result<()> {
         resolved_paths.roots,
         settings_warning,
     )
+}
+
+/// Write each hit to `dir` as Markdown, listing the written paths on stdout so
+/// the run composes with a shell pipeline. An unreadable session is reported and
+/// skipped rather than aborting the batch.
+fn export_sessions(
+    hits: Vec<SearchHit>,
+    dir: &Path,
+    display_options: DisplayOptions,
+) -> Result<()> {
+    let mut exported = 0usize;
+    let mut skipped = 0usize;
+
+    for hit in hits {
+        let source = hit.session.file_path.as_path();
+        let session = match parse_session_file(hit.session.agent, source) {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                skipped += 1;
+                eprintln!("aics: skipped {}: no session content", source.display());
+                continue;
+            }
+            Err(error) => {
+                skipped += 1;
+                warn!("failed to parse {}: {error:#}", source.display());
+                eprintln!("aics: skipped {}: {error:#}", source.display());
+                continue;
+            }
+        };
+
+        let written = write_session_markdown(dir, &session, display_options)?;
+        println!("{}", written.display());
+        exported += 1;
+    }
+
+    if exported == 0 {
+        eprintln!("aics: no sessions matched; nothing exported");
+    } else {
+        eprintln!("aics: exported {exported} session(s) to {}", dir.display());
+    }
+    if skipped > 0 {
+        eprintln!("aics: skipped {skipped} unreadable session(s)");
+    }
+
+    Ok(())
 }
 
 fn combine_startup_warnings(logging: &LoggingHandle, settings: Option<String>) -> Option<String> {
@@ -455,8 +577,8 @@ fn append_startup_warning(warning: &mut Option<String>, extra: String) {
 }
 
 fn validate_terminal_mode(cli: &Cli) -> Result<()> {
-    if cli.json && cli.progress == CliProgress::Stdout {
-        bail!("--progress stdout conflicts with --json because stdout is reserved for JSON output");
+    if cli.stdout_reserved() && cli.progress == CliProgress::Stdout {
+        bail!("--progress stdout conflicts with --json and --export because stdout is reserved for their output");
     }
 
     if rules_mode(cli).is_some() && cli.query.is_some() {
@@ -469,6 +591,7 @@ fn validate_terminal_mode(cli: &Cli) -> Result<()> {
 
     if !cli.delete_index
         && !cli.json
+        && cli.export.is_none()
         && rules_mode(cli).is_none()
         && !std::io::stdout().is_terminal()
     {
@@ -488,13 +611,13 @@ fn rules_mode(cli: &Cli) -> Option<RulesMode> {
     }
 }
 
-fn progress_draw_target(mode: CliProgress, json_mode: bool) -> Option<ProgressDrawTarget> {
+fn progress_draw_target(mode: CliProgress, stdout_reserved: bool) -> Option<ProgressDrawTarget> {
     match mode {
         CliProgress::None => None,
         CliProgress::Stderr => std::io::stderr()
             .is_terminal()
             .then(ProgressDrawTarget::stderr),
-        CliProgress::Stdout if json_mode => None,
+        CliProgress::Stdout if stdout_reserved => None,
         CliProgress::Stdout => std::io::stdout()
             .is_terminal()
             .then(ProgressDrawTarget::stdout),
@@ -982,9 +1105,9 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        apply_default_filter_to_request, build_request, palette_pairs, parse_after_date,
-        parse_before_date, parse_dir_arg, render_palettes, rules_mode, validate_terminal_mode, Cli,
-        CliProgress,
+        apply_default_filter_to_request, build_request, hidden_from, palette_pairs,
+        parse_after_date, parse_before_date, parse_dir_arg, render_palettes, rules_mode,
+        validate_terminal_mode, Cli, CliProgress, DisplayOptions,
     };
     use aics::index::{Scope, SearchFilters, SortMode, TrashFilter};
     use aics::parse::Agent;
@@ -1218,6 +1341,7 @@ mod tests {
 
         for args in [
             vec!["aics", "--json"],
+            vec!["aics", "--export", "./out"],
             vec!["aics", "--apply-rules"],
             vec!["aics", "--benchmark-rules"],
             vec!["aics", "--write-rules-dts"],
@@ -1226,6 +1350,134 @@ mod tests {
         ] {
             assert!(!Cli::parse_from(args).will_enter_tui());
         }
+    }
+
+    #[test]
+    fn export_conflicts_with_other_non_interactive_modes() {
+        for conflicting in ["--json", "--preview-rules", "--apply-rules"] {
+            let error =
+                Cli::try_parse_from(["aics", "--export", "./out", conflicting]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn export_reserves_stdout_for_written_paths() {
+        let cli = Cli::parse_from([
+            "aics",
+            "--export",
+            "./out",
+            "--progress",
+            "stdout",
+            "deploy",
+        ]);
+
+        assert!(cli.stdout_reserved());
+        let error = validate_terminal_mode(&cli).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("--progress stdout conflicts with --json"));
+    }
+
+    #[test]
+    fn hide_flag_is_repeatable_and_only_turns_hiding_on() {
+        let cli = Cli::parse_from([
+            "aics",
+            "--hide",
+            "tool-results",
+            "--hide",
+            "agent-replies",
+            "deploy",
+        ]);
+
+        let options = hidden_from(DisplayOptions::SHOW_ALL, &cli.hide);
+
+        assert!(options.hide_tool_results);
+        assert!(options.hide_agent_replies);
+        assert!(!options.hide_tool_calls);
+        assert!(!options.hide_user_messages);
+        assert!(!options.hide_project_docs_autodump);
+    }
+
+    #[test]
+    fn hide_flag_adds_to_saved_display_options_rather_than_replacing_them() {
+        let cli = Cli::parse_from(["aics", "--hide", "tool-calls", "deploy"]);
+        let saved = DisplayOptions {
+            hide_tool_results: true,
+            ..DisplayOptions::SHOW_ALL
+        };
+
+        let options = hidden_from(saved, &cli.hide);
+
+        assert!(options.hide_tool_calls, "the flag applies");
+        assert!(options.hide_tool_results, "the saved option survives");
+    }
+
+    #[test]
+    fn omitting_hide_leaves_an_export_fully_visible() {
+        let cli = Cli::parse_from(["aics", "--export", "./out", "deploy"]);
+
+        assert_eq!(
+            hidden_from(DisplayOptions::SHOW_ALL, &cli.hide),
+            DisplayOptions::SHOW_ALL
+        );
+    }
+
+    #[test]
+    fn hide_accepts_every_display_toggle_the_filter_modal_offers() {
+        let cli = Cli::parse_from([
+            "aics",
+            "--hide",
+            "project-docs-autodump",
+            "--hide",
+            "skill-text-injection",
+            "--hide",
+            "tool-calls",
+            "--hide",
+            "tool-results",
+            "--hide",
+            "agent-replies",
+            "--hide",
+            "user-messages",
+        ]);
+
+        let options = hidden_from(DisplayOptions::SHOW_ALL, &cli.hide);
+
+        assert!(options.hide_project_docs_autodump);
+        assert!(options.hide_skill_text_injection);
+        assert!(options.hide_tool_calls);
+        assert!(options.hide_tool_results);
+        assert!(options.hide_agent_replies);
+        assert!(options.hide_user_messages);
+    }
+
+    #[test]
+    fn hide_rejects_unknown_items() {
+        let error = Cli::try_parse_from(["aics", "--hide", "everything"]).unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn export_composes_with_the_ordinary_search_filters() {
+        let cli = Cli::parse_from([
+            "aics",
+            "--global",
+            "--export",
+            "./out",
+            "--agent",
+            "claude",
+            "--sub-agent",
+            "tmux_tui_harness",
+        ]);
+
+        let request = build_request(&cli).unwrap();
+
+        assert_eq!(cli.export.as_deref(), Some(std::path::Path::new("./out")));
+        assert!(matches!(request.scope, Scope::Global));
+        assert_eq!(request.query, "tmux_tui_harness");
+        assert_eq!(request.filters.agent, Some(Agent::Claude));
+        assert!(request.filters.include_sub_agents);
     }
 
     #[test]
@@ -1288,6 +1540,7 @@ mod tests {
         assert!(help.contains("--claude-home <PATH>"));
         assert!(help.contains("--codex-home <PATH>"));
         assert!(help.contains("--no-apply-rules"));
+        assert!(help.contains("--export <DIR>"));
         assert!(!help.contains("--benchmark-rules"));
         assert!(help.contains("Examples:"));
         assert!(help.contains("YYYY-MM-DD or RFC3339"));

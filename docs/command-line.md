@@ -28,6 +28,9 @@ aics -g --agent claude --after 2026-03-01 --before 2026-03-31 deploy
 # Write relevance-sorted results as JSONL
 aics --json -g --sort-by relevance "vector db"
 
+# Export every matching session as Markdown
+aics -g --export ./transcripts "vector db"
+
 # Review cleanup-rule proposals without changing session files
 aics --preview-rules -g
 
@@ -85,18 +88,99 @@ Sub-agent sessions are excluded unless `--sub-agent` is present.
 | --- | --- |
 | `--sort-by MODE` | Select `time` or `relevance` ordering; command-line default: `time` |
 | `--json` | Write one JSON search hit or rule record per line instead of opening the TUI |
+| `--export DIR` | Write every matching session to `DIR` as Markdown instead of opening the TUI |
 | `--progress STREAM` | Select `none`, `stderr`, or `stdout`; default: `stderr` |
 
 Progress is drawn only when its selected stream is a terminal. `--progress stdout`
-conflicts with `--json` because stdout is reserved for JSONL; use the default
-stderr progress or `--progress none` in scripts.
+conflicts with `--json` and `--export` because stdout is reserved for their
+output; use the default stderr progress or `--progress none` in scripts.
 
 Outside rules mode, redirecting or piping a TUI invocation is rejected. Add
-`--json` when non-interactive stdout is required.
+`--json` or `--export` when non-interactive stdout is required.
 
-`--json` changes output mode but does not disable automatic rules configured
-with `applyAtStartup: true`. Add `--no-apply-rules` when a JSON search must not
-apply startup cleanup actions.
+`--json` and `--export` change output mode but do not disable automatic rules
+configured with `applyAtStartup: true`. Add `--no-apply-rules` when a scripted
+search must not apply startup cleanup actions.
+
+## Exporting sessions
+
+`--export DIR` runs the search described by the other options and writes each
+matching session to `DIR` as a Markdown transcript, creating `DIR` when it does
+not exist. It conflicts with `--json` and with the explicit rules modes.
+
+```bash
+# Export every session mentioning a term, from anywhere
+aics -g --export ./transcripts tmux_tui_harness
+
+# Narrow the batch the same way any other search narrows
+aics -g --agent claude --after 2026-03-01 --export ./transcripts deploy
+
+# Feed the written paths into another tool
+aics -g --export ./transcripts deploy | xargs wc -l
+```
+
+Written paths go to stdout, one per line; counts and skip notices go to stderr.
+A session that cannot be parsed is reported and skipped rather than failing the
+batch. `-n`/`--num-results` caps how many sessions are exported, so raise it when
+a batch could exceed the default of 2000.
+
+Filenames are `YYYY-MM-DD-AGENT-SESSIONID.md`, using the session's modified date
+in local time and the first eight characters of its id, plus a slug of the custom
+title when the session has one. A name already taken gains a `-1`, `-2`, … suffix
+rather than overwriting.
+
+The date is the modified date because that is what `--after` and `--before`
+filter on and what time sort orders by, so filenames sort in list order and an
+`--after DATE` export contains no filename older than `DATE`.
+
+Each file opens with the session's provenance — id, project, branch, working
+directory, timestamps, and the path of the source JSONL — followed by the
+transcript. Message bodies are written verbatim, since they are already Markdown
+as the agent wrote them. Everything that is not Markdown — tool input and output,
+exec streams, patch contents — is fenced, with the fence widened as needed so a
+payload containing its own code blocks cannot break the document.
+
+Exports are archives, not views: they include every message, tool call, tool
+result, exec, patch, reasoning block, and plan the parser produced, regardless of
+the viewer display options under `Ctrl+F`. They also ignore saved startup filter
+defaults, so a scripted export selects exactly what its flags asked for. Use
+`--hide` when a smaller export is wanted.
+
+## Hiding transcript parts
+
+| Option | Meaning |
+| --- | --- |
+| `--hide ITEM` | Hide one transcript part; repeat the flag for more than one |
+
+`ITEM` is one of `project-docs-autodump`, `skill-text-injection`, `tool-calls`,
+`tool-results`, `agent-replies`, or `user-messages` — the six toggles the filter
+modal offers, each named after its `display_options` key in `settings.json` with
+`hide_` stripped.
+
+```bash
+# A conversation-only export: no tool calls, results, or reasoning
+aics -g --export ./transcripts --hide tool-calls --hide tool-results deploy
+
+# Start the TUI with tool results hidden on top of whatever is saved
+aics --hide tool-results deploy
+```
+
+`--hide` only ever turns hiding *on*; there is no CLI form that turns a hidden
+part back on. What that composes to depends on the baseline:
+
+- An **export** starts from everything visible, so `--hide` names exactly what is
+  missing from the files.
+- The **TUI** starts from the saved `display_options`, so `--hide` adds to them
+  for that launch without changing what is stored. `Ctrl+F` still toggles
+  anything during the session.
+
+Two items hide more than their name suggests, matching the viewer:
+`tool-calls` also drops exec, patch, and web-search blocks, since those are tool
+invocations; `tool-results` also suppresses the stdout and stderr inside exec and
+patch blocks while leaving the invocations themselves in place.
+
+Session provenance — the id, project, branch, timestamps, and source path at the
+top of an exported file — is not part of the transcript and is never hidden.
 
 ## JavaScript rules modes
 
@@ -142,8 +226,12 @@ options take precedence where the CLI exposes a corresponding override.
 `--no-global` exists specifically to override a saved global scope for one
 launch.
 
-Saved TUI defaults are applied when entering the TUI. JSON and explicit rules
-modes use their command-line scope and filters instead.
+Saved TUI defaults are applied when entering the TUI. JSON, export, and explicit
+rules modes use their command-line scope and filters instead.
+
+Saved `display_options` are likewise applied only when entering the TUI, where
+`--hide` adds to them. Exports start from everything visible and honor `--hide`
+alone.
 
 ## Informational and exit-only options
 

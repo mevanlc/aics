@@ -210,15 +210,25 @@ impl SettingsPatch {
     }
 }
 
+impl DisplayOptions {
+    /// Every part of a transcript visible. Unlike `default()`, which hides
+    /// project-doc autodumps because they are noise in a preview pane, this
+    /// hides nothing — it is the baseline for exports, which are archives.
+    pub const SHOW_ALL: Self = Self {
+        hide_skill_text_injection: false,
+        hide_tool_calls: false,
+        hide_tool_results: false,
+        hide_agent_replies: false,
+        hide_user_messages: false,
+        hide_project_docs_autodump: false,
+    };
+}
+
 impl Default for DisplayOptions {
     fn default() -> Self {
         Self {
-            hide_skill_text_injection: false,
-            hide_tool_calls: false,
-            hide_tool_results: false,
-            hide_agent_replies: false,
-            hide_user_messages: false,
             hide_project_docs_autodump: default_hide_project_docs_autodump(),
+            ..Self::SHOW_ALL
         }
     }
 }

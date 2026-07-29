@@ -15,7 +15,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Markdown rendering with syntax highlighting and search-term highlighting in the viewer
 - Multiple themes (lazygit, aics, sunset, late), configurable via settings modal
 - Configurable claude/codex launch commands so `aics` can hand off to resume a session
-- `--json` mode for scripting
+- `--json` mode for scripting, and `--export DIR` to batch-export matching sessions as Markdown
 - JavaScript rules for previewing or applying batch session cleanup actions
 - Cross-platform: Windows, macOS, Linux, Android (Termux), FreeBSD, and NetBSD
   (path matching handles symlinks and Windows case-insensitivity)
@@ -48,6 +48,9 @@ aics -g "vector db"
 
 # Emit relevance-sorted JSONL instead of opening the TUI
 aics --json -g --sort-by relevance "vector db"
+
+# Export every matching session to a directory as Markdown
+aics -g --export ./transcripts "vector db"
 
 # Review JavaScript cleanup proposals in the TUI
 aics --preview-rules -g
