@@ -10,7 +10,11 @@ use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
 use crate::tui::{keymap_hint, layout};
 
-const REGULAR_ACTIONS: [ActionItem; 11] = [
+const REGULAR_ACTIONS: [ActionItem; 12] = [
+    ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
+    ActionItem::new(SessionAction::ResumeInCwd, 'R', "Resume in CLI in CWD"),
+    ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
+    ActionItem::new(SessionAction::ForkInCwd, 'F', "Fork in CLI in CWD"),
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
     ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
@@ -23,12 +27,13 @@ const REGULAR_ACTIONS: [ActionItem; 11] = [
         'D',
         "Delete session immediately",
     ),
+];
+
+const TRASHED_ACTIONS: [ActionItem; 13] = [
     ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
     ActionItem::new(SessionAction::ResumeInCwd, 'R', "Resume in CLI in CWD"),
     ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
-];
-
-const TRASHED_ACTIONS: [ActionItem; 12] = [
+    ActionItem::new(SessionAction::ForkInCwd, 'F', "Fork in CLI in CWD"),
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
     ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
@@ -42,9 +47,6 @@ const TRASHED_ACTIONS: [ActionItem; 12] = [
         'D',
         "Delete session immediately",
     ),
-    ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
-    ActionItem::new(SessionAction::ResumeInCwd, 'R', "Resume in CLI in CWD"),
-    ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
 ];
 
 fn actions(trashed: bool) -> &'static [ActionItem] {
@@ -80,6 +82,7 @@ pub enum SessionAction {
     Resume,
     ResumeInCwd,
     Fork,
+    ForkInCwd,
 }
 
 #[derive(Debug, Clone)]
@@ -265,7 +268,33 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
 
-    use super::{index_at_row, list_area, ActionMenuState, ActionOutcome, SessionAction};
+    use super::{actions, index_at_row, list_area, ActionMenuState, ActionOutcome, SessionAction};
+
+    #[test]
+    fn regular_actions_follow_the_expected_order() {
+        let items = actions(false)
+            .iter()
+            .map(|item| (item.key, item.label))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            items,
+            vec![
+                ('r', "Resume in CLI"),
+                ('R', "Resume in CLI in CWD"),
+                ('f', "Fork in CLI"),
+                ('F', "Fork in CLI in CWD"),
+                ('v', "View full conversation"),
+                ('s', "Summarize session (AI)"),
+                ('e', "Export as .txt"),
+                ('i', "Copy session id"),
+                ('p', "Copy session path"),
+                ('o', "Copy session directory"),
+                ('d', "Move session to Trash"),
+                ('D', "Delete session immediately"),
+            ]
+        );
+    }
 
     #[test]
     fn up_wraps_to_last_action() {
@@ -274,18 +303,18 @@ mod tests {
         let outcome = state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
 
         assert!(matches!(outcome, ActionOutcome::Stay));
-        assert!(state.selected == SessionAction::Fork);
+        assert!(state.selected == SessionAction::DeleteImmediately);
     }
 
     #[test]
     fn down_wraps_from_last_action_to_first() {
         let mut state = ActionMenuState::new(false);
-        assert!(state.selected.set(&SessionAction::Fork));
+        assert!(state.selected.set(&SessionAction::DeleteImmediately));
 
         let outcome = state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
 
         assert!(matches!(outcome, ActionOutcome::Stay));
-        assert!(state.selected == SessionAction::View);
+        assert!(state.selected == SessionAction::Resume);
     }
 
     #[test]
@@ -307,6 +336,16 @@ mod tests {
         assert!(matches!(
             state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
             ActionOutcome::Run(SessionAction::ResumeInCwd)
+        ));
+    }
+
+    #[test]
+    fn capital_f_runs_fork_in_cwd() {
+        let mut state = ActionMenuState::new(false);
+
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT)),
+            ActionOutcome::Run(SessionAction::ForkInCwd)
         ));
     }
 

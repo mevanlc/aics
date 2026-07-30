@@ -2737,6 +2737,20 @@ impl App {
                 self.handoff = Some(build_fork_command(&hit, &self.settings, &self.homes)?);
                 self.should_quit = true;
             }
+            SessionAction::ForkInCwd => {
+                let Some(hit) = self.selected_hit() else {
+                    return Ok(());
+                };
+                let process_cwd =
+                    env::current_dir().context("failed to resolve current directory")?;
+                self.handoff = Some(build_fork_in_cwd_command(
+                    &hit,
+                    &self.settings,
+                    &self.homes,
+                    process_cwd,
+                )?);
+                self.should_quit = true;
+            }
         }
         Ok(())
     }
@@ -3936,6 +3950,17 @@ fn build_fork_command(
     Ok(command)
 }
 
+fn build_fork_in_cwd_command(
+    hit: &SearchHit,
+    settings: &Settings,
+    homes: &AgentHomes,
+    process_cwd: PathBuf,
+) -> Result<ExternalCommand> {
+    let mut command = build_fork_command(hit, settings, homes)?;
+    command.cwd = Some(process_cwd);
+    Ok(command)
+}
+
 #[cfg(unix)]
 fn execute_handoff(command: ExternalCommand) -> Result<()> {
     use std::os::unix::process::CommandExt;
@@ -3994,11 +4019,11 @@ mod tests {
     use crate::tui::settings::SettingsModalState;
 
     use super::{
-        build_fork_command, build_resume_command, build_resume_in_cwd_command_with_cwd_tools,
-        claude_cwd_failed_dialog, codex_cwd_failed_dialog, finalize_run_result,
-        run_claude_cwd_tool, run_codex_cwd_tool, ActionMenuState, App, AppExit, RulesPreviewState,
-        SearchResponse, SearchWorker, CLAUDE_CWD_INSTALL_MESSAGE, CODEX_CWD_INSTALL_MESSAGE,
-        PAGE_STEP,
+        build_fork_command, build_fork_in_cwd_command, build_resume_command,
+        build_resume_in_cwd_command_with_cwd_tools, claude_cwd_failed_dialog,
+        codex_cwd_failed_dialog, finalize_run_result, run_claude_cwd_tool, run_codex_cwd_tool,
+        ActionMenuState, App, AppExit, RulesPreviewState, SearchResponse, SearchWorker,
+        CLAUDE_CWD_INSTALL_MESSAGE, CODEX_CWD_INSTALL_MESSAGE, PAGE_STEP,
     };
     use crate::scan::{AgentHomes, SessionRoots};
     use crate::summary::{
@@ -4292,6 +4317,25 @@ mod tests {
 
         let codex = build_fork_command(&sample_hit(Agent::Codex), &settings, &homes).unwrap();
         assert_eq!(codex.args, vec!["--yolo", "fork", "session-123"]);
+    }
+
+    #[test]
+    fn fork_in_cwd_uses_the_process_cwd_for_both_agents() {
+        let settings = Settings::default();
+        let homes = sample_homes();
+        let process_cwd = PathBuf::from("/tmp/aics-cwd");
+
+        for agent in [Agent::Claude, Agent::Codex] {
+            let command = build_fork_in_cwd_command(
+                &sample_hit(agent),
+                &settings,
+                &homes,
+                process_cwd.clone(),
+            )
+            .unwrap();
+
+            assert_eq!(command.cwd, Some(process_cwd.clone()));
+        }
     }
 
     #[test]
@@ -5106,10 +5150,16 @@ mod tests {
     fn double_clicking_action_menu_item_runs_it() {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude)];
-        app.overlay = super::Overlay::Actions(ActionMenuState::new(false));
+        let actions = ActionMenuState::new(false);
+        let view_index = (0..actions.action_count())
+            .find(|index| {
+                actions.action_at(*index) == Some(crate::tui::actions::SessionAction::View)
+            })
+            .expect("actions menu should contain View");
+        app.overlay = super::Overlay::Actions(actions);
 
         let list = crate::tui::actions::list_area(Rect::new(0, 0, 120, 30));
-        let row = list.y;
+        let row = list.y + view_index as u16;
         let column = list.x;
         app.last_frame_area = Rect::new(0, 0, 120, 30);
 
