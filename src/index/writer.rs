@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -16,7 +16,9 @@ use tantivy::{Index, TantivyDocument, TantivyError, Term};
 use crate::index::reader::SearchEngine;
 use crate::index::schema::IndexSchema;
 use crate::live::LiveSessionTracker;
-use crate::parse::{parse_session_file, Agent, DerivationType, MessageRole, Session, SessionInfo};
+use crate::parse::{
+    parse_session_file, Agent, DerivationType, MessageRole, Session, SessionInfo, SessionLineage,
+};
 use crate::scan::{
     default_session_roots, scan_session_files_with_progress, ResolvedPaths, SessionFile,
     SessionRoots,
@@ -48,6 +50,8 @@ pub struct StoredSession {
     pub trashed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 impl StoredSession {
@@ -78,15 +82,21 @@ impl From<&Session> for StoredSession {
             session_info: session.session_info.clone(),
             trashed: false,
             original_path: None,
+            superseded_by: None,
         }
     }
 }
 
 impl StoredSession {
-    fn from_session_file(session: &Session, file: &SessionFile) -> Self {
+    fn from_session_file(
+        session: &Session,
+        file: &SessionFile,
+        superseded_by: Option<String>,
+    ) -> Self {
         let mut stored = Self::from(session);
         stored.trashed = file.trashed;
         stored.original_path = file.original_path.clone();
+        stored.superseded_by = superseded_by;
         stored
     }
 }
@@ -350,24 +360,19 @@ impl IndexManager {
         let mut writer = index.writer(50_000_000)?;
         let mut changed = rebuild;
         let mut pending_files = Vec::new();
+        let mut scanned_by_key = HashMap::new();
 
         for file in &scanned_files {
             let key = normalize_path_key(&file.path);
+            scanned_by_key.insert(key.clone(), file.clone());
             let fingerprint = FileFingerprint::from(file);
 
-            if previous_state
+            if let Some(previous) = previous_state
                 .files
                 .get(&key)
-                .is_some_and(|state| state.fingerprint() == fingerprint)
+                .filter(|state| state.fingerprint() == fingerprint)
             {
-                let indexed = previous_state
-                    .files
-                    .get(&key)
-                    .map(|state| state.indexed)
-                    .unwrap_or(false);
-                next_state
-                    .files
-                    .insert(key, IndexedFileState::from_file(file, indexed));
+                next_state.files.insert(key, previous.clone());
                 stats.skipped += 1;
                 continue;
             }
@@ -379,30 +384,97 @@ impl IndexManager {
             total: pending_files.len(),
         });
 
+        let mut parsed_sessions = HashMap::<String, Session>::new();
         for (index, file) in pending_files.iter().enumerate() {
             let key = normalize_path_key(&file.path);
-            writer.delete_term(Term::from_field_text(fields.file_path, &key));
-            changed = true;
-
-            let indexed = match parse_session_file(file.agent, &file.path) {
+            let state = match parse_session_file(file.agent, &file.path) {
                 Ok(Some(session)) => {
-                    add_session_document(&mut writer, &fields, &session, file)?;
+                    let state = IndexedFileState::from_session(file, &session);
+                    parsed_sessions.insert(key.clone(), session);
                     stats.updated += 1;
-                    true
+                    state
                 }
-                Ok(None) => false,
+                Ok(None) => IndexedFileState::from_file(file, false),
                 Err(error) => {
                     warn!("failed to parse {}: {error:#}", file.path.display());
-                    false
+                    IndexedFileState::from_file(file, false)
                 }
             };
-            next_state
-                .files
-                .insert(key, IndexedFileState::from_file(file, indexed));
+            next_state.files.insert(key, state);
             progress.on_progress(SyncProgress::IndexingProgress {
                 processed: index + 1,
                 total: pending_files.len(),
             });
+        }
+
+        apply_supersession(&mut next_state);
+
+        for file in &pending_files {
+            let key = normalize_path_key(&file.path);
+            writer.delete_term(Term::from_field_text(fields.file_path, &key));
+            changed = true;
+            if let Some(session) = parsed_sessions.get(&key) {
+                let superseded_by = next_state
+                    .files
+                    .get(&key)
+                    .and_then(|state| state.superseded_by.clone());
+                add_session_document(&mut writer, &fields, session, file, superseded_by)?;
+            }
+        }
+
+        let relation_changed = next_state
+            .files
+            .iter()
+            .filter_map(|(key, state)| {
+                let previous = previous_state.files.get(key)?;
+                (state.indexed && state.superseded_by != previous.superseded_by)
+                    .then(|| key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in relation_changed {
+            if parsed_sessions.contains_key(&key) {
+                continue;
+            }
+            let Some(file) = scanned_by_key.get(&key) else {
+                continue;
+            };
+            match parse_session_file(file.agent, &file.path) {
+                Ok(Some(session)) => {
+                    writer.delete_term(Term::from_field_text(fields.file_path, &key));
+                    let superseded_by = next_state
+                        .files
+                        .get(&key)
+                        .and_then(|state| state.superseded_by.clone());
+                    add_session_document(&mut writer, &fields, &session, file, superseded_by)?;
+                    stats.updated += 1;
+                    stats.skipped = stats.skipped.saturating_sub(1);
+                    changed = true;
+                }
+                Ok(None) => {
+                    warn!(
+                        "could not refresh supersession for {} because it no longer parses as a session",
+                        file.path.display()
+                    );
+                    if let (Some(state), Some(previous)) = (
+                        next_state.files.get_mut(&key),
+                        previous_state.files.get(&key),
+                    ) {
+                        state.superseded_by.clone_from(&previous.superseded_by);
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        "could not refresh supersession for {}: {error:#}",
+                        file.path.display()
+                    );
+                    if let (Some(state), Some(previous)) = (
+                        next_state.files.get_mut(&key),
+                        previous_state.files.get(&key),
+                    ) {
+                        state.superseded_by.clone_from(&previous.superseded_by);
+                    }
+                }
+            }
         }
 
         for deleted_path in previous_state.files.keys() {
@@ -472,9 +544,10 @@ fn add_session_document(
     fields: &IndexSchema,
     session: &Session,
     file: &SessionFile,
+    superseded_by: Option<String>,
 ) -> Result<()> {
     let mut document = TantivyDocument::default();
-    let stored = StoredSession::from_session_file(session, file);
+    let stored = StoredSession::from_session_file(session, file, superseded_by);
     let stored_json = serde_json::to_string(&stored).context("failed to serialize session")?;
 
     document.add_text(fields.file_path, normalize_path_key(&session.file_path));
@@ -504,7 +577,7 @@ fn searchable_content(session: &Session) -> String {
 
 /// Bump when stored fields or searchable-content semantics change so old state
 /// files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 6;
+const INDEX_FORMAT_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {
@@ -521,6 +594,12 @@ struct IndexedFileState {
     trashed: bool,
     original_path: Option<PathBuf>,
     indexed: bool,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    lineage: SessionLineage,
+    #[serde(default)]
+    superseded_by: Option<String>,
 }
 
 impl IndexedFileState {
@@ -536,7 +615,17 @@ impl IndexedFileState {
             trashed: file.trashed,
             original_path: file.original_path.clone(),
             indexed,
+            session_id: None,
+            lineage: SessionLineage::default(),
+            superseded_by: None,
         }
+    }
+
+    fn from_session(file: &SessionFile, session: &Session) -> Self {
+        let mut state = Self::from_file(file, true);
+        state.session_id = Some(session.session_id.clone());
+        state.lineage = session.lineage.clone();
+        state
     }
 
     fn fingerprint(&self) -> FileFingerprint {
@@ -546,6 +635,92 @@ impl IndexedFileState {
             agent: self.agent,
             trashed: self.trashed,
             original_path: self.original_path.clone(),
+        }
+    }
+}
+
+fn apply_supersession(state: &mut IndexState) {
+    for file in state.files.values_mut() {
+        file.superseded_by = None;
+    }
+
+    let mut children_by_parent = HashMap::<(Agent, String), Vec<String>>::new();
+    for (child_key, child) in &state.files {
+        let Some(parent_id) = child.lineage.forked_from_session_id.as_ref() else {
+            continue;
+        };
+        if child.indexed && !child.trashed {
+            children_by_parent
+                .entry((child.agent, parent_id.clone()))
+                .or_default()
+                .push(child_key.clone());
+        }
+    }
+
+    let keys = state.files.keys().cloned().collect::<Vec<_>>();
+    for parent_key in &keys {
+        let Some(parent) = state.files.get(parent_key) else {
+            continue;
+        };
+        let Some(parent_id) = parent.session_id.as_ref() else {
+            continue;
+        };
+        if !parent.indexed || parent.lineage.semantic_event_ids.is_empty() {
+            continue;
+        }
+
+        let mut best_child = None::<(String, u64, usize)>;
+        let Some(child_keys) = children_by_parent.get(&(parent.agent, parent_id.clone())) else {
+            continue;
+        };
+        for child_key in child_keys {
+            let Some(child) = state.files.get(child_key) else {
+                continue;
+            };
+            if child_key == parent_key
+                || !lineage_supersedes(parent.agent, &parent.lineage, &child.lineage)
+            {
+                continue;
+            }
+
+            let candidate = (
+                child
+                    .session_id
+                    .clone()
+                    .unwrap_or_else(|| child_key.clone()),
+                child.modified_secs,
+                child.lineage.semantic_event_ids.len(),
+            );
+            if best_child.as_ref().is_none_or(|current| {
+                (&candidate.2, &candidate.1, &candidate.0) > (&current.2, &current.1, &current.0)
+            }) {
+                best_child = Some(candidate);
+            }
+        }
+
+        if let Some((child_id, _, _)) = best_child {
+            if let Some(parent) = state.files.get_mut(parent_key) {
+                parent.superseded_by = Some(child_id);
+            }
+        }
+    }
+}
+
+fn lineage_supersedes(agent: Agent, parent: &SessionLineage, child: &SessionLineage) -> bool {
+    match agent {
+        Agent::Codex => {
+            child.semantic_event_ids.len() > parent.semantic_event_ids.len()
+                && parent
+                    .semantic_event_ids
+                    .iter()
+                    .all(|id| child.semantic_event_ids.binary_search(id).is_ok())
+        }
+        Agent::Claude => {
+            child.own_semantic_event_count > 0
+                && parent
+                    .semantic_event_ids
+                    .iter()
+                    .all(|id| child.inherited_event_ids.binary_search(id).is_ok())
         }
     }
 }

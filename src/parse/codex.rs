@@ -15,7 +15,7 @@ use super::session::{
     is_contextual_user_message_content, last_message_fields, latest_timestamp, metadata_created,
     metadata_modified, modified_ts, push_tool_message, push_unique_chunk, push_unique_message,
     Agent, ExecStatus, MessageRole, PatchFile, PatchOp, PlanItem, PlanItemStatus, RuntimeMetrics,
-    Session, SessionCell, SessionInfo, ToolStatus,
+    Session, SessionCell, SessionInfo, SessionLineage, ToolStatus,
 };
 use super::tool_format;
 
@@ -36,6 +36,8 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
     let mut fallback_preview_first_user = None::<String>;
     let mut session_info = SessionInfo::default();
     let mut cell_builder = CodexCellBuilder::default();
+    let mut forked_from_session_id = None::<String>;
+    let mut semantic_event_ids = HashSet::new();
 
     for line in reader.lines() {
         let line = match line {
@@ -80,6 +82,9 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
         match value.get("type").and_then(Value::as_str) {
             Some("session_meta") => {
                 let payload = value.get("payload").unwrap_or(&Value::Null);
+                if session_id.is_none() {
+                    forked_from_session_id = string_field(payload, "forked_from_id");
+                }
                 session_id = session_id.or_else(|| string_field(payload, "id"));
                 cwd = cwd.or_else(|| string_field(payload, "cwd"));
                 created = earliest_timestamp(created, extract_timestamp(payload.get("timestamp")));
@@ -92,6 +97,9 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
             }
             Some("response_item") => {
                 if let Some(payload) = value.get("payload") {
+                    if let Some(identity) = response_item_identity(payload) {
+                        semantic_event_ids.insert(identity);
+                    }
                     handle_response_item(
                         payload,
                         top_level_timestamp,
@@ -121,6 +129,9 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
             | Some("function_call_output")
             | Some("custom_tool_call")
             | Some("custom_tool_call_output") => {
+                if let Some(identity) = response_item_identity(&value) {
+                    semantic_event_ids.insert(identity);
+                }
                 handle_response_item(
                     &value,
                     top_level_timestamp,
@@ -169,6 +180,8 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
         cells.push(SessionCell::SessionInfo(info));
     }
     cells.extend(cell_builder.finish());
+    let mut semantic_event_ids = semantic_event_ids.into_iter().collect::<Vec<_>>();
+    semantic_event_ids.sort_unstable();
 
     Ok(Some(Session {
         session_id,
@@ -193,7 +206,25 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
         messages,
         cells,
         session_info,
+        lineage: SessionLineage {
+            forked_from_session_id,
+            semantic_event_ids,
+            ..SessionLineage::default()
+        },
     }))
+}
+
+fn response_item_identity(payload: &Value) -> Option<String> {
+    let item_type = payload.get("type").and_then(Value::as_str)?;
+    let id_field = match item_type {
+        "message" | "reasoning" => "id",
+        "function_call"
+        | "function_call_output"
+        | "custom_tool_call"
+        | "custom_tool_call_output" => "call_id",
+        _ => return None,
+    };
+    string_field(payload, id_field).map(|id| format!("{item_type}:{id}"))
 }
 
 fn update_session_info_from_meta(info: &mut SessionInfo, payload: &Value) {
@@ -1986,5 +2017,32 @@ mod cell_tests {
             session.cells.first(),
             Some(SessionCell::SessionInfo(_))
         ));
+    }
+
+    #[test]
+    fn parser_captures_current_codex_fork_lineage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fork.jsonl");
+        let body = concat!(
+            "{\"timestamp\":\"2026-04-26T18:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"forked_from_id\":\"parent\",\"cwd\":\"/tmp\"}}\n",
+            "{\"timestamp\":\"2026-04-26T17:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\",\"forked_from_id\":\"grandparent\",\"cwd\":\"/tmp\"}}\n",
+            "{\"timestamp\":\"2026-04-26T18:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"item-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-04-26T18:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"demo\",\"arguments\":\"{}\"}}\n",
+        );
+        std::fs::write(&path, body).expect("write fixture");
+
+        let session = parse_codex_session_file(&path)
+            .expect("parse")
+            .expect("session");
+
+        assert_eq!(session.session_id, "child");
+        assert_eq!(
+            session.lineage.forked_from_session_id.as_deref(),
+            Some("parent")
+        );
+        assert_eq!(
+            session.lineage.semantic_event_ids,
+            ["function_call:call-1", "message:item-1"]
+        );
     }
 }

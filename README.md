@@ -10,7 +10,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Native Claude Code autosummaries and Codex rollout summaries in previews and summary snippets
 - Incremental indexing — only new or changed sessions get re-indexed on startup
 - Interactive TUI with session list, snippet preview, and scrollable full-session viewer
-- Filter modal: scope, agent, date range, minimum length, session kind (original / trimmed / rollover / sub-agent), live sessions
+- Filter modal: scope, agent, date range, minimum length, session kind (original / trimmed / rollover / sub-agent), live, superseded, and trashed sessions
 - Sort by time or text relevance
 - Markdown rendering with syntax highlighting and search-term highlighting in the viewer
 - Multiple themes (lazygit, aics, sunset, late), configurable via settings modal
@@ -51,6 +51,9 @@ aics --json -g --sort-by relevance "vector db"
 
 # Export every matching session to a directory as Markdown
 aics -g --export ./transcripts "vector db"
+
+# Include abandoned fork sources that are hidden by default
+aics -g --superseded both
 
 # Review JavaScript cleanup proposals in the TUI
 aics --preview-rules -g

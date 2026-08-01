@@ -5865,6 +5865,7 @@ mod tests {
                 session_info: None,
                 trashed: false,
                 original_path: None,
+                superseded_by: None,
             },
             snippet_html: String::new(),
             score: 0.0,
@@ -5967,6 +5968,7 @@ mod tests {
                     .to_owned(),
             cells: Vec::new(),
             session_info: None,
+            lineage: Default::default(),
         }
     }
 }

@@ -11,7 +11,7 @@ use ratatui::Frame;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
-use crate::index::{Scope, SearchFilters, SortMode, TrashFilter};
+use crate::index::{Scope, SearchFilters, SortMode, SupersededFilter, TrashFilter};
 use crate::parse::Agent;
 use crate::ring_cursor::RingCursor;
 use crate::settings::DisplayOptions;
@@ -20,7 +20,7 @@ use crate::tui::layout;
 use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
 
-const FIELD_ORDER: [FilterField; 14] = [
+const FIELD_ORDER: [FilterField; 15] = [
     FilterField::Scope,
     FilterField::Agent,
     FilterField::Session,
@@ -33,6 +33,7 @@ const FIELD_ORDER: [FilterField; 14] = [
     FilterField::Continued,
     FilterField::SubAgents,
     FilterField::LiveOnly,
+    FilterField::Superseded,
     FilterField::Trashed,
     FilterField::Sort,
 ];
@@ -63,6 +64,7 @@ pub enum FilterField {
     Continued,
     SubAgents,
     LiveOnly,
+    Superseded,
     Trashed,
     Sort,
 }
@@ -100,6 +102,7 @@ pub struct FilterModalState {
     include_continued: bool,
     include_sub_agents: bool,
     live_only: bool,
+    superseded: SupersededFilter,
     trashed: TrashFilter,
     sort: SortMode,
     display_options: DisplayOptions,
@@ -149,6 +152,7 @@ impl FilterModalState {
             include_continued: filters.include_continued,
             include_sub_agents: filters.include_sub_agents,
             live_only: filters.live_only,
+            superseded: filters.superseded,
             trashed: filters.trashed,
             sort,
             display_options,
@@ -384,6 +388,7 @@ impl FilterModalState {
                 include_continued: self.include_continued,
                 include_sub_agents: self.include_sub_agents,
                 live_only: self.live_only,
+                superseded: self.superseded,
                 trashed: self.trashed,
             },
         })
@@ -493,6 +498,16 @@ impl FilterModalState {
             FilterField::Continued => self.include_continued = !self.include_continued,
             FilterField::SubAgents => self.include_sub_agents = !self.include_sub_agents,
             FilterField::LiveOnly => self.live_only = !self.live_only,
+            FilterField::Superseded => {
+                self.superseded = match (self.superseded, forward) {
+                    (SupersededFilter::No, true) => SupersededFilter::Yes,
+                    (SupersededFilter::Yes, true) => SupersededFilter::Both,
+                    (SupersededFilter::Both, true) => SupersededFilter::No,
+                    (SupersededFilter::No, false) => SupersededFilter::Both,
+                    (SupersededFilter::Both, false) => SupersededFilter::Yes,
+                    (SupersededFilter::Yes, false) => SupersededFilter::No,
+                };
+            }
             FilterField::Trashed => {
                 self.trashed = match (self.trashed, forward) {
                     (TrashFilter::No, true) => TrashFilter::Yes,
@@ -661,6 +676,7 @@ impl FilterField {
             FilterField::Continued => "Continued",
             FilterField::SubAgents => "Sub-agents",
             FilterField::LiveOnly => "Live only",
+            FilterField::Superseded => "Superseded",
             FilterField::Trashed => "Trashed",
             FilterField::Sort => "Sort",
         }
@@ -680,6 +696,7 @@ impl FilterField {
             FilterField::Continued => 'c',
             FilterField::SubAgents => 'u',
             FilterField::LiveOnly => 'l',
+            FilterField::Superseded => 'p',
             FilterField::Trashed => 'h',
             FilterField::Sort => 'r',
         }
@@ -704,6 +721,7 @@ impl FilterField {
             FilterField::Continued => "Include continued sessions (also called rollover sessions), which are continuations from a previous session.",
             FilterField::SubAgents => "Include sub-agent sessions (child sessions spawned by the agent tool).",
             FilterField::LiveOnly => "Only show sessions that are currently live (have an active agent process).",
+            FilterField::Superseded => "Choose whether to show sessions conservatively identified as complete prefixes of direct forks.",
             FilterField::Trashed => "Choose whether to search normal sessions, trashed sessions, or both.",
             FilterField::Sort => "Sort results by relevance to the search query or by modification time.",
         }
@@ -732,6 +750,7 @@ impl FilterField {
             FilterField::Continued => on_off(state.include_continued),
             FilterField::SubAgents => on_off(state.include_sub_agents),
             FilterField::LiveOnly => on_off(state.live_only),
+            FilterField::Superseded => state.superseded.label().to_owned(),
             FilterField::Trashed => state.trashed.label().to_owned(),
             FilterField::Sort => match state.sort {
                 SortMode::Relevance => "relevance".to_owned(),
@@ -859,7 +878,7 @@ mod tests {
     use super::{
         display_rows_area, field_rows_area, DisplayField, FilterField, FilterModalState, FilterSide,
     };
-    use crate::index::{Scope, SearchFilters, SortMode};
+    use crate::index::{Scope, SearchFilters, SortMode, SupersededFilter};
     use crate::parse::Agent;
     use crate::settings::DisplayOptions;
     use crate::tui::theme::Theme;
@@ -983,6 +1002,28 @@ mod tests {
         let update = state.build_update(&scope).unwrap();
 
         assert_eq!(update.filters.session_id.as_deref(), Some("session-123"));
+    }
+
+    #[test]
+    fn superseded_filter_cycles_from_no_to_yes_and_is_preserved() {
+        let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
+        let mut state = FilterModalState::new(
+            &scope,
+            &SearchFilters::default(),
+            SortMode::Time,
+            DisplayOptions::default(),
+        );
+        assert!(state.selected.set(&FilterField::Superseded));
+
+        state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                &scope,
+            )
+            .unwrap();
+
+        let update = state.build_update(&scope).unwrap();
+        assert_eq!(update.filters.superseded, SupersededFilter::Yes);
     }
 
     #[test]

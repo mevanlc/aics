@@ -1900,6 +1900,7 @@ mod tests {
             content: String::new(),
             cells,
             session_info: None,
+            lineage: Default::default(),
         }
     }
 
@@ -2438,6 +2439,7 @@ mod tests {
             content: "**alpha**\n\n- beta".to_owned(),
             cells: Vec::new(),
             session_info: None,
+            lineage: Default::default(),
         };
 
         let text = render_session_text(&session, &theme, Some("alpha"));
@@ -2500,6 +2502,7 @@ mod tests {
             content: "# Topic\n\nBody".to_owned(),
             cells: Vec::new(),
             session_info: None,
+            lineage: Default::default(),
         };
 
         let document = render_session_document(&session, &theme, None);
@@ -2546,6 +2549,7 @@ mod tests {
             content: body.to_owned(),
             cells: Vec::new(),
             session_info: None,
+            lineage: Default::default(),
         };
 
         let doc = render_session_document(&session, &theme, None);
@@ -2702,6 +2706,7 @@ mod tests {
             content: "alpha".to_owned(),
             cells: Vec::new(),
             session_info: None,
+            lineage: Default::default(),
         };
         let text = render_composite_text(
             Some(&session),

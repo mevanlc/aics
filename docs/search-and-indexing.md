@@ -26,6 +26,13 @@ index state. Unchanged files are skipped, new and changed files are parsed and
 indexed, and records for deleted files are removed. Malformed or unrecognized
 session data is skipped rather than crashing the scan.
 
+Fork lineage and stable semantic event IDs are cached in the same state. AICS
+groups forks by their declared parent session ID, then checks only those direct
+parent/child candidates for strict event-set coverage. This avoids all-pairs
+transcript comparison. An ordinary search reads the cached `superseded_by`
+property; when a changed or deleted fork alters a parent's status, only that
+parent is refreshed in addition to the changed files.
+
 Use `--rebuild-index` to discard and rebuild the current profile's index before
 searching. Use `--delete-index` to delete it and exit.
 
@@ -68,8 +75,8 @@ an exact-phrase query with a 5x boost. Time sort orders matches by modification
 time. Relevance sort starts with Tantivy relevance, applies an AICS recency
 boost, and uses timestamps as tie-breakers.
 
-Scope, agent, branch, date, line-count, derivation, sub-agent, live, and trash
-filters can exclude otherwise matching sessions. Snippets prefer
+Scope, agent, branch, date, line-count, derivation, sub-agent, live, superseded,
+and trash filters can exclude otherwise matching sessions. Snippets prefer
 Tantivy-selected fragments and fall back to session text when no fragment is
 available.
 

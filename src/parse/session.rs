@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
     Claude,
@@ -381,12 +381,40 @@ pub struct Session {
     /// Rendered as a header block above the transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_info: Option<SessionInfo>,
+    /// Stable source-format evidence used to identify direct fork supersession.
+    #[serde(default, skip_serializing_if = "SessionLineage::is_empty")]
+    pub lineage: SessionLineage,
 }
 
 impl Session {
     pub fn has_resume_preview(&self) -> bool {
         !self.first_user_msg_content.trim().is_empty()
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionLineage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub semantic_event_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_event_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub own_semantic_event_count: usize,
+}
+
+impl SessionLineage {
+    pub fn is_empty(&self) -> bool {
+        self.forked_from_session_id.is_none()
+            && self.semantic_event_ids.is_empty()
+            && self.inherited_event_ids.is_empty()
+            && self.own_semantic_event_count == 0
+    }
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 pub fn is_project_docs_autodump(role: MessageRole, content: &str) -> bool {

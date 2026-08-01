@@ -11,7 +11,7 @@ pub use session::{
     is_contextual_user_message_content, is_project_docs_autodump, is_skill_text_injection,
     normalize_session_path, strip_project_docs_autodump_preamble, Agent, DerivationType,
     ExecStatus, MessageRole, PatchFile, PatchOp, PlanItem, PlanItemStatus, RuntimeMetrics, Session,
-    SessionCell, SessionInfo, SessionMessage, ToolStatus,
+    SessionCell, SessionInfo, SessionLineage, SessionMessage, ToolStatus,
 };
 
 use anyhow::Result;

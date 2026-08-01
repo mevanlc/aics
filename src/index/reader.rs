@@ -49,6 +49,25 @@ pub enum TrashFilter {
     Both,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SupersededFilter {
+    #[default]
+    No,
+    Yes,
+    Both,
+}
+
+impl SupersededFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::No => "No",
+            Self::Yes => "Yes",
+            Self::Both => "Both",
+        }
+    }
+}
+
 impl TrashFilter {
     pub fn label(self) -> &'static str {
         match self {
@@ -85,6 +104,8 @@ pub struct SearchFilters {
     pub live_only: bool,
     #[serde(default)]
     pub trashed: TrashFilter,
+    #[serde(default)]
+    pub superseded: SupersededFilter,
 }
 
 impl Default for SearchFilters {
@@ -102,6 +123,7 @@ impl Default for SearchFilters {
             include_sub_agents: false,
             live_only: false,
             trashed: TrashFilter::No,
+            superseded: SupersededFilter::No,
         }
     }
 }
@@ -132,6 +154,7 @@ impl SearchFilters {
             + usize::from(self.include_sub_agents)
             + usize::from(self.live_only)
             + usize::from(self.trashed != TrashFilter::No)
+            + usize::from(self.superseded != SupersededFilter::No)
     }
 
     fn allows_derivation(&self, derivation: DerivationType) -> bool {
@@ -650,6 +673,12 @@ fn matches_filters(filters: &SearchFilters, session: &StoredSession, is_live: bo
         TrashFilter::No | TrashFilter::Yes | TrashFilter::Both => {}
     }
 
+    match filters.superseded {
+        SupersededFilter::No if session.superseded_by.is_some() => return false,
+        SupersededFilter::Yes if session.superseded_by.is_none() => return false,
+        SupersededFilter::No | SupersededFilter::Yes | SupersededFilter::Both => {}
+    }
+
     true
 }
 
@@ -809,6 +838,7 @@ mod tests {
             session_info: None,
             trashed: false,
             original_path: None,
+            superseded_by: None,
         }
     }
 

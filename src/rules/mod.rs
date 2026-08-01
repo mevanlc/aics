@@ -1436,6 +1436,7 @@ mod tests {
             content: String::new(),
             cells,
             session_info: None,
+            lineage: Default::default(),
         }
     }
 

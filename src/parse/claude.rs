@@ -13,6 +13,7 @@ use super::session::{
     first_user_message, infer_derivation_type, last_message_fields, latest_timestamp,
     metadata_created, metadata_modified, modified_ts, nonempty_trimmed, push_tool_message,
     push_unique_chunk, push_unique_message, Agent, MessageRole, Session, SessionInfo,
+    SessionLineage,
 };
 use super::tool_format;
 
@@ -44,6 +45,10 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
     let mut content_chunks = Vec::new();
     let mut summary_chunks = Vec::new();
     let mut exit_command_uuids = HashSet::new();
+    let mut forked_from_session_id = None::<String>;
+    let mut semantic_event_ids = HashSet::new();
+    let mut inherited_event_ids = HashSet::new();
+    let mut own_semantic_event_count = 0usize;
 
     for line in reader.lines() {
         let line = match line {
@@ -89,6 +94,10 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             }
         }
         branch = branch.or_else(|| string_field(&value, "gitBranch"));
+        if let Some(forked_from) = value.get("forkedFrom") {
+            forked_from_session_id =
+                forked_from_session_id.or_else(|| string_field(forked_from, "sessionId"));
+        }
 
         if value
             .get("isSidechain")
@@ -118,9 +127,11 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             continue;
         }
 
+        let mut contributed = false;
         match entry_type {
             "system" if is_away_summary(&value) => {
                 if let Some(summary) = extract_claude_summary_text(&value) {
+                    contributed = true;
                     push_unique_chunk(&mut summary_chunks, summary.clone());
                     push_unique_chunk(&mut content_chunks, summary);
                 }
@@ -149,6 +160,8 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
 
                 let blocks =
                     extract_message_blocks(message.get("content"), tool_use_result, is_meta);
+
+                contributed = !blocks.is_empty();
 
                 for block in blocks {
                     match block {
@@ -182,6 +195,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             }
             "summary" => {
                 if let Some(summary) = extract_claude_summary_text(&value) {
+                    contributed = true;
                     push_unique_chunk(&mut summary_chunks, summary.clone());
                     push_unique_chunk(&mut content_chunks, summary);
                 }
@@ -192,6 +206,19 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             }
             "file-history-snapshot" => {}
             _ => {}
+        }
+
+        if contributed {
+            if let Some(original_uuid) = value
+                .get("forkedFrom")
+                .and_then(|forked_from| forked_from.get("messageUuid"))
+                .and_then(Value::as_str)
+            {
+                inherited_event_ids.insert(original_uuid.to_owned());
+            } else if let Some(uuid) = value.get("uuid").and_then(Value::as_str) {
+                semantic_event_ids.insert(uuid.to_owned());
+                own_semantic_event_count += 1;
+            }
         }
     }
 
@@ -222,6 +249,10 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
         model: Some(model),
         ..SessionInfo::default()
     });
+    let mut semantic_event_ids = semantic_event_ids.into_iter().collect::<Vec<_>>();
+    semantic_event_ids.sort_unstable();
+    let mut inherited_event_ids = inherited_event_ids.into_iter().collect::<Vec<_>>();
+    inherited_event_ids.sort_unstable();
 
     Ok(Some(Session {
         session_id,
@@ -246,6 +277,12 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
         messages,
         cells,
         session_info,
+        lineage: SessionLineage {
+            forked_from_session_id,
+            semantic_event_ids,
+            inherited_event_ids,
+            own_semantic_event_count,
+        },
     }))
 }
 
@@ -721,5 +758,28 @@ mod tests {
         let info = session.session_info.expect("session_info populated");
 
         assert_eq!(info.model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn parser_captures_claude_fork_lineage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fork.jsonl");
+        let body = concat!(
+            "{\"type\":\"user\",\"sessionId\":\"child\",\"uuid\":\"copied-new\",\"forkedFrom\":{\"sessionId\":\"parent\",\"messageUuid\":\"parent-user\"},\"message\":{\"role\":\"user\",\"content\":\"copied\"}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"child\",\"uuid\":\"child-reply\",\"message\":{\"role\":\"assistant\",\"content\":\"continued\"}}\n",
+        );
+        std::fs::write(&path, body).expect("write fixture");
+
+        let session = parse_claude_session_file(&path)
+            .expect("parse")
+            .expect("session");
+
+        assert_eq!(
+            session.lineage.forked_from_session_id.as_deref(),
+            Some("parent")
+        );
+        assert_eq!(session.lineage.semantic_event_ids, ["child-reply"]);
+        assert_eq!(session.lineage.inherited_event_ids, ["parent-user"]);
+        assert_eq!(session.lineage.own_semantic_event_count, 1);
     }
 }

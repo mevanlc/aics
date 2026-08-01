@@ -74,6 +74,7 @@ indexed content.
 | `--no-continued` | Alias for `--no-rollover` |
 | `--sub-agent` | Include sub-agent or sidechain sessions |
 | `--live` | Include only sessions that currently appear live |
+| `--superseded MODE` | Select `no`, `yes`, or `both`; default: `no` |
 | `--trashed MODE` | Select `no`, `yes`, or `both` trashed-session modes; default: `no` |
 
 `--after` and `--before` accept RFC 3339 timestamps or `YYYY-MM-DD`. A bare date
@@ -81,6 +82,14 @@ uses the local timezone: `--after` begins at the start of that day and
 `--before` ends at 23:59:59.
 
 Sub-agent sessions are excluded unless `--sub-agent` is present.
+
+A superseded session is a direct fork source whose stable semantic event IDs are
+fully present in a fork that also continued beyond it. Detection requires the
+source format's explicit fork lineage, so unrelated sessions with similar text
+are never classified by transcript comparison. The default `no` hides these
+abandoned prefixes; use `--superseded yes` to review only them or
+`--superseded both` to restore the unfiltered session list. JSON results expose
+the keeper's session ID as `session.superseded_by`.
 
 ## Sorting and output
 
@@ -194,7 +203,8 @@ top of an exported file — is not part of the transcript and is never hidden.
 
 `--preview-rules` opens a review TUI unless combined with `--json`.
 `--preview-rules` and `--apply-rules` conflict. Explicit preview/apply modes do
-not accept `QUERY` or `--live` and always evaluate every registered rule.
+not accept `QUERY`, `--live`, or `--superseded` and always evaluate every
+registered rule.
 `--no-apply-rules` conflicts with explicit preview/apply modes and with
 `--rules PATH`.
 

@@ -13,8 +13,8 @@ use ratatui::style::Color;
 
 use aics::export::write_session_markdown;
 use aics::index::{
-    IndexManager, Scope, SearchFilters, SearchHit, SearchRequest, SortMode, SyncOutcome,
-    SyncProgress, TrashFilter,
+    IndexManager, Scope, SearchFilters, SearchHit, SearchRequest, SortMode, SupersededFilter,
+    SyncOutcome, SyncProgress, TrashFilter,
 };
 use aics::live::LiveSessionTracker;
 use aics::logging::{LoggingHandle, LoggingMode};
@@ -125,6 +125,12 @@ struct Cli {
     )]
     trashed: Option<CliTrashFilter>,
     #[arg(
+        long = "superseded",
+        value_enum,
+        help = "Search sessions superseded by a direct fork: no, yes, or both"
+    )]
+    superseded: Option<CliSupersededFilter>,
+    #[arg(
         long = "json",
         help = "Print JSONL hits or rule records to stdout instead of launching the interactive TUI"
     )]
@@ -233,6 +239,13 @@ enum CliTrashFilter {
     Both,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliSupersededFilter {
+    No,
+    Yes,
+    Both,
+}
+
 /// The six transcript parts the filter modal can toggle. Each name is the
 /// matching `display_options` settings key with `hide_` stripped, so what is
 /// typed here is greppable in `settings.json`.
@@ -285,6 +298,16 @@ impl From<CliTrashFilter> for TrashFilter {
             CliTrashFilter::No => TrashFilter::No,
             CliTrashFilter::Yes => TrashFilter::Yes,
             CliTrashFilter::Both => TrashFilter::Both,
+        }
+    }
+}
+
+impl From<CliSupersededFilter> for SupersededFilter {
+    fn from(value: CliSupersededFilter) -> Self {
+        match value {
+            CliSupersededFilter::No => SupersededFilter::No,
+            CliSupersededFilter::Yes => SupersededFilter::Yes,
+            CliSupersededFilter::Both => SupersededFilter::Both,
         }
     }
 }
@@ -589,6 +612,9 @@ fn validate_terminal_mode(cli: &Cli) -> Result<()> {
     if rules_mode(cli).is_some() && cli.live {
         bail!("rules mode does not support --live yet");
     }
+    if rules_mode(cli).is_some() && cli.superseded.is_some() {
+        bail!("rules mode does not support --superseded yet");
+    }
 
     if !cli.delete_index
         && !cli.json
@@ -732,6 +758,7 @@ fn build_request(cli: &Cli) -> Result<SearchRequest> {
             include_sub_agents: cli.sub_agent,
             live_only: cli.live,
             trashed: cli.trashed.unwrap_or(CliTrashFilter::No).into(),
+            superseded: cli.superseded.unwrap_or(CliSupersededFilter::No).into(),
         },
     })
 }
@@ -792,6 +819,9 @@ fn apply_default_filter_to_request(
     }
     if cli.trashed.is_none() {
         request.filters.trashed = default_filter.filters.trashed;
+    }
+    if cli.superseded.is_none() {
+        request.filters.superseded = default_filter.filters.superseded;
     }
 }
 
@@ -1131,7 +1161,7 @@ mod tests {
         parse_after_date, parse_before_date, parse_dir_arg, render_palettes, rules_mode,
         scope_for_current_dir, validate_terminal_mode, Cli, CliProgress, DisplayOptions,
     };
-    use aics::index::{Scope, SearchFilters, SortMode, TrashFilter};
+    use aics::index::{Scope, SearchFilters, SortMode, SupersededFilter, TrashFilter};
     use aics::parse::Agent;
     use aics::rules::RulesMode;
     use aics::settings::{DefaultFilter, DefaultFilterScope};
@@ -1184,6 +1214,26 @@ mod tests {
         assert_eq!(request.filters.session_id.as_deref(), Some("session-123"));
     }
 
+    #[test]
+    fn parses_superseded_filter() {
+        let cli = Cli::parse_from(["aics", "--superseded", "no", "deploy"]);
+
+        let request = build_request(&cli).unwrap();
+
+        assert_eq!(request.filters.superseded, SupersededFilter::No);
+    }
+
+    #[test]
+    fn rejects_superseded_filter_in_rules_mode() {
+        let cli = Cli::parse_from(["aics", "--preview-rules", "--superseded", "yes"]);
+
+        let error = validate_terminal_mode(&cli).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("rules mode does not support --superseded yet"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn current_dir_scope_includes_valid_logical_pwd_and_symlink_target() {
@@ -1231,6 +1281,7 @@ mod tests {
 
         assert_eq!(request.query, "deploy");
         assert_eq!(request.sort, SortMode::Time);
+        assert_eq!(request.filters.superseded, SupersededFilter::No);
     }
 
     #[test]
@@ -1256,6 +1307,7 @@ mod tests {
                 include_trimmed: false,
                 include_sub_agents: true,
                 trashed: TrashFilter::Both,
+                superseded: SupersededFilter::No,
                 ..SearchFilters::default()
             },
         };
@@ -1269,6 +1321,7 @@ mod tests {
         assert!(!request.filters.include_trimmed);
         assert!(request.filters.include_sub_agents);
         assert_eq!(request.filters.trashed, TrashFilter::Both);
+        assert_eq!(request.filters.superseded, SupersededFilter::No);
     }
 
     #[test]

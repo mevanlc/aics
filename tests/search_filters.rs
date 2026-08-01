@@ -1,9 +1,10 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use aics::index::{
     IndexManager, IndexPaths, Scope, SearchEngine, SearchFilters, SearchRequest, SortMode,
-    TrashFilter,
+    SupersededFilter, TrashFilter,
 };
 use aics::live::LiveSessionTracker;
 use aics::parse::{Agent, DerivationType};
@@ -298,6 +299,125 @@ fn time_sort_keeps_query_results_in_modified_order() -> Result<()> {
     for pair in hits.windows(2) {
         assert!(pair[0].session.modified_ts >= pair[1].session.modified_ts);
     }
+    Ok(())
+}
+
+#[test]
+fn superseded_filter_tracks_direct_codex_forks_across_incremental_sync() -> Result<()> {
+    let temp = TempDir::new()?;
+    let sessions = temp.path().join(".codex/sessions/2026/08/01");
+    fs::create_dir_all(&sessions)?;
+    let parent = sessions.join("parent.jsonl");
+    let child = sessions.join("child.jsonl");
+    fs::write(
+        &parent,
+        concat!(
+            "{\"timestamp\":\"2026-08-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+        ),
+    )?;
+    fs::write(
+        &child,
+        concat!(
+            "{\"timestamp\":\"2026-08-01T10:01:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"forked_from_id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:01:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-2\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"continue here\"}]}}\n",
+        ),
+    )?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        trash: None,
+    };
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+
+    let search = |superseded| -> Result<Vec<_>> {
+        manager.open_search_engine()?.search(&SearchRequest {
+            query: String::new(),
+            scope: Scope::Global,
+            limit: 10,
+            sort: SortMode::Time,
+            filters: SearchFilters {
+                superseded,
+                ..SearchFilters::default()
+            },
+        })
+    };
+
+    let all = search(SupersededFilter::Both)?;
+    assert_eq!(all.len(), 2);
+    let current = search(SupersededFilter::No)?;
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].session.session_id, "child");
+    let superseded = search(SupersededFilter::Yes)?;
+    assert_eq!(superseded.len(), 1);
+    assert_eq!(superseded[0].session.session_id, "parent");
+    assert_eq!(
+        superseded[0].session.superseded_by.as_deref(),
+        Some("child")
+    );
+    assert_eq!(
+        serde_json::to_value(&superseded[0])?
+            .pointer("/session/superseded_by")
+            .and_then(serde_json::Value::as_str),
+        Some("child")
+    );
+
+    fs::OpenOptions::new().append(true).open(&parent)?.write_all(
+        b"{\"timestamp\":\"2026-08-01T10:02:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"parent-only\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"continued in parent\"}]}}\n",
+    )?;
+    manager.sync_with_roots(&roots, false)?;
+
+    assert_eq!(search(SupersededFilter::No)?.len(), 2);
+    assert!(search(SupersededFilter::Yes)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn superseded_filter_recognizes_claude_fork_lineage() -> Result<()> {
+    let temp = TempDir::new()?;
+    let sessions = temp.path().join(".claude/projects/-tmp-demo");
+    fs::create_dir_all(&sessions)?;
+    fs::write(
+        sessions.join("parent.jsonl"),
+        concat!(
+            "{\"type\":\"user\",\"sessionId\":\"parent\",\"uuid\":\"parent-user\",\"cwd\":\"/tmp/demo\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"parent\",\"uuid\":\"parent-reply\",\"cwd\":\"/tmp/demo\",\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}\n",
+        ),
+    )?;
+    fs::write(
+        sessions.join("child.jsonl"),
+        concat!(
+            "{\"type\":\"user\",\"sessionId\":\"child\",\"uuid\":\"copied-user\",\"cwd\":\"/tmp/demo\",\"forkedFrom\":{\"sessionId\":\"parent\",\"messageUuid\":\"parent-user\"},\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"child\",\"uuid\":\"copied-reply\",\"cwd\":\"/tmp/demo\",\"forkedFrom\":{\"sessionId\":\"parent\",\"messageUuid\":\"parent-reply\"},\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}\n",
+            "{\"type\":\"user\",\"sessionId\":\"child\",\"uuid\":\"child-user\",\"cwd\":\"/tmp/demo\",\"message\":{\"role\":\"user\",\"content\":\"continue here\"}}\n",
+        ),
+    )?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        trash: None,
+    };
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+
+    let hits = manager.open_search_engine()?.search(&SearchRequest {
+        query: String::new(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Time,
+        filters: SearchFilters {
+            superseded: SupersededFilter::Yes,
+            ..SearchFilters::default()
+        },
+    })?;
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].session.session_id, "parent");
+    assert_eq!(hits[0].session.superseded_by.as_deref(), Some("child"));
     Ok(())
 }
 

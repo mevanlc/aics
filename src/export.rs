@@ -888,6 +888,7 @@ mod tests {
             content: String::new(),
             cells: Vec::new(),
             session_info: None,
+            lineage: Default::default(),
         }
     }
 

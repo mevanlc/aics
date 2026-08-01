@@ -1661,6 +1661,7 @@ mod tests {
             content: "alpha beta gamma delta alpha\nomega alpha".to_owned(),
             cells: Vec::new(),
             session_info: None,
+            lineage: Default::default(),
         }
     }
 
@@ -1701,6 +1702,7 @@ mod tests {
                 },
             ],
             session_info: None,
+            lineage: Default::default(),
         }
     }
 
@@ -1733,6 +1735,7 @@ mod tests {
             content: "```rust\nfn alpha() {}\n```".to_owned(),
             cells: Vec::new(),
             session_info: None,
+            lineage: Default::default(),
         }
     }
 
@@ -1811,6 +1814,7 @@ mod tests {
                     .to_owned(),
             cells: Vec::new(),
             session_info: None,
+            lineage: Default::default(),
         }
     }
 
@@ -1851,6 +1855,7 @@ mod tests {
             content: "This line wraps hard in the preview and viewer.\nShort reply".to_owned(),
             cells: Vec::new(),
             session_info: None,
+            lineage: Default::default(),
         }
     }
 }
