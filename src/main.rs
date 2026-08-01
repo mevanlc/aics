@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -810,7 +811,28 @@ fn scope_from_cli(cli: &Cli) -> Result<(Scope, Option<String>)> {
         return Ok((Scope::current_dir(path), branch));
     }
 
-    Ok((Scope::current_dir(env::current_dir()?), None))
+    let physical_cwd = env::current_dir()?;
+    Ok((
+        scope_for_current_dir(physical_cwd, env::var_os("PWD")),
+        None,
+    ))
+}
+
+fn scope_for_current_dir(physical_cwd: PathBuf, logical_pwd: Option<OsString>) -> Scope {
+    let logical_cwd = logical_pwd
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .filter(|path| {
+            let Ok(logical_canonical) = path.canonicalize() else {
+                return false;
+            };
+            let Ok(physical_canonical) = physical_cwd.canonicalize() else {
+                return false;
+            };
+            logical_canonical == physical_canonical
+        });
+
+    Scope::current_dir(logical_cwd.unwrap_or(physical_cwd))
 }
 
 fn parse_agent_arg(raw: &str) -> Option<Agent> {
@@ -1107,7 +1129,7 @@ mod tests {
     use super::{
         apply_default_filter_to_request, build_request, hidden_from, palette_pairs,
         parse_after_date, parse_before_date, parse_dir_arg, render_palettes, rules_mode,
-        validate_terminal_mode, Cli, CliProgress, DisplayOptions,
+        scope_for_current_dir, validate_terminal_mode, Cli, CliProgress, DisplayOptions,
     };
     use aics::index::{Scope, SearchFilters, SortMode, TrashFilter};
     use aics::parse::Agent;
@@ -1160,6 +1182,45 @@ mod tests {
 
         assert_eq!(request.query, "deploy");
         assert_eq!(request.filters.session_id.as_deref(), Some("session-123"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn current_dir_scope_includes_valid_logical_pwd_and_symlink_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let physical_cwd = temp.path().join("physical");
+        let logical_cwd = temp.path().join("logical");
+        std::fs::create_dir(&physical_cwd).unwrap();
+        std::os::unix::fs::symlink(&physical_cwd, &logical_cwd).unwrap();
+
+        let scope = scope_for_current_dir(
+            physical_cwd.canonicalize().unwrap(),
+            Some(logical_cwd.clone().into_os_string()),
+        );
+
+        match scope {
+            Scope::CurrentDir(original, canonical) => {
+                assert_eq!(original, logical_cwd);
+                assert_eq!(canonical, Some(physical_cwd.canonicalize().unwrap()));
+            }
+            Scope::Global => panic!("expected current-directory scope"),
+        }
+    }
+
+    #[test]
+    fn current_dir_scope_ignores_stale_logical_pwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let physical_cwd = temp.path().join("current");
+        let stale_pwd = temp.path().join("stale");
+        std::fs::create_dir(&physical_cwd).unwrap();
+        std::fs::create_dir(&stale_pwd).unwrap();
+
+        let scope = scope_for_current_dir(physical_cwd.clone(), Some(stale_pwd.into_os_string()));
+
+        match scope {
+            Scope::CurrentDir(original, _) => assert_eq!(original, physical_cwd),
+            Scope::Global => panic!("expected current-directory scope"),
+        }
     }
 
     #[test]
