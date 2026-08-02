@@ -402,6 +402,16 @@ pub struct SessionLineage {
     pub inherited_event_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub own_semantic_event_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assistant_or_tool_event_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trailing_aborted_turn: Option<TrailingAbortedTurn>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrailingAbortedTurn {
+    pub user_event_id: String,
+    pub abort_event_id: String,
 }
 
 impl SessionLineage {
@@ -410,6 +420,8 @@ impl SessionLineage {
             && self.semantic_event_ids.is_empty()
             && self.inherited_event_ids.is_empty()
             && self.own_semantic_event_count == 0
+            && self.assistant_or_tool_event_ids.is_empty()
+            && self.trailing_aborted_turn.is_none()
     }
 }
 

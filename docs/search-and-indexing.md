@@ -33,6 +33,12 @@ transcript comparison. An ordinary search reads the cached `superseded_by`
 property; when a changed or deleted fork alters a parent's status, only that
 parent is refreshed in addition to the changed files.
 
+Codex may record a final user message and a synthetic `<turn_aborted>` marker
+in the parent while creating a fork, without copying either record into the
+child. AICS ignores that narrow trailing pair when the child contains subsequent
+assistant or tool activity. Other unmatched parent events still prevent
+supersession.
+
 Use `--rebuild-index` to discard and rebuild the current profile's index before
 searching. Use `--delete-index` to delete it and exit.
 

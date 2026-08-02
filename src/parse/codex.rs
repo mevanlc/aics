@@ -15,7 +15,7 @@ use super::session::{
     is_contextual_user_message_content, last_message_fields, latest_timestamp, metadata_created,
     metadata_modified, modified_ts, push_tool_message, push_unique_chunk, push_unique_message,
     Agent, ExecStatus, MessageRole, PatchFile, PatchOp, PlanItem, PlanItemStatus, RuntimeMetrics,
-    Session, SessionCell, SessionInfo, SessionLineage, ToolStatus,
+    Session, SessionCell, SessionInfo, SessionLineage, ToolStatus, TrailingAbortedTurn,
 };
 use super::tool_format;
 
@@ -38,6 +38,8 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
     let mut cell_builder = CodexCellBuilder::default();
     let mut forked_from_session_id = None::<String>;
     let mut semantic_event_ids = HashSet::new();
+    let mut assistant_or_tool_event_ids = Vec::new();
+    let mut semantic_tail = Vec::new();
 
     for line in reader.lines() {
         let line = match line {
@@ -97,9 +99,12 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
             }
             Some("response_item") => {
                 if let Some(payload) = value.get("payload") {
-                    if let Some(identity) = response_item_identity(payload) {
-                        semantic_event_ids.insert(identity);
-                    }
+                    capture_lineage_event(
+                        payload,
+                        &mut semantic_event_ids,
+                        &mut assistant_or_tool_event_ids,
+                        &mut semantic_tail,
+                    );
                     handle_response_item(
                         payload,
                         top_level_timestamp,
@@ -129,9 +134,12 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
             | Some("function_call_output")
             | Some("custom_tool_call")
             | Some("custom_tool_call_output") => {
-                if let Some(identity) = response_item_identity(&value) {
-                    semantic_event_ids.insert(identity);
-                }
+                capture_lineage_event(
+                    &value,
+                    &mut semantic_event_ids,
+                    &mut assistant_or_tool_event_ids,
+                    &mut semantic_tail,
+                );
                 handle_response_item(
                     &value,
                     top_level_timestamp,
@@ -182,6 +190,8 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
     cells.extend(cell_builder.finish());
     let mut semantic_event_ids = semantic_event_ids.into_iter().collect::<Vec<_>>();
     semantic_event_ids.sort_unstable();
+    assistant_or_tool_event_ids.sort_unstable();
+    let trailing_aborted_turn = extract_trailing_aborted_turn(&semantic_tail);
 
     Ok(Some(Session {
         session_id,
@@ -209,6 +219,8 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
         lineage: SessionLineage {
             forked_from_session_id,
             semantic_event_ids,
+            assistant_or_tool_event_ids,
+            trailing_aborted_turn,
             ..SessionLineage::default()
         },
     }))
@@ -225,6 +237,83 @@ fn response_item_identity(payload: &Value) -> Option<String> {
         _ => return None,
     };
     string_field(payload, id_field).map(|id| format!("{item_type}:{id}"))
+}
+
+#[derive(Debug, Clone)]
+enum CodexSemanticTailEvent {
+    User(String),
+    TurnAborted(String),
+    Other,
+}
+
+fn capture_lineage_event(
+    payload: &Value,
+    semantic_event_ids: &mut HashSet<String>,
+    assistant_or_tool_event_ids: &mut Vec<String>,
+    semantic_tail: &mut Vec<CodexSemanticTailEvent>,
+) {
+    let Some(event_id) = response_item_identity(payload) else {
+        return;
+    };
+    if !semantic_event_ids.insert(event_id.clone()) {
+        return;
+    }
+
+    let marker = match payload.get("type").and_then(Value::as_str) {
+        Some("message") if payload.get("role").and_then(Value::as_str) == Some("user") => {
+            match extract_message_text(payload.get("content")) {
+                Some(text) if !text.trim().is_empty() => CodexSemanticTailEvent::User(event_id),
+                _ => CodexSemanticTailEvent::Other,
+            }
+        }
+        Some("message") if is_turn_aborted_message(payload) => {
+            CodexSemanticTailEvent::TurnAborted(event_id)
+        }
+        Some("message") if payload.get("role").and_then(Value::as_str) == Some("assistant") => {
+            assistant_or_tool_event_ids.push(event_id);
+            CodexSemanticTailEvent::Other
+        }
+        Some(
+            "reasoning"
+            | "function_call"
+            | "function_call_output"
+            | "custom_tool_call"
+            | "custom_tool_call_output",
+        ) => {
+            assistant_or_tool_event_ids.push(event_id);
+            CodexSemanticTailEvent::Other
+        }
+        _ => CodexSemanticTailEvent::Other,
+    };
+
+    if semantic_tail.len() == 2 {
+        semantic_tail.remove(0);
+    }
+    semantic_tail.push(marker);
+}
+
+fn is_turn_aborted_message(payload: &Value) -> bool {
+    if payload.get("role").and_then(Value::as_str) != Some("developer") {
+        return false;
+    }
+    extract_message_text(payload.get("content")).is_some_and(|text| {
+        let text = text.trim();
+        text.starts_with("<turn_aborted>") && text.ends_with("</turn_aborted>")
+    })
+}
+
+fn extract_trailing_aborted_turn(
+    semantic_tail: &[CodexSemanticTailEvent],
+) -> Option<TrailingAbortedTurn> {
+    let [CodexSemanticTailEvent::User(user), CodexSemanticTailEvent::TurnAborted(abort_event_id)] =
+        semantic_tail
+    else {
+        return None;
+    };
+    Some(TrailingAbortedTurn {
+        user_event_id: user.clone(),
+        abort_event_id: abort_event_id.clone(),
+    })
 }
 
 fn update_session_info_from_meta(info: &mut SessionInfo, payload: &Value) {
@@ -2043,6 +2132,36 @@ mod cell_tests {
         assert_eq!(
             session.lineage.semantic_event_ids,
             ["function_call:call-1", "message:item-1"]
+        );
+    }
+
+    #[test]
+    fn parser_captures_trailing_aborted_turn_lineage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("aborted.jsonl");
+        let body = concat!(
+            "{\"timestamp\":\"2026-08-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\",\"cwd\":\"/tmp\"}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"base-user\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"base-assistant\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:01:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"retry-user\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"continue here\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:01:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"abort\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"<turn_aborted>\\nThe previous turn was interrupted on purpose.\\n</turn_aborted>\"}]}}\n",
+        );
+        std::fs::write(&path, body).expect("write fixture");
+
+        let session = parse_codex_session_file(&path)
+            .expect("parse")
+            .expect("session");
+        let aborted = session
+            .lineage
+            .trailing_aborted_turn
+            .as_ref()
+            .expect("trailing aborted turn");
+
+        assert_eq!(aborted.user_event_id, "message:retry-user");
+        assert_eq!(aborted.abort_event_id, "message:abort");
+        assert_eq!(
+            session.lineage.assistant_or_tool_event_ids,
+            ["message:base-assistant"]
         );
     }
 }

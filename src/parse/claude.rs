@@ -282,6 +282,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             semantic_event_ids,
             inherited_event_ids,
             own_semantic_event_count,
+            ..SessionLineage::default()
         },
     }))
 }

@@ -577,7 +577,7 @@ fn searchable_content(session: &Session) -> String {
 
 /// Bump when stored fields or searchable-content semantics change so old state
 /// files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 7;
+const INDEX_FORMAT_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {
@@ -708,13 +708,7 @@ fn apply_supersession(state: &mut IndexState) {
 
 fn lineage_supersedes(agent: Agent, parent: &SessionLineage, child: &SessionLineage) -> bool {
     match agent {
-        Agent::Codex => {
-            child.semantic_event_ids.len() > parent.semantic_event_ids.len()
-                && parent
-                    .semantic_event_ids
-                    .iter()
-                    .all(|id| child.semantic_event_ids.binary_search(id).is_ok())
-        }
+        Agent::Codex => codex_lineage_supersedes(parent, child),
         Agent::Claude => {
             child.own_semantic_event_count > 0
                 && parent
@@ -723,6 +717,47 @@ fn lineage_supersedes(agent: Agent, parent: &SessionLineage, child: &SessionLine
                     .all(|id| child.inherited_event_ids.binary_search(id).is_ok())
         }
     }
+}
+
+fn codex_lineage_supersedes(parent: &SessionLineage, child: &SessionLineage) -> bool {
+    let missing_parent_events = parent
+        .semantic_event_ids
+        .iter()
+        .filter(|id| child.semantic_event_ids.binary_search(id).is_err())
+        .collect::<Vec<_>>();
+
+    if missing_parent_events.is_empty() {
+        return child.semantic_event_ids.len() > parent.semantic_event_ids.len();
+    }
+
+    let Some(aborted) = parent.trailing_aborted_turn.as_ref() else {
+        return false;
+    };
+    if missing_parent_events.len() != 2
+        || !missing_parent_events
+            .iter()
+            .all(|id| **id == aborted.user_event_id || **id == aborted.abort_event_id)
+    {
+        return false;
+    }
+
+    let continued_in_child = child
+        .assistant_or_tool_event_ids
+        .iter()
+        .any(|id| is_child_only_event(parent, child, id));
+
+    continued_in_child
+}
+
+fn is_child_only_event(parent: &SessionLineage, child: &SessionLineage, event_id: &str) -> bool {
+    child
+        .semantic_event_ids
+        .binary_search_by(|candidate| candidate.as_str().cmp(event_id))
+        .is_ok()
+        && parent
+            .semantic_event_ids
+            .binary_search_by(|candidate| candidate.as_str().cmp(event_id))
+            .is_err()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -824,6 +859,7 @@ fn is_lock_busy_error(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse::TrailingAbortedTurn;
 
     #[test]
     fn default_cache_dir_is_home_relative_dot_cache() {
@@ -835,5 +871,54 @@ mod tests {
                 .join(".cache")
                 .join("aics")
         );
+    }
+
+    #[test]
+    fn codex_supersession_accepts_only_trailing_aborted_parent_turns() {
+        let parent = SessionLineage {
+            semantic_event_ids: sorted_ids(&[
+                "message:abort-parent",
+                "message:assistant-1",
+                "message:retry-parent",
+                "message:user-1",
+            ]),
+            trailing_aborted_turn: Some(TrailingAbortedTurn {
+                user_event_id: "message:retry-parent".to_owned(),
+                abort_event_id: "message:abort-parent".to_owned(),
+            }),
+            ..SessionLineage::default()
+        };
+        let child = SessionLineage {
+            semantic_event_ids: sorted_ids(&[
+                "message:assistant-1",
+                "message:assistant-child",
+                "message:user-1",
+            ]),
+            assistant_or_tool_event_ids: vec!["message:assistant-child".to_owned()],
+            ..SessionLineage::default()
+        };
+
+        assert!(codex_lineage_supersedes(&parent, &child));
+
+        let mut no_continuation = child.clone();
+        no_continuation.assistant_or_tool_event_ids.clear();
+        assert!(!codex_lineage_supersedes(&parent, &no_continuation));
+
+        let mut extra_parent_event = parent.clone();
+        extra_parent_event
+            .semantic_event_ids
+            .push("message:continued-parent".to_owned());
+        extra_parent_event.semantic_event_ids.sort_unstable();
+        assert!(!codex_lineage_supersedes(&extra_parent_event, &child));
+
+        let mut not_trailing = parent;
+        not_trailing.trailing_aborted_turn = None;
+        assert!(!codex_lineage_supersedes(&not_trailing, &child));
+    }
+
+    fn sorted_ids(ids: &[&str]) -> Vec<String> {
+        let mut ids = ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
     }
 }

@@ -377,6 +377,67 @@ fn superseded_filter_tracks_direct_codex_forks_across_incremental_sync() -> Resu
 }
 
 #[test]
+fn superseded_filter_recognizes_trailing_aborted_codex_parent_turn() -> Result<()> {
+    let temp = TempDir::new()?;
+    let sessions = temp.path().join(".codex/sessions/2026/08/01");
+    fs::create_dir_all(&sessions)?;
+    fs::write(
+        sessions.join("parent.jsonl"),
+        concat!(
+            "{\"timestamp\":\"2026-08-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:01:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"retry-parent\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"continue here\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:01:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"abort-parent\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"<turn_aborted>\\nThe previous turn was interrupted on purpose.\\n</turn_aborted>\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:01:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_aborted\",\"reason\":\"interrupted\"}}\n",
+        ),
+    )?;
+    fs::write(
+        sessions.join("child.jsonl"),
+        concat!(
+            "{\"timestamp\":\"2026-08-01T10:01:05Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"forked_from_id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:01:06Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-child\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"continued\"}]}}\n",
+        ),
+    )?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        trash: None,
+    };
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+
+    let search = |superseded| -> Result<Vec<_>> {
+        manager.open_search_engine()?.search(&SearchRequest {
+            query: String::new(),
+            scope: Scope::Global,
+            limit: 10,
+            sort: SortMode::Time,
+            filters: SearchFilters {
+                superseded,
+                ..SearchFilters::default()
+            },
+        })
+    };
+
+    assert_eq!(search(SupersededFilter::Both)?.len(), 2);
+    let current = search(SupersededFilter::No)?;
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].session.session_id, "child");
+    let superseded = search(SupersededFilter::Yes)?;
+    assert_eq!(superseded.len(), 1);
+    assert_eq!(superseded[0].session.session_id, "parent");
+    assert_eq!(
+        superseded[0].session.superseded_by.as_deref(),
+        Some("child")
+    );
+    Ok(())
+}
+
+#[test]
 fn superseded_filter_recognizes_claude_fork_lineage() -> Result<()> {
     let temp = TempDir::new()?;
     let sessions = temp.path().join(".claude/projects/-tmp-demo");
