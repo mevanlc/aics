@@ -577,7 +577,7 @@ fn searchable_content(session: &Session) -> String {
 
 /// Bump when stored fields or searchable-content semantics change so old state
 /// files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 8;
+const INDEX_FORMAT_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {
@@ -733,20 +733,34 @@ fn codex_lineage_supersedes(parent: &SessionLineage, child: &SessionLineage) -> 
     let Some(aborted) = parent.trailing_aborted_turn.as_ref() else {
         return false;
     };
-    if missing_parent_events.len() != 2
-        || !missing_parent_events
-            .iter()
-            .all(|id| **id == aborted.user_event_id || **id == aborted.abort_event_id)
-    {
+    if !missing_parent_events.iter().all(|id| {
+        aborted
+            .semantic_event_ids
+            .binary_search_by(|candidate| candidate.as_str().cmp(id.as_str()))
+            .is_ok()
+    }) {
         return false;
     }
 
-    let continued_in_child = child
+    let child_has_new_activity = child
         .assistant_or_tool_event_ids
         .iter()
         .any(|id| is_child_only_event(parent, child, id));
+    if !child_has_new_activity {
+        return false;
+    }
 
-    continued_in_child
+    let dropped_only_empty_aborted_turn = !aborted.had_assistant_or_tool_activity
+        && missing_parent_events.len() == aborted.semantic_event_ids.len();
+    if dropped_only_empty_aborted_turn {
+        return true;
+    }
+
+    !aborted.user_message_line_multiset_sha256.is_empty()
+        && child.codex_user_turns.iter().any(|turn| {
+            turn.user_message_line_multiset_sha256 == aborted.user_message_line_multiset_sha256
+                && is_child_only_event(parent, child, &turn.last_assistant_or_tool_event_id)
+        })
 }
 
 fn is_child_only_event(parent: &SessionLineage, child: &SessionLineage, event_id: &str) -> bool {
@@ -859,7 +873,7 @@ fn is_lock_busy_error(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::TrailingAbortedTurn;
+    use crate::parse::{CodexUserTurn, TrailingAbortedTurn};
 
     #[test]
     fn default_cache_dir_is_home_relative_dot_cache() {
@@ -883,8 +897,9 @@ mod tests {
                 "message:user-1",
             ]),
             trailing_aborted_turn: Some(TrailingAbortedTurn {
-                user_event_id: "message:retry-parent".to_owned(),
-                abort_event_id: "message:abort-parent".to_owned(),
+                user_message_line_multiset_sha256: "retry-hash".to_owned(),
+                semantic_event_ids: sorted_ids(&["message:abort-parent", "message:retry-parent"]),
+                had_assistant_or_tool_activity: false,
             }),
             ..SessionLineage::default()
         };
@@ -914,6 +929,73 @@ mod tests {
         let mut not_trailing = parent;
         not_trailing.trailing_aborted_turn = None;
         assert!(!codex_lineage_supersedes(&not_trailing, &child));
+    }
+
+    #[test]
+    fn codex_supersession_accepts_retried_aborted_turn_with_partial_work() {
+        let parent = SessionLineage {
+            semantic_event_ids: sorted_ids(&[
+                "message:assistant-1",
+                "message:parent-ack",
+                "reasoning:parent-reasoning",
+                "custom_tool_call:parent-tool",
+                "custom_tool_call_output:parent-tool",
+            ]),
+            assistant_or_tool_event_ids: sorted_ids(&[
+                "message:assistant-1",
+                "message:parent-ack",
+                "reasoning:parent-reasoning",
+                "custom_tool_call:parent-tool",
+                "custom_tool_call_output:parent-tool",
+            ]),
+            trailing_aborted_turn: Some(TrailingAbortedTurn {
+                user_message_line_multiset_sha256: "retry-hash".to_owned(),
+                semantic_event_ids: sorted_ids(&[
+                    "message:parent-ack",
+                    "reasoning:parent-reasoning",
+                    "custom_tool_call:parent-tool",
+                    "custom_tool_call_output:parent-tool",
+                ]),
+                had_assistant_or_tool_activity: true,
+            }),
+            ..SessionLineage::default()
+        };
+        let child = SessionLineage {
+            semantic_event_ids: sorted_ids(&[
+                "message:assistant-1",
+                "message:child-finished",
+                "reasoning:child-reasoning",
+            ]),
+            assistant_or_tool_event_ids: sorted_ids(&[
+                "message:assistant-1",
+                "message:child-finished",
+                "reasoning:child-reasoning",
+            ]),
+            codex_user_turns: vec![CodexUserTurn {
+                user_message_line_multiset_sha256: "retry-hash".to_owned(),
+                last_assistant_or_tool_event_id: "message:child-finished".to_owned(),
+            }],
+            ..SessionLineage::default()
+        };
+
+        assert!(codex_lineage_supersedes(&parent, &child));
+
+        let mut different_prompt = child.clone();
+        different_prompt.codex_user_turns[0].user_message_line_multiset_sha256 =
+            "different-hash".to_owned();
+        assert!(!codex_lineage_supersedes(&parent, &different_prompt));
+
+        let mut no_new_turn_activity = child.clone();
+        no_new_turn_activity.codex_user_turns[0].last_assistant_or_tool_event_id =
+            "message:assistant-1".to_owned();
+        assert!(!codex_lineage_supersedes(&parent, &no_new_turn_activity));
+
+        let mut extra_parent_event = parent;
+        extra_parent_event
+            .semantic_event_ids
+            .push("message:other-parent-turn".to_owned());
+        extra_parent_event.semantic_event_ids.sort_unstable();
+        assert!(!codex_lineage_supersedes(&extra_parent_event, &child));
     }
 
     fn sorted_ids(ids: &[&str]) -> Vec<String> {

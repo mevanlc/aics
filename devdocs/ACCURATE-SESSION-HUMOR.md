@@ -47,13 +47,20 @@ event set and additionally requires the child to contain an event of its own.
 
 Codex can, during the fork-establishment procedure, append a final nonempty user
 message and a synthetic `<turn_aborted>` message to `P` without including either
-message in `C`. AICS therefore permits precisely one sessional set exception: if
-those are the only two parent events outside the child event set, if they are the
-final two semantic events of the parent session, and if the child contains new
-assistant, reasoning, or tool activity not established in the parent, the
-aborted pair is set aside and the parent is still designated as superseded. Any
-additional parent-only event unsets that designation, because a parent session
-that was actually continued is not merely a superseded prefix session.
+message in `C`. If that otherwise-empty aborted pair is the entire parent-only
+event difference and `C` establishes new assistant, reasoning, or tool activity,
+AICS sets the pair aside and allows supersession to proceed.
+
+Some legacy session successions are more sessionally interesting: the user and
+abort boundaries possess no stable identifiers, `P` performs a partial set of
+work before aborting, and `C` repeats the same request while establishing a
+different, successful work set. AICS admits this case only when every
+parent-only event belongs to the final aborted turn, the child's retried user
+message has the same SHA-256-fingerprinted multiset of nonempty lines (permitting
+sessional list succession without line-set mutation), and that retry contains
+assistant, reasoning, or tool activity not established in the parent. A changed
+request line or any parent-only event outside the aborted suffix decisively
+unsets the supersession designation.
 
 If several direct child sessions satisfy the supersession relation for the same
 parent session, AICS selects the superseding session by the greatest semantic

@@ -33,10 +33,15 @@ transcript comparison. An ordinary search reads the cached `superseded_by`
 property; when a changed or deleted fork alters a parent's status, only that
 parent is refreshed in addition to the changed files.
 
-Codex may record a final user message and a synthetic `<turn_aborted>` marker
-in the parent while creating a fork, without copying either record into the
-child. AICS ignores that narrow trailing pair when the child contains subsequent
-assistant or tool activity. Other unmatched parent events still prevent
+Codex may leave a final aborted turn in the parent while creating a fork. AICS
+accepts two narrow forms of this exception. It can ignore an otherwise-empty
+trailing user/`<turn_aborted>` pair when the child contains new assistant or tool
+activity. For older Codex records, where those boundary messages have no stable
+IDs and the parent may have begun working, AICS requires every unmatched parent
+event to belong to that trailing aborted turn, requires the child to retry the
+same multiset of nonempty user-message lines (allowing reordered lists or table
+rows), and requires new assistant or tool activity in that retry. An unmatched
+event outside the aborted turn or a changed retry line still prevents
 supersession.
 
 Use `--rebuild-index` to discard and rebuild the current profile's index before

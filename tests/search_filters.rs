@@ -438,6 +438,72 @@ fn superseded_filter_recognizes_trailing_aborted_codex_parent_turn() -> Result<(
 }
 
 #[test]
+fn superseded_filter_recognizes_retried_legacy_codex_aborted_turn() -> Result<()> {
+    let temp = TempDir::new()?;
+    let sessions = temp.path().join(".codex/sessions/2026/07/16");
+    fs::create_dir_all(&sessions)?;
+    fs::write(
+        sessions.join("parent.jsonl"),
+        concat!(
+            "{\"timestamp\":\"2026-07-17T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-07-17T00:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-07-17T00:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"base-assistant\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+            "{\"timestamp\":\"2026-07-17T00:01:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"replace the README keybindings\\n\\n| Up | move |\\n| Enter | select |\"}]}}\n",
+            "{\"timestamp\":\"2026-07-17T00:01:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"id\":\"parent-reasoning\",\"summary\":[]}}\n",
+            "{\"timestamp\":\"2026-07-17T00:01:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"parent-ack\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"I will update it\"}]}}\n",
+            "{\"timestamp\":\"2026-07-17T00:01:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"parent-tool\",\"name\":\"exec\",\"input\":{}}}\n",
+            "{\"timestamp\":\"2026-07-17T00:01:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"parent-tool\",\"output\":\"{}\"}}\n",
+            "{\"timestamp\":\"2026-07-17T00:01:05Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"<turn_aborted>\\ninterrupted\\n</turn_aborted>\"}]}}\n",
+        ),
+    )?;
+    fs::write(
+        sessions.join("child.jsonl"),
+        concat!(
+            "{\"timestamp\":\"2026-07-17T00:02:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"forked_from_id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-07-17T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-07-17T00:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-07-17T00:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"base-assistant\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+            "{\"timestamp\":\"2026-07-17T00:02:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"replace the README keybindings\\n\\n| Enter | select |\\n| Up | move |\"}]}}\n",
+            "{\"timestamp\":\"2026-07-17T00:02:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"id\":\"child-reasoning\",\"summary\":[]}}\n",
+            "{\"timestamp\":\"2026-07-17T00:02:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"child-finished\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"README updated\"}]}}\n",
+        ),
+    )?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        trash: None,
+    };
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+
+    let search = |superseded| -> Result<Vec<_>> {
+        manager.open_search_engine()?.search(&SearchRequest {
+            query: String::new(),
+            scope: Scope::Global,
+            limit: 10,
+            sort: SortMode::Time,
+            filters: SearchFilters {
+                superseded,
+                ..SearchFilters::default()
+            },
+        })
+    };
+
+    assert_eq!(search(SupersededFilter::Both)?.len(), 2);
+    let current = search(SupersededFilter::No)?;
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].session.session_id, "child");
+    let superseded = search(SupersededFilter::Yes)?;
+    assert_eq!(superseded.len(), 1);
+    assert_eq!(superseded[0].session.session_id, "parent");
+    assert_eq!(
+        superseded[0].session.superseded_by.as_deref(),
+        Some("child")
+    );
+    Ok(())
+}
+
+#[test]
 fn superseded_filter_recognizes_claude_fork_lineage() -> Result<()> {
     let temp = TempDir::new()?;
     let sessions = temp.path().join(".claude/projects/-tmp-demo");

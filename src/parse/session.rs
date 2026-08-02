@@ -404,14 +404,26 @@ pub struct SessionLineage {
     pub own_semantic_event_count: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assistant_or_tool_event_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub codex_user_turns: Vec<CodexUserTurn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trailing_aborted_turn: Option<TrailingAbortedTurn>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexUserTurn {
+    pub user_message_line_multiset_sha256: String,
+    pub last_assistant_or_tool_event_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrailingAbortedTurn {
-    pub user_event_id: String,
-    pub abort_event_id: String,
+    #[serde(default)]
+    pub user_message_line_multiset_sha256: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub semantic_event_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub had_assistant_or_tool_activity: bool,
 }
 
 impl SessionLineage {
@@ -421,12 +433,17 @@ impl SessionLineage {
             && self.inherited_event_ids.is_empty()
             && self.own_semantic_event_count == 0
             && self.assistant_or_tool_event_ids.is_empty()
+            && self.codex_user_turns.is_empty()
             && self.trailing_aborted_turn.is_none()
     }
 }
 
 fn is_zero(value: &usize) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub fn is_project_docs_autodump(role: MessageRole, content: &str) -> bool {

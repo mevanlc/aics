@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -9,13 +10,15 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use log::warn;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 use super::session::{
     earliest_timestamp, fallback_session_id, first_message_fields, infer_derivation_type,
     is_contextual_user_message_content, last_message_fields, latest_timestamp, metadata_created,
     metadata_modified, modified_ts, push_tool_message, push_unique_chunk, push_unique_message,
-    Agent, ExecStatus, MessageRole, PatchFile, PatchOp, PlanItem, PlanItemStatus, RuntimeMetrics,
-    Session, SessionCell, SessionInfo, SessionLineage, ToolStatus, TrailingAbortedTurn,
+    Agent, CodexUserTurn, ExecStatus, MessageRole, PatchFile, PatchOp, PlanItem, PlanItemStatus,
+    RuntimeMetrics, Session, SessionCell, SessionInfo, SessionLineage, ToolStatus,
+    TrailingAbortedTurn,
 };
 use super::tool_format;
 
@@ -37,9 +40,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
     let mut session_info = SessionInfo::default();
     let mut cell_builder = CodexCellBuilder::default();
     let mut forked_from_session_id = None::<String>;
-    let mut semantic_event_ids = HashSet::new();
-    let mut assistant_or_tool_event_ids = Vec::new();
-    let mut semantic_tail = Vec::new();
+    let mut lineage_tracker = CodexLineageTracker::default();
 
     for line in reader.lines() {
         let line = match line {
@@ -99,12 +100,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
             }
             Some("response_item") => {
                 if let Some(payload) = value.get("payload") {
-                    capture_lineage_event(
-                        payload,
-                        &mut semantic_event_ids,
-                        &mut assistant_or_tool_event_ids,
-                        &mut semantic_tail,
-                    );
+                    lineage_tracker.capture(payload);
                     handle_response_item(
                         payload,
                         top_level_timestamp,
@@ -134,12 +130,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
             | Some("function_call_output")
             | Some("custom_tool_call")
             | Some("custom_tool_call_output") => {
-                capture_lineage_event(
-                    &value,
-                    &mut semantic_event_ids,
-                    &mut assistant_or_tool_event_ids,
-                    &mut semantic_tail,
-                );
+                lineage_tracker.capture(&value);
                 handle_response_item(
                     &value,
                     top_level_timestamp,
@@ -188,10 +179,8 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
         cells.push(SessionCell::SessionInfo(info));
     }
     cells.extend(cell_builder.finish());
-    let mut semantic_event_ids = semantic_event_ids.into_iter().collect::<Vec<_>>();
-    semantic_event_ids.sort_unstable();
-    assistant_or_tool_event_ids.sort_unstable();
-    let trailing_aborted_turn = extract_trailing_aborted_turn(&semantic_tail);
+    let (semantic_event_ids, assistant_or_tool_event_ids, codex_user_turns, trailing_aborted_turn) =
+        lineage_tracker.finish();
 
     Ok(Some(Session {
         session_id,
@@ -220,6 +209,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
             forked_from_session_id,
             semantic_event_ids,
             assistant_or_tool_event_ids,
+            codex_user_turns,
             trailing_aborted_turn,
             ..SessionLineage::default()
         },
@@ -239,57 +229,166 @@ fn response_item_identity(payload: &Value) -> Option<String> {
     string_field(payload, id_field).map(|id| format!("{item_type}:{id}"))
 }
 
-#[derive(Debug, Clone)]
-enum CodexSemanticTailEvent {
-    User(String),
-    TurnAborted(String),
-    Other,
+#[derive(Debug, Default)]
+struct CodexLineageTracker {
+    semantic_event_ids: HashSet<String>,
+    assistant_or_tool_event_ids: Vec<String>,
+    user_turns: Vec<CodexUserTurn>,
+    current_user_turn: Option<PendingCodexUserTurn>,
 }
 
-fn capture_lineage_event(
-    payload: &Value,
-    semantic_event_ids: &mut HashSet<String>,
-    assistant_or_tool_event_ids: &mut Vec<String>,
-    semantic_tail: &mut Vec<CodexSemanticTailEvent>,
-) {
-    let Some(event_id) = response_item_identity(payload) else {
-        return;
-    };
-    if !semantic_event_ids.insert(event_id.clone()) {
-        return;
-    }
+#[derive(Debug)]
+struct PendingCodexUserTurn {
+    user_message_line_multiset_sha256: String,
+    semantic_event_ids: Vec<String>,
+    last_assistant_or_tool_event_id: Option<String>,
+    ended_with_abort: bool,
+}
 
-    let marker = match payload.get("type").and_then(Value::as_str) {
-        Some("message") if payload.get("role").and_then(Value::as_str) == Some("user") => {
-            match extract_message_text(payload.get("content")) {
-                Some(text) if !text.trim().is_empty() => CodexSemanticTailEvent::User(event_id),
-                _ => CodexSemanticTailEvent::Other,
+impl CodexLineageTracker {
+    fn capture(&mut self, payload: &Value) {
+        let Some(item_type) = payload.get("type").and_then(Value::as_str) else {
+            return;
+        };
+        let event_id = response_item_identity(payload)
+            .filter(|event_id| self.semantic_event_ids.insert(event_id.clone()));
+
+        if let Some(user_message) = lineage_user_message(payload) {
+            self.finish_current_user_turn();
+            self.current_user_turn = Some(PendingCodexUserTurn {
+                user_message_line_multiset_sha256: user_message_line_multiset_sha256(&user_message),
+                semantic_event_ids: event_id.into_iter().collect(),
+                last_assistant_or_tool_event_id: None,
+                ended_with_abort: false,
+            });
+            return;
+        }
+
+        if is_turn_aborted_message(payload) {
+            if let Some(turn) = self.current_user_turn.as_mut() {
+                if let Some(event_id) = event_id {
+                    turn.semantic_event_ids.push(event_id);
+                }
+                turn.ended_with_abort = true;
+            }
+            return;
+        }
+
+        let is_assistant_or_tool = is_assistant_or_tool_item(item_type, payload);
+        if is_assistant_or_tool {
+            if let Some(event_id) = event_id.as_ref() {
+                self.assistant_or_tool_event_ids.push(event_id.clone());
             }
         }
-        Some("message") if is_turn_aborted_message(payload) => {
-            CodexSemanticTailEvent::TurnAborted(event_id)
-        }
-        Some("message") if payload.get("role").and_then(Value::as_str) == Some("assistant") => {
-            assistant_or_tool_event_ids.push(event_id);
-            CodexSemanticTailEvent::Other
-        }
-        Some(
-            "reasoning"
-            | "function_call"
-            | "function_call_output"
-            | "custom_tool_call"
-            | "custom_tool_call_output",
-        ) => {
-            assistant_or_tool_event_ids.push(event_id);
-            CodexSemanticTailEvent::Other
-        }
-        _ => CodexSemanticTailEvent::Other,
-    };
 
-    if semantic_tail.len() == 2 {
-        semantic_tail.remove(0);
+        if let Some(turn) = self.current_user_turn.as_mut() {
+            turn.ended_with_abort = false;
+            if let Some(event_id) = event_id {
+                turn.semantic_event_ids.push(event_id.clone());
+                if is_assistant_or_tool {
+                    turn.last_assistant_or_tool_event_id = Some(event_id);
+                }
+            }
+        }
     }
-    semantic_tail.push(marker);
+
+    fn finish(
+        mut self,
+    ) -> (
+        Vec<String>,
+        Vec<String>,
+        Vec<CodexUserTurn>,
+        Option<TrailingAbortedTurn>,
+    ) {
+        let trailing_aborted_turn = self.current_user_turn.take().and_then(|mut turn| {
+            if !turn.ended_with_abort {
+                self.record_completed_user_turn(turn);
+                return None;
+            }
+
+            turn.semantic_event_ids.sort_unstable();
+            Some(TrailingAbortedTurn {
+                user_message_line_multiset_sha256: turn.user_message_line_multiset_sha256,
+                semantic_event_ids: turn.semantic_event_ids,
+                had_assistant_or_tool_activity: turn.last_assistant_or_tool_event_id.is_some(),
+            })
+        });
+
+        let mut semantic_event_ids = self.semantic_event_ids.into_iter().collect::<Vec<_>>();
+        semantic_event_ids.sort_unstable();
+        self.assistant_or_tool_event_ids.sort_unstable();
+
+        (
+            semantic_event_ids,
+            self.assistant_or_tool_event_ids,
+            self.user_turns,
+            trailing_aborted_turn,
+        )
+    }
+
+    fn finish_current_user_turn(&mut self) {
+        let Some(turn) = self.current_user_turn.take() else {
+            return;
+        };
+        if !turn.ended_with_abort {
+            self.record_completed_user_turn(turn);
+        }
+    }
+
+    fn record_completed_user_turn(&mut self, turn: PendingCodexUserTurn) {
+        let Some(last_assistant_or_tool_event_id) = turn.last_assistant_or_tool_event_id else {
+            return;
+        };
+        self.user_turns.push(CodexUserTurn {
+            user_message_line_multiset_sha256: turn.user_message_line_multiset_sha256,
+            last_assistant_or_tool_event_id,
+        });
+    }
+}
+
+fn lineage_user_message(payload: &Value) -> Option<String> {
+    if payload.get("type").and_then(Value::as_str) != Some("message")
+        || payload.get("role").and_then(Value::as_str) != Some("user")
+    {
+        return None;
+    }
+
+    extract_message_text(payload.get("content")).filter(|text| {
+        !text.trim().is_empty()
+            && !is_contextual_user_message_content(MessageRole::User, text.as_str())
+    })
+}
+
+fn is_assistant_or_tool_item(item_type: &str, payload: &Value) -> bool {
+    match item_type {
+        "message" => payload.get("role").and_then(Value::as_str) == Some("assistant"),
+        "reasoning"
+        | "function_call"
+        | "function_call_output"
+        | "custom_tool_call"
+        | "custom_tool_call_output" => true,
+        _ => false,
+    }
+}
+
+fn user_message_line_multiset_sha256(message: &str) -> String {
+    let mut lines = message
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    lines.sort_unstable();
+
+    let mut hasher = Sha256::new();
+    for line in lines {
+        hasher.update((line.len() as u64).to_le_bytes());
+        hasher.update(line.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
 }
 
 fn is_turn_aborted_message(payload: &Value) -> bool {
@@ -299,20 +398,6 @@ fn is_turn_aborted_message(payload: &Value) -> bool {
     extract_message_text(payload.get("content")).is_some_and(|text| {
         let text = text.trim();
         text.starts_with("<turn_aborted>") && text.ends_with("</turn_aborted>")
-    })
-}
-
-fn extract_trailing_aborted_turn(
-    semantic_tail: &[CodexSemanticTailEvent],
-) -> Option<TrailingAbortedTurn> {
-    let [CodexSemanticTailEvent::User(user), CodexSemanticTailEvent::TurnAborted(abort_event_id)] =
-        semantic_tail
-    else {
-        return None;
-    };
-    Some(TrailingAbortedTurn {
-        user_event_id: user.clone(),
-        abort_event_id: abort_event_id.clone(),
     })
 }
 
@@ -1798,7 +1883,7 @@ fn read_thread_names(index_path: &Path) -> Result<HashMap<String, String>> {
 
 #[cfg(test)]
 mod cell_tests {
-    use super::parse_codex_session_file;
+    use super::{parse_codex_session_file, user_message_line_multiset_sha256};
     use crate::parse::{PatchOp, SessionCell};
     use std::path::PathBuf;
 
@@ -2136,6 +2221,26 @@ mod cell_tests {
     }
 
     #[test]
+    fn user_message_fingerprint_ignores_line_order_but_preserves_the_multiset() {
+        let original = "update the table\n\n| Up | move |\n| Enter | select |";
+        let reordered = "update the table\n\n| Enter | select |\n| Up | move |";
+        let duplicated = "update the table\n\n| Up | move |\n| Up | move |\n| Enter | select |";
+
+        assert_eq!(
+            user_message_line_multiset_sha256(original),
+            user_message_line_multiset_sha256(reordered)
+        );
+        assert_ne!(
+            user_message_line_multiset_sha256(original),
+            user_message_line_multiset_sha256(duplicated)
+        );
+        assert_ne!(
+            user_message_line_multiset_sha256(original),
+            user_message_line_multiset_sha256("update a different table")
+        );
+    }
+
+    #[test]
     fn parser_captures_trailing_aborted_turn_lineage() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("aborted.jsonl");
@@ -2157,11 +2262,65 @@ mod cell_tests {
             .as_ref()
             .expect("trailing aborted turn");
 
-        assert_eq!(aborted.user_event_id, "message:retry-user");
-        assert_eq!(aborted.abort_event_id, "message:abort");
+        assert_eq!(
+            aborted.user_message_line_multiset_sha256,
+            user_message_line_multiset_sha256("continue here")
+        );
+        assert_eq!(
+            aborted.semantic_event_ids,
+            ["message:abort", "message:retry-user"]
+        );
+        assert!(!aborted.had_assistant_or_tool_activity);
         assert_eq!(
             session.lineage.assistant_or_tool_event_ids,
             ["message:base-assistant"]
+        );
+    }
+
+    #[test]
+    fn parser_captures_idless_aborted_turn_with_partial_activity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("legacy-aborted.jsonl");
+        let body = concat!(
+            "{\"timestamp\":\"2026-07-17T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\",\"cwd\":\"/tmp\"}}\n",
+            "{\"timestamp\":\"2026-07-17T00:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-07-17T00:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"base-assistant\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+            "{\"timestamp\":\"2026-07-17T00:01:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"continue here\"}]}}\n",
+            "{\"timestamp\":\"2026-07-17T00:01:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"id\":\"parent-reasoning\",\"summary\":[]}}\n",
+            "{\"timestamp\":\"2026-07-17T00:01:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"parent-ack\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"working\"}]}}\n",
+            "{\"timestamp\":\"2026-07-17T00:01:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"parent-tool\",\"name\":\"exec\",\"input\":{}}}\n",
+            "{\"timestamp\":\"2026-07-17T00:01:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"parent-tool\",\"output\":\"{}\"}}\n",
+            "{\"timestamp\":\"2026-07-17T00:01:05Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"<turn_aborted>\\ninterrupted\\n</turn_aborted>\"}]}}\n",
+        );
+        std::fs::write(&path, body).expect("write fixture");
+
+        let session = parse_codex_session_file(&path)
+            .expect("parse")
+            .expect("session");
+        let aborted = session
+            .lineage
+            .trailing_aborted_turn
+            .as_ref()
+            .expect("trailing aborted turn");
+
+        assert_eq!(
+            aborted.user_message_line_multiset_sha256,
+            user_message_line_multiset_sha256("continue here")
+        );
+        assert_eq!(
+            aborted.semantic_event_ids,
+            [
+                "custom_tool_call:parent-tool",
+                "custom_tool_call_output:parent-tool",
+                "message:parent-ack",
+                "reasoning:parent-reasoning",
+            ]
+        );
+        assert!(aborted.had_assistant_or_tool_activity);
+        assert_eq!(session.lineage.codex_user_turns.len(), 1);
+        assert_eq!(
+            session.lineage.codex_user_turns[0].last_assistant_or_tool_event_id,
+            "message:base-assistant"
         );
     }
 }

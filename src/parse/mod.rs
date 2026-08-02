@@ -9,9 +9,10 @@ pub use codex::parse_codex_session_file;
 pub use session::{
     decode_claude_project_dir, decode_claude_project_from_path, default_project_for_cwd,
     is_contextual_user_message_content, is_project_docs_autodump, is_skill_text_injection,
-    normalize_session_path, strip_project_docs_autodump_preamble, Agent, DerivationType,
-    ExecStatus, MessageRole, PatchFile, PatchOp, PlanItem, PlanItemStatus, RuntimeMetrics, Session,
-    SessionCell, SessionInfo, SessionLineage, SessionMessage, ToolStatus, TrailingAbortedTurn,
+    normalize_session_path, strip_project_docs_autodump_preamble, Agent, CodexUserTurn,
+    DerivationType, ExecStatus, MessageRole, PatchFile, PatchOp, PlanItem, PlanItemStatus,
+    RuntimeMetrics, Session, SessionCell, SessionInfo, SessionLineage, SessionMessage, ToolStatus,
+    TrailingAbortedTurn,
 };
 
 use anyhow::Result;
