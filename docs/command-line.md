@@ -83,14 +83,17 @@ uses the local timezone: `--after` begins at the start of that day and
 
 Sub-agent sessions are excluded unless `--sub-agent` is present.
 
-A superseded session is a direct fork source whose stable semantic event IDs are
-fully present in a fork that also continued beyond it, apart from a narrowly
-recognized trailing aborted turn that the fork retried. Detection always
-requires the source format's explicit fork lineage, so unrelated sessions with
-similar text are never classified by transcript comparison. The default `no`
-hides these abandoned prefixes; use `--superseded yes` to review only them or
-`--superseded both` to restore the unfiltered session list. JSON results expose
-the keeper's session ID as `session.superseded_by`.
+A superseded session is either a direct fork source whose stable semantic event
+IDs are fully present in a fork that continued beyond it, or a non-keeper member
+of a semantically equivalent fork family. Detection always requires the source
+format's explicit fork lineage, so unrelated sessions with similar text are
+never classified by transcript comparison. A trailing user/abort-only Codex
+turn is ignored when comparing equivalence. Equivalent families keep a leaf
+descendant; equivalent sibling leaves are resolved by latest file modification
+time, then session ID. The default `no` hides these superseded sources and
+duplicates; use `--superseded yes` to review only them or `--superseded both` to
+restore the unfiltered session list. JSON results expose the keeper's session ID
+as `session.superseded_by`.
 
 ## Sorting and output
 

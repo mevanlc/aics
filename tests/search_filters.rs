@@ -377,6 +377,129 @@ fn superseded_filter_tracks_direct_codex_forks_across_incremental_sync() -> Resu
 }
 
 #[test]
+fn superseded_filter_collapses_equivalent_codex_fork_siblings() -> Result<()> {
+    let temp = TempDir::new()?;
+    let sessions = temp.path().join(".codex/sessions/2026/08/01");
+    fs::create_dir_all(&sessions)?;
+    fs::write(
+        sessions.join("parent.jsonl"),
+        concat!(
+            "{\"timestamp\":\"2026-08-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+        ),
+    )?;
+    for child_id in ["child-a", "child-b"] {
+        fs::write(
+            sessions.join(format!("{child_id}.jsonl")),
+            format!(
+                concat!(
+                    "{{\"timestamp\":\"2026-08-01T10:01:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{child_id}\",\"forked_from_id\":\"parent\",\"cwd\":\"/tmp/demo\"}}}}\n",
+                    "{{\"timestamp\":\"2026-08-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"parent\",\"cwd\":\"/tmp/demo\"}}}}\n",
+                    "{{\"timestamp\":\"2026-08-01T10:00:01Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"id\":\"user-1\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"hello\"}}]}}}}\n",
+                    "{{\"timestamp\":\"2026-08-01T10:00:02Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"hi\"}}]}}}}\n",
+                ),
+                child_id = child_id,
+            ),
+        )?;
+    }
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        trash: None,
+    };
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+
+    let search = |superseded| -> Result<Vec<_>> {
+        manager.open_search_engine()?.search(&SearchRequest {
+            query: String::new(),
+            scope: Scope::Global,
+            limit: 10,
+            sort: SortMode::Time,
+            filters: SearchFilters {
+                superseded,
+                ..SearchFilters::default()
+            },
+        })
+    };
+
+    assert_eq!(search(SupersededFilter::Both)?.len(), 3);
+    let current = search(SupersededFilter::No)?;
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].session.session_id, "child-b");
+    let superseded = search(SupersededFilter::Yes)?;
+    assert_eq!(superseded.len(), 2);
+    for session_id in ["parent", "child-a"] {
+        let hit = superseded
+            .iter()
+            .find(|hit| hit.session.session_id == session_id)
+            .expect("equivalent fork should be collapsed");
+        assert_eq!(hit.session.superseded_by.as_deref(), Some("child-b"));
+    }
+    Ok(())
+}
+
+#[test]
+fn superseded_filter_collapses_empty_aborted_codex_fork_parent() -> Result<()> {
+    let temp = TempDir::new()?;
+    let sessions = temp.path().join(".codex/sessions/2026/07/30");
+    fs::create_dir_all(&sessions)?;
+    fs::write(
+        sessions.join("parent.jsonl"),
+        concat!(
+            "{\"timestamp\":\"2026-07-30T18:44:51Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-07-30T18:44:52Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-07-30T18:44:53Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+            "{\"timestamp\":\"2026-07-30T18:58:41Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"fork-user\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"ok\"}]}}\n",
+            "{\"timestamp\":\"2026-07-30T18:58:41Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"fork-abort\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"<turn_aborted>\\nThe previous turn was interrupted on purpose.\\n</turn_aborted>\"}]}}\n",
+        ),
+    )?;
+    fs::write(
+        sessions.join("child.jsonl"),
+        concat!(
+            "{\"timestamp\":\"2026-07-30T18:58:43Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"forked_from_id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-07-30T18:44:51Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-07-30T18:44:52Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-07-30T18:44:53Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+        ),
+    )?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        trash: None,
+    };
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+
+    let search = |superseded| -> Result<Vec<_>> {
+        manager.open_search_engine()?.search(&SearchRequest {
+            query: String::new(),
+            scope: Scope::Global,
+            limit: 10,
+            sort: SortMode::Time,
+            filters: SearchFilters {
+                superseded,
+                ..SearchFilters::default()
+            },
+        })
+    };
+
+    assert_eq!(search(SupersededFilter::Both)?.len(), 2);
+    let current = search(SupersededFilter::No)?;
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].session.session_id, "child");
+    let superseded = search(SupersededFilter::Yes)?;
+    assert_eq!(superseded.len(), 1);
+    assert_eq!(superseded[0].session.session_id, "parent");
+    assert_eq!(
+        superseded[0].session.superseded_by.as_deref(),
+        Some("child")
+    );
+    Ok(())
+}
+
+#[test]
 fn superseded_filter_recognizes_trailing_aborted_codex_parent_turn() -> Result<()> {
     let temp = TempDir::new()?;
     let sessions = temp.path().join(".codex/sessions/2026/08/01");
@@ -545,6 +668,60 @@ fn superseded_filter_recognizes_claude_fork_lineage() -> Result<()> {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].session.session_id, "parent");
     assert_eq!(hits[0].session.superseded_by.as_deref(), Some("child"));
+    Ok(())
+}
+
+#[test]
+fn superseded_filter_collapses_equivalent_claude_fork() -> Result<()> {
+    let temp = TempDir::new()?;
+    let sessions = temp.path().join(".claude/projects/-tmp-demo");
+    fs::create_dir_all(&sessions)?;
+    fs::write(
+        sessions.join("parent.jsonl"),
+        concat!(
+            "{\"type\":\"user\",\"sessionId\":\"parent\",\"uuid\":\"parent-user\",\"cwd\":\"/tmp/demo\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"parent\",\"uuid\":\"parent-reply\",\"cwd\":\"/tmp/demo\",\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}\n",
+        ),
+    )?;
+    fs::write(
+        sessions.join("child.jsonl"),
+        concat!(
+            "{\"type\":\"user\",\"sessionId\":\"child\",\"uuid\":\"copied-user\",\"cwd\":\"/tmp/demo\",\"forkedFrom\":{\"sessionId\":\"parent\",\"messageUuid\":\"parent-user\"},\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"child\",\"uuid\":\"copied-reply\",\"cwd\":\"/tmp/demo\",\"forkedFrom\":{\"sessionId\":\"parent\",\"messageUuid\":\"parent-reply\"},\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}\n",
+        ),
+    )?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        trash: None,
+    };
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+
+    let search = |superseded| -> Result<Vec<_>> {
+        manager.open_search_engine()?.search(&SearchRequest {
+            query: String::new(),
+            scope: Scope::Global,
+            limit: 10,
+            sort: SortMode::Time,
+            filters: SearchFilters {
+                superseded,
+                ..SearchFilters::default()
+            },
+        })
+    };
+
+    assert_eq!(search(SupersededFilter::Both)?.len(), 2);
+    let current = search(SupersededFilter::No)?;
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].session.session_id, "child");
+    let superseded = search(SupersededFilter::Yes)?;
+    assert_eq!(superseded.len(), 1);
+    assert_eq!(superseded[0].session.session_id, "parent");
+    assert_eq!(
+        superseded[0].session.superseded_by.as_deref(),
+        Some("child")
+    );
     Ok(())
 }
 

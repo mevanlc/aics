@@ -27,17 +27,19 @@ indexed, and records for deleted files are removed. Malformed or unrecognized
 session data is skipped rather than crashing the scan.
 
 Fork lineage and stable semantic event IDs are cached in the same state. AICS
-groups forks by their declared parent session ID, then checks only those direct
-parent/child candidates for strict event-set coverage. This avoids all-pairs
-transcript comparison. An ordinary search reads the cached `superseded_by`
-property; when a changed or deleted fork alters a parent's status, only that
-parent is refreshed in addition to the changed files.
+uses declared parent session IDs to form fork families, then checks direct
+parent/child candidates for event-set coverage and groups equal semantic event
+sets within each family. This avoids comparing unrelated transcripts. An
+ordinary search reads the cached `superseded_by` property; when a changed or
+deleted fork alters the family collapse, affected family members are refreshed
+in addition to the changed files.
 
 Codex may leave a final aborted turn in the parent while creating a fork. AICS
-accepts two narrow forms of this exception. It can ignore an otherwise-empty
-trailing user/`<turn_aborted>` pair when the child contains new assistant or tool
-activity. For older Codex records, where those boundary messages have no stable
-IDs and the parent may have begun working, AICS requires every unmatched parent
+accepts two narrow forms of this exception. It ignores an otherwise-empty
+trailing user/`<turn_aborted>` pair when comparing semantic equivalence or when
+the child contains new assistant or tool activity. For older Codex records,
+where those boundary messages have no stable IDs and the parent may have begun
+working, AICS requires every unmatched parent
 event to belong to that trailing aborted turn, requires the child to retry the
 same multiset of nonempty user-message lines (allowing reordered lists or table
 rows), and requires new assistant or tool activity in that retry. An unmatched

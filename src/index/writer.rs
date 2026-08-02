@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -644,82 +644,245 @@ fn apply_supersession(state: &mut IndexState) {
         file.superseded_by = None;
     }
 
-    let mut children_by_parent = HashMap::<(Agent, String), Vec<String>>::new();
-    for (child_key, child) in &state.files {
+    // Declared parent IDs bound all semantic comparisons to actual fork families.
+    let keys = state.files.keys().cloned().collect::<Vec<_>>();
+    let mut indexes_by_session = HashMap::<(Agent, String), Vec<usize>>::new();
+    for (index, key) in keys.iter().enumerate() {
+        let Some(file) = state.files.get(key) else {
+            continue;
+        };
+        if !file.indexed {
+            continue;
+        }
+        if let Some(session_id) = file.session_id.as_ref() {
+            indexes_by_session
+                .entry((file.agent, session_id.clone()))
+                .or_default()
+                .push(index);
+        }
+    }
+
+    let mut family_parents = (0..keys.len()).collect::<Vec<_>>();
+    let mut fork_edges = Vec::<ForkEdge>::new();
+    for (child_index, child_key) in keys.iter().enumerate() {
+        let Some(child) = state.files.get(child_key) else {
+            continue;
+        };
         let Some(parent_id) = child.lineage.forked_from_session_id.as_ref() else {
             continue;
         };
-        if child.indexed && !child.trashed {
-            children_by_parent
-                .entry((child.agent, parent_id.clone()))
-                .or_default()
-                .push(child_key.clone());
-        }
-    }
-
-    let keys = state.files.keys().cloned().collect::<Vec<_>>();
-    for parent_key in &keys {
-        let Some(parent) = state.files.get(parent_key) else {
-            continue;
-        };
-        let Some(parent_id) = parent.session_id.as_ref() else {
-            continue;
-        };
-        if !parent.indexed || parent.lineage.semantic_event_ids.is_empty() {
+        if !child.indexed || child.trashed {
             continue;
         }
-
-        let mut best_child = None::<(String, u64, usize)>;
-        let Some(child_keys) = children_by_parent.get(&(parent.agent, parent_id.clone())) else {
+        let Some(parent_indexes) = indexes_by_session.get(&(child.agent, parent_id.clone())) else {
             continue;
         };
-        for child_key in child_keys {
-            let Some(child) = state.files.get(child_key) else {
+        for &parent_index in parent_indexes {
+            if parent_index == child_index {
+                continue;
+            }
+            union_families(&mut family_parents, parent_index, child_index);
+
+            let Some(parent) = state.files.get(&keys[parent_index]) else {
                 continue;
             };
-            if child_key == parent_key
-                || !lineage_supersedes(parent.agent, &parent.lineage, &child.lineage)
-            {
+            if parent.lineage.semantic_event_ids.is_empty() {
                 continue;
             }
-
-            let candidate = (
-                child
-                    .session_id
-                    .clone()
-                    .unwrap_or_else(|| child_key.clone()),
-                child.modified_secs,
-                child.lineage.semantic_event_ids.len(),
-            );
-            if best_child.as_ref().is_none_or(|current| {
-                (&candidate.2, &candidate.1, &candidate.0) > (&current.2, &current.1, &current.0)
-            }) {
-                best_child = Some(candidate);
+            let relation = lineage_relation(parent.agent, &parent.lineage, &child.lineage);
+            if relation != LineageRelation::Unrelated {
+                fork_edges.push(ForkEdge {
+                    parent: parent_index,
+                    child: child_index,
+                    relation,
+                });
             }
         }
+    }
 
-        if let Some((child_id, _, _)) = best_child {
-            if let Some(parent) = state.files.get_mut(parent_key) {
-                parent.superseded_by = Some(child_id);
+    let family_roots = (0..keys.len())
+        .map(|index| find_family(&mut family_parents, index))
+        .collect::<Vec<_>>();
+    let mut family_sizes = HashMap::<usize, usize>::new();
+    for (index, key) in keys.iter().enumerate() {
+        let file = state
+            .files
+            .get(key)
+            .expect("fork-family session key must exist");
+        if file.indexed && !file.trashed {
+            *family_sizes.entry(family_roots[index]).or_default() += 1;
+        }
+    }
+    // Equal normalized event sets collapse only within the same declared family.
+    let mut equivalent_groups = HashMap::<(usize, Agent, Vec<String>), Vec<usize>>::new();
+    for (index, key) in keys.iter().enumerate() {
+        let Some(file) = state.files.get(key) else {
+            continue;
+        };
+        if !file.indexed
+            || file.trashed
+            || family_sizes.get(&family_roots[index]).copied() == Some(1)
+        {
+            continue;
+        }
+        let semantic_key = semantic_equivalence_key(file.agent, &file.lineage);
+        if semantic_key.is_empty() {
+            continue;
+        }
+        equivalent_groups
+            .entry((family_roots[index], file.agent, semantic_key))
+            .or_default()
+            .push(index);
+    }
+
+    let mut representative = (0..keys.len()).collect::<Vec<_>>();
+    let mut superseded_by = vec![None::<String>; keys.len()];
+    let parents_with_equivalent_children = fork_edges
+        .iter()
+        .filter(|edge| edge.relation == LineageRelation::Equivalent)
+        .map(|edge| edge.parent)
+        .collect::<HashSet<_>>();
+    for members in equivalent_groups
+        .values()
+        .filter(|members| members.len() > 1)
+    {
+        // Parentage wins over timestamps. Timestamp and ID only choose among
+        // equivalent leaves, such as sibling forks of the same session.
+        let leaves = members
+            .iter()
+            .copied()
+            .filter(|index| !parents_with_equivalent_children.contains(index))
+            .collect::<Vec<_>>();
+        let candidates = if leaves.is_empty() { members } else { &leaves };
+        let Some(&winner) = candidates.iter().max_by(|left, right| {
+            let left_file = state
+                .files
+                .get(&keys[**left])
+                .expect("equivalent session key must exist");
+            let right_file = state
+                .files
+                .get(&keys[**right])
+                .expect("equivalent session key must exist");
+            (
+                left_file.modified_secs,
+                left_file.session_id.as_deref().unwrap_or_default(),
+                keys[**left].as_str(),
+            )
+                .cmp(&(
+                    right_file.modified_secs,
+                    right_file.session_id.as_deref().unwrap_or_default(),
+                    keys[**right].as_str(),
+                ))
+        }) else {
+            continue;
+        };
+        let winner_id = session_id_or_key(
+            state
+                .files
+                .get(&keys[winner])
+                .expect("equivalent session key must exist"),
+            &keys[winner],
+        );
+        for &member in members {
+            representative[member] = winner;
+            if member != winner {
+                superseded_by[member] = Some(winner_id.clone());
             }
+        }
+    }
+
+    // Contract equivalent groups before choosing among strict, divergent
+    // successors so any continuation of an equivalent member hides the group.
+    type SuccessorRank = (usize, u64, String, String);
+    let mut best_successors = HashMap::<usize, (SuccessorRank, usize)>::new();
+    for edge in fork_edges
+        .iter()
+        .filter(|edge| edge.relation == LineageRelation::Supersedes)
+    {
+        let source = representative[edge.parent];
+        let target = representative[edge.child];
+        if source == target {
+            continue;
+        }
+        let target_file = state
+            .files
+            .get(&keys[target])
+            .expect("successor session key must exist");
+        let rank = (
+            target_file.lineage.semantic_event_ids.len(),
+            target_file.modified_secs,
+            target_file.session_id.clone().unwrap_or_default(),
+            keys[target].clone(),
+        );
+        if best_successors
+            .get(&source)
+            .is_none_or(|(current, _)| rank > *current)
+        {
+            best_successors.insert(source, (rank, target));
+        }
+    }
+    for (source, (_, target)) in best_successors {
+        let target_id = session_id_or_key(
+            state
+                .files
+                .get(&keys[target])
+                .expect("successor session key must exist"),
+            &keys[target],
+        );
+        superseded_by[source] = Some(target_id);
+    }
+
+    for (index, successor) in superseded_by.into_iter().enumerate() {
+        if let Some(successor) = successor {
+            state
+                .files
+                .get_mut(&keys[index])
+                .expect("indexed session key must exist")
+                .superseded_by = Some(successor);
         }
     }
 }
 
-fn lineage_supersedes(agent: Agent, parent: &SessionLineage, child: &SessionLineage) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineageRelation {
+    Unrelated,
+    Equivalent,
+    Supersedes,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ForkEdge {
+    parent: usize,
+    child: usize,
+    relation: LineageRelation,
+}
+
+fn lineage_relation(
+    agent: Agent,
+    parent: &SessionLineage,
+    child: &SessionLineage,
+) -> LineageRelation {
     match agent {
-        Agent::Codex => codex_lineage_supersedes(parent, child),
+        Agent::Codex => codex_lineage_relation(parent, child),
         Agent::Claude => {
-            child.own_semantic_event_count > 0
-                && parent
-                    .semantic_event_ids
-                    .iter()
-                    .all(|id| child.inherited_event_ids.binary_search(id).is_ok())
+            if !parent
+                .semantic_event_ids
+                .iter()
+                .all(|id| child.inherited_event_ids.binary_search(id).is_ok())
+            {
+                LineageRelation::Unrelated
+            } else if child.own_semantic_event_count > 0 {
+                LineageRelation::Supersedes
+            } else if child.inherited_event_ids == parent.semantic_event_ids {
+                LineageRelation::Equivalent
+            } else {
+                LineageRelation::Unrelated
+            }
         }
     }
 }
 
-fn codex_lineage_supersedes(parent: &SessionLineage, child: &SessionLineage) -> bool {
+fn codex_lineage_relation(parent: &SessionLineage, child: &SessionLineage) -> LineageRelation {
     let missing_parent_events = parent
         .semantic_event_ids
         .iter()
@@ -727,11 +890,19 @@ fn codex_lineage_supersedes(parent: &SessionLineage, child: &SessionLineage) -> 
         .collect::<Vec<_>>();
 
     if missing_parent_events.is_empty() {
-        return child.semantic_event_ids.len() > parent.semantic_event_ids.len();
+        return match child
+            .semantic_event_ids
+            .len()
+            .cmp(&parent.semantic_event_ids.len())
+        {
+            std::cmp::Ordering::Greater => LineageRelation::Supersedes,
+            std::cmp::Ordering::Equal => LineageRelation::Equivalent,
+            std::cmp::Ordering::Less => LineageRelation::Unrelated,
+        };
     }
 
     let Some(aborted) = parent.trailing_aborted_turn.as_ref() else {
-        return false;
+        return LineageRelation::Unrelated;
     };
     if !missing_parent_events.iter().all(|id| {
         aborted
@@ -739,7 +910,17 @@ fn codex_lineage_supersedes(parent: &SessionLineage, child: &SessionLineage) -> 
             .binary_search_by(|candidate| candidate.as_str().cmp(id.as_str()))
             .is_ok()
     }) {
-        return false;
+        return LineageRelation::Unrelated;
+    }
+
+    let dropped_only_empty_aborted_turn = !aborted.had_assistant_or_tool_activity
+        && missing_parent_events.len() == aborted.semantic_event_ids.len();
+    let child_has_new_event = child
+        .semantic_event_ids
+        .iter()
+        .any(|id| parent.semantic_event_ids.binary_search(id).is_err());
+    if dropped_only_empty_aborted_turn && !child_has_new_event {
+        return LineageRelation::Equivalent;
     }
 
     let child_has_new_activity = child
@@ -747,20 +928,20 @@ fn codex_lineage_supersedes(parent: &SessionLineage, child: &SessionLineage) -> 
         .iter()
         .any(|id| is_child_only_event(parent, child, id));
     if !child_has_new_activity {
-        return false;
+        return LineageRelation::Unrelated;
     }
 
-    let dropped_only_empty_aborted_turn = !aborted.had_assistant_or_tool_activity
-        && missing_parent_events.len() == aborted.semantic_event_ids.len();
-    if dropped_only_empty_aborted_turn {
-        return true;
+    if dropped_only_empty_aborted_turn
+        || (!aborted.user_message_line_multiset_sha256.is_empty()
+            && child.codex_user_turns.iter().any(|turn| {
+                turn.user_message_line_multiset_sha256 == aborted.user_message_line_multiset_sha256
+                    && is_child_only_event(parent, child, &turn.last_assistant_or_tool_event_id)
+            }))
+    {
+        LineageRelation::Supersedes
+    } else {
+        LineageRelation::Unrelated
     }
-
-    !aborted.user_message_line_multiset_sha256.is_empty()
-        && child.codex_user_turns.iter().any(|turn| {
-            turn.user_message_line_multiset_sha256 == aborted.user_message_line_multiset_sha256
-                && is_child_only_event(parent, child, &turn.last_assistant_or_tool_event_id)
-        })
 }
 
 fn is_child_only_event(parent: &SessionLineage, child: &SessionLineage, event_id: &str) -> bool {
@@ -772,6 +953,48 @@ fn is_child_only_event(parent: &SessionLineage, child: &SessionLineage, event_id
             .semantic_event_ids
             .binary_search_by(|candidate| candidate.as_str().cmp(event_id))
             .is_err()
+}
+
+fn semantic_equivalence_key(agent: Agent, lineage: &SessionLineage) -> Vec<String> {
+    match agent {
+        Agent::Codex => {
+            let mut event_ids = lineage.semantic_event_ids.clone();
+            if let Some(aborted) = lineage
+                .trailing_aborted_turn
+                .as_ref()
+                .filter(|aborted| !aborted.had_assistant_or_tool_activity)
+            {
+                event_ids.retain(|id| aborted.semantic_event_ids.binary_search(id).is_err());
+            }
+            event_ids
+        }
+        Agent::Claude => {
+            let mut event_ids = lineage.inherited_event_ids.clone();
+            event_ids.extend(lineage.semantic_event_ids.iter().cloned());
+            event_ids.sort_unstable();
+            event_ids.dedup();
+            event_ids
+        }
+    }
+}
+
+fn session_id_or_key(file: &IndexedFileState, key: &str) -> String {
+    file.session_id.clone().unwrap_or_else(|| key.to_owned())
+}
+
+fn find_family(parents: &mut [usize], index: usize) -> usize {
+    if parents[index] != index {
+        parents[index] = find_family(parents, parents[index]);
+    }
+    parents[index]
+}
+
+fn union_families(parents: &mut [usize], left: usize, right: usize) {
+    let left = find_family(parents, left);
+    let right = find_family(parents, right);
+    if left != right {
+        parents[right] = left;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -913,22 +1136,34 @@ mod tests {
             ..SessionLineage::default()
         };
 
-        assert!(codex_lineage_supersedes(&parent, &child));
+        assert_eq!(
+            codex_lineage_relation(&parent, &child),
+            LineageRelation::Supersedes
+        );
 
         let mut no_continuation = child.clone();
         no_continuation.assistant_or_tool_event_ids.clear();
-        assert!(!codex_lineage_supersedes(&parent, &no_continuation));
+        assert_eq!(
+            codex_lineage_relation(&parent, &no_continuation),
+            LineageRelation::Unrelated
+        );
 
         let mut extra_parent_event = parent.clone();
         extra_parent_event
             .semantic_event_ids
             .push("message:continued-parent".to_owned());
         extra_parent_event.semantic_event_ids.sort_unstable();
-        assert!(!codex_lineage_supersedes(&extra_parent_event, &child));
+        assert_eq!(
+            codex_lineage_relation(&extra_parent_event, &child),
+            LineageRelation::Unrelated
+        );
 
         let mut not_trailing = parent;
         not_trailing.trailing_aborted_turn = None;
-        assert!(!codex_lineage_supersedes(&not_trailing, &child));
+        assert_eq!(
+            codex_lineage_relation(&not_trailing, &child),
+            LineageRelation::Unrelated
+        );
     }
 
     #[test]
@@ -978,24 +1213,36 @@ mod tests {
             ..SessionLineage::default()
         };
 
-        assert!(codex_lineage_supersedes(&parent, &child));
+        assert_eq!(
+            codex_lineage_relation(&parent, &child),
+            LineageRelation::Supersedes
+        );
 
         let mut different_prompt = child.clone();
         different_prompt.codex_user_turns[0].user_message_line_multiset_sha256 =
             "different-hash".to_owned();
-        assert!(!codex_lineage_supersedes(&parent, &different_prompt));
+        assert_eq!(
+            codex_lineage_relation(&parent, &different_prompt),
+            LineageRelation::Unrelated
+        );
 
         let mut no_new_turn_activity = child.clone();
         no_new_turn_activity.codex_user_turns[0].last_assistant_or_tool_event_id =
             "message:assistant-1".to_owned();
-        assert!(!codex_lineage_supersedes(&parent, &no_new_turn_activity));
+        assert_eq!(
+            codex_lineage_relation(&parent, &no_new_turn_activity),
+            LineageRelation::Unrelated
+        );
 
         let mut extra_parent_event = parent;
         extra_parent_event
             .semantic_event_ids
             .push("message:other-parent-turn".to_owned());
         extra_parent_event.semantic_event_ids.sort_unstable();
-        assert!(!codex_lineage_supersedes(&extra_parent_event, &child));
+        assert_eq!(
+            codex_lineage_relation(&extra_parent_event, &child),
+            LineageRelation::Unrelated
+        );
     }
 
     fn sorted_ids(ids: &[&str]) -> Vec<String> {

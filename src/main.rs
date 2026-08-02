@@ -127,7 +127,7 @@ struct Cli {
     #[arg(
         long = "superseded",
         value_enum,
-        help = "Search sessions superseded by a direct fork: no, yes, or both"
+        help = "Search sessions collapsed by fork succession: no, yes, or both"
     )]
     superseded: Option<CliSupersededFilter>,
     #[arg(

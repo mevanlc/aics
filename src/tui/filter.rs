@@ -721,7 +721,7 @@ impl FilterField {
             FilterField::Continued => "Include continued sessions (also called rollover sessions), which are continuations from a previous session.",
             FilterField::SubAgents => "Include sub-agent sessions (child sessions spawned by the agent tool).",
             FilterField::LiveOnly => "Only show sessions that are currently live (have an active agent process).",
-            FilterField::Superseded => "Choose whether to show sessions conservatively identified as complete prefixes of direct forks.",
+            FilterField::Superseded => "Choose whether to show sessions collapsed as equivalent fork duplicates or superseded fork sources.",
             FilterField::Trashed => "Choose whether to search normal sessions, trashed sessions, or both.",
             FilterField::Sort => "Sort results by relevance to the search query or by modification time.",
         }

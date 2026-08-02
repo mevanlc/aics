@@ -37,9 +37,9 @@ The session-succession section is necessarily more particular. Let `P` be a
 parent session, let `C` be a candidate child session, and let `E(X)` denote the
 set of stable semantic event identifiers established for session `X`. AICS does
 not presume supersession merely because two sessions seem similar, because
-similar sessions are not necessarily sessions in succession. It first requires
-the source format to assert the direct fork relation `C -> P`. For Codex sessions,
-the ordinary supersession condition is the strict set relation
+similar sessions are not necessarily sessions in succession. It first uses the
+source format's direct fork relation `C -> P` to form fork families. For Codex
+sessions, the ordinary supersession condition is the strict set relation
 `E(P) ⊂ E(C)`: every established event of the parent is present in the child,
 and the child has established at least one event in excess of the parent. For
 Claude sessions, the equivalent determination uses Claude's explicit inherited
@@ -47,9 +47,10 @@ event set and additionally requires the child to contain an event of its own.
 
 Codex can, during the fork-establishment procedure, append a final nonempty user
 message and a synthetic `<turn_aborted>` message to `P` without including either
-message in `C`. If that otherwise-empty aborted pair is the entire parent-only
-event difference and `C` establishes new assistant, reasoning, or tool activity,
-AICS sets the pair aside and allows supersession to proceed.
+message in `C`. AICS removes that otherwise-empty aborted suffix when deriving a
+session's semantic-equivalence key. If `C` adds no event, `P` and `C` collapse as
+equivalents; if `C` establishes new assistant, reasoning, or tool activity, AICS
+sets the pair aside and allows strict supersession to proceed.
 
 Some legacy session successions are more sessionally interesting: the user and
 abort boundaries possess no stable identifiers, `P` performs a partial set of
@@ -62,13 +63,15 @@ assistant, reasoning, or tool activity not established in the parent. A changed
 request line or any parent-only event outside the aborted suffix decisively
 unsets the supersession designation.
 
-If several direct child sessions satisfy the supersession relation for the same
-parent session, AICS selects the superseding session by the greatest semantic
-event-set cardinality, then by latest modification time, then by session ID. It
-caches that selected successor as the parent's `superseded_by` session. This is
-a direct, declared-lineage relation rather than an all-pairs textual-subset
-operation, so unrelated session sets are never subjected to speculative
-session-similarity succession.
+Within a declared fork family, AICS collapses sessions with equal semantic keys.
+It keeps a descendant having no equivalent child; if several equivalent sibling
+leaves remain, it selects the latest modification time, then session ID. Every
+other equivalent member caches the selected keeper as its `superseded_by`
+session. If several non-equivalent direct children strictly supersede the same
+semantic group, AICS selects the successor by greatest semantic event-set
+cardinality, then latest modification time, then session ID, while leaving the
+other divergent children visible. Thus unrelated session sets are never
+subjected to speculative session-similarity succession.
 
 The `Superseded` selector then performs set selection over the superseded-session
 set. `No` subtracts superseded source sessions from the visible result set;

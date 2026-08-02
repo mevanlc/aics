@@ -52,7 +52,7 @@ aics --json -g --sort-by relevance "vector db"
 # Export every matching session to a directory as Markdown
 aics -g --export ./transcripts "vector db"
 
-# Include abandoned fork sources that are hidden by default
+# Include superseded sources and equivalent fork duplicates hidden by default
 aics -g --superseded both
 
 # Review JavaScript cleanup proposals in the TUI
