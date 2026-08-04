@@ -218,10 +218,10 @@ fn render_item(
     let title_text = truncate_with_ellipsis(&list_title(hit), title_budget);
     let title_width = UnicodeWidthStr::width(title_text.as_str());
     let padding = " ".repeat(item_width.saturating_sub(meta_width + title_width).max(1));
-    let header_fg = if render_ctx.selected {
+    let metadata_fg = if render_ctx.selected {
         render_ctx.theme.accent
     } else {
-        render_ctx.theme.text
+        render_ctx.theme.muted
     };
     let header_bg = if render_ctx.selected {
         render_ctx.theme.selected_list_header_bg()
@@ -236,16 +236,9 @@ fn render_item(
                 .fg(badge_color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            meta_suffix,
-            Style::default().fg(if render_ctx.selected {
-                render_ctx.theme.accent
-            } else {
-                render_ctx.theme.muted
-            }),
-        ),
+        Span::styled(meta_suffix, Style::default().fg(metadata_fg)),
         Span::raw(padding),
-        Span::styled(title_text, Style::default().fg(header_fg)),
+        Span::styled(title_text, Style::default().fg(metadata_fg)),
     ])
     .patch_style(Style::default().bg(header_bg));
 
