@@ -1,8 +1,9 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use aics::index::{Scope, SearchFilters};
+use aics::index::{IndexManager, IndexPaths, Scope, SearchFilters};
 use aics::parse::Agent;
 use aics::rules::{run_rules_with_progress, RuleSelection, RulesMode, RulesOptions, RulesProgress};
 use aics::scan::SessionRoots;
@@ -47,6 +48,7 @@ fn write_rules_dts_creates_default_config_file() -> Result<()> {
         "reasoningEffort",
         "approvalPolicy",
         "sandboxMode",
+        "supersededBy",
     ] {
         assert!(session_declaration.contains(&format!("{field}: string;")));
         assert!(!session_declaration.contains(&format!("{field}: string | null;")));
@@ -89,6 +91,7 @@ fn rules_expose_missing_session_strings_as_empty() -> Result<()> {
             session.reasoningEffort,
             session.approvalPolicy,
             session.sandboxMode,
+            session.supersededBy,
           ];
           return optionalStrings.every(value => value === "" && !value.includes("present"))
             ? trash("empty strings")
@@ -112,6 +115,7 @@ fn rules_expose_missing_session_strings_as_empty() -> Result<()> {
             json: true,
             scope: Scope::Global,
             filters: SearchFilters::default(),
+            supersession: BTreeMap::new(),
         },
         |_| {},
     )?;
@@ -119,6 +123,85 @@ fn rules_expose_missing_session_strings_as_empty() -> Result<()> {
     assert!(report.errors.is_empty());
     assert_eq!(report.proposals.len(), 1);
     assert_eq!(report.proposals[0].rule, "missing strings");
+    Ok(())
+}
+
+#[test]
+fn rules_expose_supersession_keeper_id_and_invalidate_cached_outcomes() -> Result<()> {
+    let temp = TempDir::new()?;
+    let sessions = temp.path().join(".codex/sessions/2026/08/05");
+    fs::create_dir_all(&sessions)?;
+    let parent = sessions.join("parent.jsonl");
+    fs::write(
+        &parent,
+        concat!(
+            "{\"timestamp\":\"2026-08-05T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-08-05T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-08-05T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+        ),
+    )?;
+    let child = sessions.join("child.jsonl");
+    fs::write(
+        &child,
+        concat!(
+            "{\"timestamp\":\"2026-08-05T10:01:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"forked_from_id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-08-05T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-08-05T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+            "{\"timestamp\":\"2026-08-05T10:01:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-2\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"continue here\"}]}}\n",
+        ),
+    )?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        trash: None,
+    };
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("index-cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let supersession = manager.supersession_map()?;
+    assert_eq!(supersession.get(&parent).map(String::as_str), Some("child"));
+    assert!(!supersession.contains_key(&child));
+
+    let rules = write_rules(
+        &temp,
+        r#"
+        rule("superseded", ({ session }) => {
+          return session.id === "parent" && session.supersededBy === "child"
+            ? trash("superseded")
+            : nothing();
+        });
+        rule("keeper", ({ session }) => {
+          return session.id === "child" && session.supersededBy === ""
+            ? trash("keeper")
+            : nothing();
+        });
+        "#,
+    )?;
+    let mut options = RulesOptions {
+        rules_path: rules,
+        cache_path: Some(temp.path().join("rules-cache.json")),
+        mode: RulesMode::Preview,
+        selection: RuleSelection::All,
+        json: true,
+        scope: Scope::Global,
+        filters: SearchFilters::default(),
+        supersession: BTreeMap::new(),
+    };
+
+    let before = aics::rules::run_rules(&roots, &options)?;
+    assert_eq!(before.proposals.len(), 1);
+    assert_eq!(before.proposals[0].rule, "keeper");
+
+    options.supersession = supersession;
+    let after = aics::rules::run_rules(&roots, &options)?;
+    assert_eq!(after.proposals.len(), 2);
+    assert!(after
+        .proposals
+        .iter()
+        .any(|proposal| proposal.rule == "superseded"));
+    assert!(after
+        .proposals
+        .iter()
+        .any(|proposal| proposal.rule == "keeper"));
     Ok(())
 }
 
@@ -570,6 +653,7 @@ fn rules_progress_reports_processing_count() -> Result<()> {
             json: true,
             scope: Scope::Global,
             filters: SearchFilters::default(),
+            supersession: BTreeMap::new(),
         },
         |event| events.push(event),
     )?;

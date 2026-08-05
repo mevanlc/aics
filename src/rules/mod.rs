@@ -176,6 +176,7 @@ pub struct RulesOptions {
     pub json: bool,
     pub scope: Scope,
     pub filters: SearchFilters,
+    pub supersession: BTreeMap<PathBuf, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,28 +316,31 @@ where
             mark_processed(processed);
             continue;
         }
+        let superseded_by = options.supersession.get(&file.path).map(String::as_str);
 
         let mut content_fingerprint = None;
-        let cached = cache.as_mut().and_then(|cache| match cache.lookup(file) {
-            Ok(CacheLookup::Hit {
-                determination,
-                fingerprint,
-            }) => {
-                content_fingerprint = Some(fingerprint);
-                Some(determination)
-            }
-            Ok(CacheLookup::Miss(fingerprint)) => {
-                content_fingerprint = fingerprint;
-                None
-            }
-            Err(error) => {
-                warn!(
-                    "could not validate {} against the rules cache: {error:#}",
-                    file.path.display()
-                );
-                None
-            }
-        });
+        let cached = cache
+            .as_mut()
+            .and_then(|cache| match cache.lookup(file, superseded_by) {
+                Ok(CacheLookup::Hit {
+                    determination,
+                    fingerprint,
+                }) => {
+                    content_fingerprint = Some(fingerprint);
+                    Some(determination)
+                }
+                Ok(CacheLookup::Miss(fingerprint)) => {
+                    content_fingerprint = fingerprint;
+                    None
+                }
+                Err(error) => {
+                    warn!(
+                        "could not validate {} against the rules cache: {error:#}",
+                        file.path.display()
+                    );
+                    None
+                }
+            });
         if let Some(determination) = cached.as_ref() {
             if matches!(
                 determination,
@@ -361,7 +365,7 @@ where
 
         let determination = match parse_session_file(file.agent, &file.path) {
             Ok(Some(session)) => {
-                let stored = stored_rule_session(&session, file);
+                let stored = stored_rule_session(&session, file, superseded_by);
                 if !session_matches_scope(&options.scope, &stored)
                     || !session_matches_filters(&stored, file, &options.filters)
                 {
@@ -369,7 +373,7 @@ where
                         session: Box::new(stored),
                     }
                 } else {
-                    let input = RuleInput::from_session(&session, file);
+                    let input = RuleInput::from_session(&session, file, superseded_by);
                     let details = RuleDetails::from_session(&session);
                     let engine = match engine.as_ref() {
                         Some(engine) => engine,
@@ -408,7 +412,7 @@ where
                 content_fingerprint = fingerprint_session_for_cache(file);
             }
             if let Some(fingerprint) = content_fingerprint {
-                cache.insert(&file.path, fingerprint, determination);
+                cache.insert(&file.path, fingerprint, superseded_by, determination);
             }
         }
         mark_processed(processed);
@@ -724,10 +728,15 @@ fn collect_outcomes(
     }
 }
 
-fn stored_rule_session(session: &Session, file: &SessionFile) -> StoredSession {
+fn stored_rule_session(
+    session: &Session,
+    file: &SessionFile,
+    superseded_by: Option<&str>,
+) -> StoredSession {
     let mut stored = StoredSession::from(session);
     stored.trashed = file.trashed;
     stored.original_path = file.original_path.clone();
+    stored.superseded_by = superseded_by.map(str::to_owned);
     stored
 }
 
@@ -1008,9 +1017,9 @@ struct RuleInput {
 }
 
 impl RuleInput {
-    fn from_session(session: &Session, file: &SessionFile) -> Self {
+    fn from_session(session: &Session, file: &SessionFile, superseded_by: Option<&str>) -> Self {
         Self {
-            session: RuleSession::from_session(session, file),
+            session: RuleSession::from_session(session, file, superseded_by),
             turns: RuleTurns::from_session(session),
         }
     }
@@ -1115,11 +1124,12 @@ struct RuleSession {
     reasoning_effort: String,
     approval_policy: String,
     sandbox_mode: String,
+    superseded_by: String,
     trashed: bool,
 }
 
 impl RuleSession {
-    fn from_session(session: &Session, file: &SessionFile) -> Self {
+    fn from_session(session: &Session, file: &SessionFile, superseded_by: Option<&str>) -> Self {
         let info = session.session_info.as_ref();
         Self {
             id: session.session_id.clone(),
@@ -1146,6 +1156,7 @@ impl RuleSession {
             sandbox_mode: info
                 .and_then(|info| info.sandbox_mode.clone())
                 .unwrap_or_default(),
+            superseded_by: superseded_by.unwrap_or_default().to_owned(),
             trashed: file.trashed,
         }
     }
@@ -1386,6 +1397,7 @@ mod tests {
                 reasoning_effort: String::new(),
                 approval_policy: String::new(),
                 sandbox_mode: String::new(),
+                superseded_by: String::new(),
                 trashed: false,
             },
             turns: RuleTurns {
@@ -1626,6 +1638,7 @@ mod tests {
                 reasoning_effort: String::new(),
                 approval_policy: String::new(),
                 sandbox_mode: String::new(),
+                superseded_by: String::new(),
                 trashed: false,
             },
             turns: RuleTurns {

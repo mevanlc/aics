@@ -400,6 +400,7 @@ fn main() -> Result<()> {
             json: cli.json,
             scope: rules_scope.clone(),
             filters: rules_filters.clone(),
+            supersession: manager.supersession_map()?,
         };
         let report = if let Some(draw_target) =
             progress_draw_target(cli.progress, cli.stdout_reserved())
@@ -459,6 +460,7 @@ fn main() -> Result<()> {
                 json: false,
                 scope: Scope::Global,
                 filters: SearchFilters::default(),
+                supersession: manager.supersession_map()?,
             };
             let report = if let Some(draw_target) =
                 progress_draw_target(cli.progress, cli.stdout_reserved())

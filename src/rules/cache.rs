@@ -13,7 +13,7 @@ use super::RawRuleOutcome;
 use crate::index::StoredSession;
 use crate::scan::SessionFile;
 
-const RULES_CACHE_FORMAT_VERSION: u32 = 2;
+const RULES_CACHE_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct ContentFingerprint {
@@ -82,6 +82,8 @@ pub(super) enum CacheLookup {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedSession {
     content: ContentFingerprint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    superseded_by: Option<String>,
     determination: CachedDetermination,
 }
 
@@ -175,10 +177,17 @@ impl RulesCache {
         self.reused
     }
 
-    pub(super) fn lookup(&mut self, file: &SessionFile) -> Result<CacheLookup> {
+    pub(super) fn lookup(
+        &mut self,
+        file: &SessionFile,
+        superseded_by: Option<&str>,
+    ) -> Result<CacheLookup> {
         let Some(cached) = self.state.sessions.get_mut(&normalize_path_key(&file.path)) else {
             return Ok(CacheLookup::Miss(None));
         };
+        if cached.superseded_by.as_deref() != superseded_by {
+            return Ok(CacheLookup::Miss(None));
+        }
         let current_metadata = FileMetadataFingerprint::from_session(file);
         if cached.content.metadata() == current_metadata {
             return Ok(CacheLookup::Hit {
@@ -207,12 +216,14 @@ impl RulesCache {
         &mut self,
         path: &Path,
         content: ContentFingerprint,
+        superseded_by: Option<&str>,
         determination: CachedDetermination,
     ) {
         self.state.sessions.insert(
             normalize_path_key(path),
             CachedSession {
                 content,
+                superseded_by: superseded_by.map(str::to_owned),
                 determination,
             },
         );
@@ -382,13 +393,14 @@ mod tests {
         cache.insert(
             &session,
             fingerprint_file(&session)?,
+            None,
             CachedDetermination::Ignored,
         );
         cache.save()?;
 
         let mut cache = RulesCache::open_with_binary(cache_path, &rules, &binary)?;
         assert!(matches!(
-            cache.lookup(&scanned_session(&session)?)?,
+            cache.lookup(&scanned_session(&session)?, None)?,
             CacheLookup::Hit {
                 determination: CachedDetermination::Ignored,
                 ..
@@ -404,7 +416,7 @@ mod tests {
             .modified_ns = 0;
         fs::write(&session, b"bravo")?;
         assert!(matches!(
-            cache.lookup(&scanned_session(&session)?)?,
+            cache.lookup(&scanned_session(&session)?, None)?,
             CacheLookup::Miss(Some(_))
         ));
         Ok(())
@@ -425,6 +437,7 @@ mod tests {
         cache.insert(
             &session,
             fingerprint_file(&session)?,
+            None,
             CachedDetermination::Ignored,
         );
         cache
@@ -436,11 +449,36 @@ mod tests {
             .crc32 ^= u32::MAX;
 
         assert!(matches!(
-            cache.lookup(&scanned_session(&session)?)?,
+            cache.lookup(&scanned_session(&session)?, None)?,
             CacheLookup::Hit {
                 determination: CachedDetermination::Ignored,
                 ..
             }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn cache_invalidates_when_supersession_changes() -> Result<()> {
+        let temp = TempDir::new()?;
+        let binary = temp.path().join("aics");
+        let rules = temp.path().join("rules.js");
+        let session = temp.path().join("session.jsonl");
+        let cache_path = temp.path().join("rules-cache.json");
+        fs::write(&binary, b"binary-v1")?;
+        fs::write(&rules, b"rules-v1")?;
+        fs::write(&session, b"session")?;
+
+        let mut cache = RulesCache::open_with_binary(cache_path, &rules, &binary)?;
+        cache.insert(
+            &session,
+            fingerprint_file(&session)?,
+            None,
+            CachedDetermination::NoMatch,
+        );
+        assert!(matches!(
+            cache.lookup(&scanned_session(&session)?, Some("keeper"))?,
+            CacheLookup::Miss(None)
         ));
         Ok(())
     }
@@ -460,6 +498,7 @@ mod tests {
         cache.insert(
             &session,
             fingerprint_file(&session)?,
+            None,
             CachedDetermination::Ignored,
         );
         cache.state.aics_bin.modified_ns = 0;
@@ -469,12 +508,13 @@ mod tests {
         fs::write(&binary, b"bin-two")?;
         let mut cache = RulesCache::open_with_binary(cache_path.clone(), &rules, &binary)?;
         assert!(matches!(
-            cache.lookup(&scanned_session(&session)?)?,
+            cache.lookup(&scanned_session(&session)?, None)?,
             CacheLookup::Miss(None)
         ));
         cache.insert(
             &session,
             fingerprint_file(&session)?,
+            None,
             CachedDetermination::Ignored,
         );
         cache.state.rules_js.modified_ns = 0;
@@ -483,7 +523,7 @@ mod tests {
         fs::write(&rules, b"rules-b")?;
         let mut cache = RulesCache::open_with_binary(cache_path, &rules, &binary)?;
         assert!(matches!(
-            cache.lookup(&scanned_session(&session)?)?,
+            cache.lookup(&scanned_session(&session)?, None)?,
             CacheLookup::Miss(None)
         ));
         Ok(())
@@ -504,6 +544,7 @@ mod tests {
         cache.insert(
             &session,
             fingerprint_file(&session)?,
+            None,
             CachedDetermination::Ignored,
         );
         cache.save()?;
@@ -564,6 +605,7 @@ mod tests {
             json: true,
             scope: Scope::Global,
             filters: SearchFilters::default(),
+            supersession: BTreeMap::new(),
         };
 
         let filtered = run_rules(&roots, &options)?;
@@ -620,6 +662,7 @@ mod tests {
             json: true,
             scope: Scope::Global,
             filters: SearchFilters::default(),
+            supersession: BTreeMap::new(),
         };
 
         let first = run_rules(&roots, &options)?;
@@ -632,6 +675,7 @@ mod tests {
         cache.insert(
             &session,
             fingerprint_file(&session)?,
+            None,
             CachedDetermination::Ignored,
         );
         cache.save()?;

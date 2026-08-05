@@ -41,8 +41,10 @@ Applying `untrash` to a normal session is skipped as already untrashed.
 
 Rules receive session metadata such as `session.model`,
 `session.modelProvider`, `session.reasoningEffort`, `session.approvalPolicy`, and
-`session.sandboxMode`. Optional string properties on `session` are empty strings
-when their values are unavailable.
+`session.sandboxMode`. `session.supersededBy` contains the keeper session ID when
+the session has been superseded by fork succession or equivalent-family
+collapse. Optional string properties on `session`, including `supersededBy`, are
+empty strings when their values are unavailable.
 
 ## Transcript access
 

@@ -509,6 +509,18 @@ impl IndexManager {
         SearchEngine::open_with_live_sessions(&self.paths, live_sessions)
     }
 
+    pub fn supersession_map(&self) -> Result<BTreeMap<PathBuf, String>> {
+        Ok(load_state(&self.paths.state_file)?
+            .files
+            .into_iter()
+            .filter_map(|(path, state)| {
+                state
+                    .superseded_by
+                    .map(|superseded_by| (PathBuf::from(path), superseded_by))
+            })
+            .collect())
+    }
+
     fn open_or_create_index(&self) -> Result<(Index, IndexSchema)> {
         let schema = IndexSchema::new();
         fs::create_dir_all(&self.paths.index_dir)

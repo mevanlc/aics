@@ -68,6 +68,9 @@ interface AicsRuleSession {
   /** Sandbox mode, or an empty string when unavailable. */
   sandboxMode: string;
 
+  /** Keeper session ID when this session is superseded, otherwise an empty string. */
+  supersededBy: string;
+
   /** Whether this file is currently in the AICS trash store. */
   trashed: boolean;
 }
