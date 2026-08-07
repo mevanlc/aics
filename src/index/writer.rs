@@ -17,7 +17,8 @@ use crate::index::reader::SearchEngine;
 use crate::index::schema::IndexSchema;
 use crate::live::LiveSessionTracker;
 use crate::parse::{
-    parse_session_file, Agent, DerivationType, MessageRole, Session, SessionInfo, SessionLineage,
+    parse_codex_session_meta_lineage_file, parse_session_file, Agent, DerivationType, MessageRole,
+    Session, SessionInfo, SessionLineage,
 };
 use crate::scan::{
     default_session_roots, scan_session_files_with_progress, ResolvedPaths, SessionFile,
@@ -394,7 +395,22 @@ impl IndexManager {
                     stats.updated += 1;
                     state
                 }
-                Ok(None) => IndexedFileState::from_file(file, false),
+                Ok(None) => {
+                    let mut state = IndexedFileState::from_file(file, false);
+                    if file.agent == Agent::Codex {
+                        match parse_codex_session_meta_lineage_file(&file.path) {
+                            Ok((session_id, lineage)) => {
+                                state.session_id = session_id;
+                                state.lineage = lineage;
+                            }
+                            Err(error) => warn!(
+                                "failed to read Codex lineage metadata from {}: {error:#}",
+                                file.path.display()
+                            ),
+                        }
+                    }
+                    state
+                }
                 Err(error) => {
                     warn!("failed to parse {}: {error:#}", file.path.display());
                     IndexedFileState::from_file(file, false)
@@ -589,7 +605,7 @@ fn searchable_content(session: &Session) -> String {
 
 /// Bump when stored fields or searchable-content semantics change so old state
 /// files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 9;
+const INDEX_FORMAT_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {
@@ -659,20 +675,67 @@ fn apply_supersession(state: &mut IndexState) {
     // Declared parent IDs bound all semantic comparisons to actual fork families.
     let keys = state.files.keys().cloned().collect::<Vec<_>>();
     let mut indexes_by_session = HashMap::<(Agent, String), Vec<usize>>::new();
+    let mut dependency_indexes_by_session = HashMap::<(Agent, String), Vec<usize>>::new();
     for (index, key) in keys.iter().enumerate() {
         let Some(file) = state.files.get(key) else {
             continue;
         };
-        if !file.indexed {
-            continue;
-        }
         if let Some(session_id) = file.session_id.as_ref() {
-            indexes_by_session
+            dependency_indexes_by_session
                 .entry((file.agent, session_id.clone()))
                 .or_default()
                 .push(index);
+            if file.indexed {
+                indexes_by_session
+                    .entry((file.agent, session_id.clone()))
+                    .or_default()
+                    .push(index);
+            }
         }
     }
+
+    // A reference-backed Codex fork cannot be reconstructed from its tip JSONL
+    // alone. Conservatively disqualify its complete declared lineage component,
+    // including copied ancestors and descendants, from supersession.
+    let mut dependency_parents = (0..keys.len()).collect::<Vec<_>>();
+    let mut reference_backed_indexes = Vec::new();
+    for (child_index, child_key) in keys.iter().enumerate() {
+        let Some(child) = state.files.get(child_key) else {
+            continue;
+        };
+        if child.lineage.history_base_session_id.is_some() {
+            reference_backed_indexes.push(child_index);
+        }
+        for parent_id in [
+            child.lineage.forked_from_session_id.as_ref(),
+            child.lineage.history_base_session_id.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let Some(parent_indexes) =
+                dependency_indexes_by_session.get(&(child.agent, parent_id.clone()))
+            else {
+                continue;
+            };
+            for &parent_index in parent_indexes {
+                if parent_index != child_index {
+                    union_families(&mut dependency_parents, parent_index, child_index);
+                }
+            }
+        }
+    }
+    let dependency_roots = (0..keys.len())
+        .map(|index| find_family(&mut dependency_parents, index))
+        .collect::<Vec<_>>();
+    let unsafe_dependency_roots = reference_backed_indexes
+        .into_iter()
+        .map(|index| dependency_roots[index])
+        .collect::<HashSet<_>>();
+    let supersession_safe = dependency_roots
+        .iter()
+        .map(|root| !unsafe_dependency_roots.contains(root))
+        .collect::<Vec<_>>();
 
     let mut family_parents = (0..keys.len()).collect::<Vec<_>>();
     let mut fork_edges = Vec::<ForkEdge>::new();
@@ -733,6 +796,7 @@ fn apply_supersession(state: &mut IndexState) {
         };
         if !file.indexed
             || file.trashed
+            || !supersession_safe[index]
             || family_sizes.get(&family_roots[index]).copied() == Some(1)
         {
             continue;
@@ -807,10 +871,11 @@ fn apply_supersession(state: &mut IndexState) {
     // successors so any continuation of an equivalent member hides the group.
     type SuccessorRank = (usize, u64, String, String);
     let mut best_successors = HashMap::<usize, (SuccessorRank, usize)>::new();
-    for edge in fork_edges
-        .iter()
-        .filter(|edge| edge.relation == LineageRelation::Supersedes)
-    {
+    for edge in fork_edges.iter().filter(|edge| {
+        edge.relation == LineageRelation::Supersedes
+            && supersession_safe[edge.parent]
+            && supersession_safe[edge.child]
+    }) {
         let source = representative[edge.parent];
         let target = representative[edge.child];
         if source == target {

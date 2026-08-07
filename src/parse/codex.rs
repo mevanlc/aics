@@ -22,6 +22,40 @@ use super::session::{
 };
 use super::tool_format;
 
+pub(crate) fn parse_codex_session_meta_lineage_file(
+    path: impl AsRef<Path>,
+) -> Result<(Option<String>, SessionLineage)> {
+    let path = path.as_ref();
+    let file = File::open(path)
+        .with_context(|| format!("failed to open Codex session {}", path.display()))?;
+    let reader = BufReader::new(file);
+
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+            continue;
+        }
+        let payload = value.get("payload").unwrap_or(&Value::Null);
+        return Ok((
+            string_field(payload, "id"),
+            SessionLineage {
+                forked_from_session_id: string_field(payload, "forked_from_id"),
+                history_base_session_id: payload
+                    .get("history_base")
+                    .and_then(|history_base| string_field(history_base, "thread_id")),
+                ..SessionLineage::default()
+            },
+        ));
+    }
+
+    Ok((None, SessionLineage::default()))
+}
+
 pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session>> {
     let path = path.as_ref();
     let file = File::open(path)
@@ -40,6 +74,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
     let mut session_info = SessionInfo::default();
     let mut cell_builder = CodexCellBuilder::default();
     let mut forked_from_session_id = None::<String>;
+    let mut history_base_session_id = None::<String>;
     let mut lineage_tracker = CodexLineageTracker::default();
 
     for line in reader.lines() {
@@ -87,6 +122,9 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
                 let payload = value.get("payload").unwrap_or(&Value::Null);
                 if session_id.is_none() {
                     forked_from_session_id = string_field(payload, "forked_from_id");
+                    history_base_session_id = payload
+                        .get("history_base")
+                        .and_then(|history_base| string_field(history_base, "thread_id"));
                 }
                 session_id = session_id.or_else(|| string_field(payload, "id"));
                 cwd = cwd.or_else(|| string_field(payload, "cwd"));
@@ -207,6 +245,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
         session_info,
         lineage: SessionLineage {
             forked_from_session_id,
+            history_base_session_id,
             semantic_event_ids,
             assistant_or_tool_event_ids,
             codex_user_turns,
@@ -2214,9 +2253,34 @@ mod cell_tests {
             session.lineage.forked_from_session_id.as_deref(),
             Some("parent")
         );
+        assert_eq!(session.lineage.history_base_session_id, None);
         assert_eq!(
             session.lineage.semantic_event_ids,
             ["function_call:call-1", "message:item-1"]
+        );
+    }
+
+    #[test]
+    fn parser_captures_reference_backed_codex_fork_lineage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fork.jsonl");
+        let body = concat!(
+            "{\"timestamp\":\"2026-08-07T18:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"forked_from_id\":\"logical-parent\",\"history_mode\":\"paginated\",\"history_base\":{\"thread_id\":\"physical-parent\",\"end_ordinal_exclusive\":42,\"end_byte_offset\":4096},\"cwd\":\"/tmp\"}}\n",
+            "{\"timestamp\":\"2026-08-07T18:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"item-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"continue\"}]}}\n",
+        );
+        std::fs::write(&path, body).expect("write fixture");
+
+        let session = parse_codex_session_file(&path)
+            .expect("parse")
+            .expect("session");
+
+        assert_eq!(
+            session.lineage.forked_from_session_id.as_deref(),
+            Some("logical-parent")
+        );
+        assert_eq!(
+            session.lineage.history_base_session_id.as_deref(),
+            Some("physical-parent")
         );
     }
 

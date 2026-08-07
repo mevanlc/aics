@@ -396,6 +396,11 @@ impl Session {
 pub struct SessionLineage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from_session_id: Option<String>,
+    /// Codex rollout whose paginated history prefix must be read to reconstruct
+    /// this session. Sessions in a family containing such a reference are not
+    /// eligible for supersession because no single tip JSONL is self-contained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_base_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub semantic_event_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -429,6 +434,7 @@ pub struct TrailingAbortedTurn {
 impl SessionLineage {
     pub fn is_empty(&self) -> bool {
         self.forked_from_session_id.is_none()
+            && self.history_base_session_id.is_none()
             && self.semantic_event_ids.is_empty()
             && self.inherited_event_ids.is_empty()
             && self.own_semantic_event_count == 0

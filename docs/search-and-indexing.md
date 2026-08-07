@@ -34,6 +34,13 @@ ordinary search reads the cached `superseded_by` property; when a changed or
 deleted fork alters the family collapse, affected family members are refreshed
 in addition to the changed files.
 
+Some paginated Codex forks store only a local suffix and name another rollout in
+`session_meta.payload.history_base` for their inherited prefix. If any member of
+a declared fork/reference family has such an external history dependency, AICS
+does not mark any session in that family as superseded. This keeps the visible
+set of required source rollouts out of the superseded review set, where users may
+choose sessions for deletion.
+
 Codex may leave a final aborted turn in the parent while creating a fork. AICS
 accepts two narrow forms of this exception. It ignores an otherwise-empty
 trailing user/`<turn_aborted>` pair when comparing semantic equivalence or when

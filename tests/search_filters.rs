@@ -377,6 +377,69 @@ fn superseded_filter_tracks_direct_codex_forks_across_incremental_sync() -> Resu
 }
 
 #[test]
+fn superseded_filter_excludes_families_with_reference_backed_codex_history() -> Result<()> {
+    let temp = TempDir::new()?;
+    let sessions = temp.path().join(".codex/sessions/2026/08/07");
+    fs::create_dir_all(&sessions)?;
+    fs::write(
+        sessions.join("parent.jsonl"),
+        concat!(
+            "{\"timestamp\":\"2026-08-07T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-08-07T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-08-07T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+        ),
+    )?;
+    fs::write(
+        sessions.join("copied-child.jsonl"),
+        concat!(
+            "{\"timestamp\":\"2026-08-07T10:01:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"copied-child\",\"forked_from_id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-08-07T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-08-07T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+            "{\"timestamp\":\"2026-08-07T10:01:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-2\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"continue\"}]}}\n",
+        ),
+    )?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        trash: None,
+    };
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+
+    let search = |superseded| -> Result<Vec<_>> {
+        manager.open_search_engine()?.search(&SearchRequest {
+            query: String::new(),
+            scope: Scope::Global,
+            limit: 10,
+            sort: SortMode::Time,
+            filters: SearchFilters {
+                superseded,
+                ..SearchFilters::default()
+            },
+        })
+    };
+
+    assert_eq!(search(SupersededFilter::No)?.len(), 1);
+    assert_eq!(search(SupersededFilter::Yes)?.len(), 1);
+
+    // This newly created tip has no local transcript yet and must follow
+    // copied-child's rollout to reconstruct the inherited history. Its presence
+    // still makes the whole parent -> copied-child -> referenced-tip chain
+    // ineligible for collapse.
+    fs::write(
+        sessions.join("referenced-tip.jsonl"),
+        "{\"timestamp\":\"2026-08-07T10:02:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"referenced-tip\",\"forked_from_id\":\"copied-child\",\"history_mode\":\"paginated\",\"history_base\":{\"thread_id\":\"copied-child\",\"end_ordinal_exclusive\":5,\"end_byte_offset\":2048},\"cwd\":\"/tmp/demo\"}}\n",
+    )?;
+    manager.sync_with_roots(&roots, false)?;
+
+    assert_eq!(search(SupersededFilter::Both)?.len(), 2);
+    assert_eq!(search(SupersededFilter::No)?.len(), 2);
+    assert!(search(SupersededFilter::Yes)?.is_empty());
+    assert!(manager.supersession_map()?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn superseded_filter_collapses_equivalent_codex_fork_siblings() -> Result<()> {
     let temp = TempDir::new()?;
     let sessions = temp.path().join(".codex/sessions/2026/08/01");
