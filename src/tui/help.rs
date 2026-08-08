@@ -861,6 +861,8 @@ fn search_query_help_text() -> &'static str {
 - Use uppercase AND, OR, and NOT for explicit boolean logic. Lowercase and/or/not are ordinary words.\n\
 - Use parentheses to group boolean clauses, for example (rust OR go) parser.\n\
 - Use quotes for an exact phrase, for example \"vector db\".\n\
+- Use working_dir:PATH or wd:PATH to match a case-insensitive working-directory prefix from any path-component boundary; for example wd:my/ja.\n\
+- Wrap a Tantivy term regex in < and >, optionally after a field name; for example wd:<.*codex/.*8ba3f7e.*>. Slashes need no escaping. Regexes match whole indexed terms, and \\> puts a literal > in the regex.\n\
 - AICS parses leniently, so malformed input should not open an error screen; Tantivy returns the usable parts it can parse.\n\
 \n\
 ## AICS ranking and display\n\
@@ -1028,6 +1030,8 @@ mod tests {
         assert!(text.contains("custom thread title"));
         assert!(text.contains("first user/resume-preview text"));
         assert!(text.contains("full parsed transcript"));
+        assert!(text.contains("wd:my/ja"));
+        assert!(text.contains("wd:<.*codex/.*8ba3f7e.*>"));
         assert!(text.contains("boosted 5x"));
         assert!(text.contains("recency boost"));
         assert!(text.contains("AGENTS.md/CLAUDE.md/environment boilerplate"));

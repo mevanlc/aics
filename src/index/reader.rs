@@ -2,11 +2,12 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use log::warn;
 use tantivy::collector::TopDocs;
 use tantivy::query::{AllQuery, BooleanQuery, BoostQuery, Query, QueryParser};
+use tantivy::query_grammar::{UserInputAst, UserInputLeaf};
 use tantivy::schema::Value;
 use tantivy::snippet::{Snippet, SnippetGenerator};
 use tantivy::{DocAddress, Index, IndexReader, Order, ReloadPolicy, TantivyDocument};
@@ -216,6 +217,7 @@ impl SearchEngine {
     ) -> Result<Self> {
         let index = Index::open_in_dir(&paths.index_dir)
             .with_context(|| format!("failed to open {}", paths.index_dir.display()))?;
+        IndexSchema::register_tokenizers(&index);
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
@@ -262,8 +264,9 @@ impl SearchEngine {
         }
 
         let query_parser = self.default_query_parser();
-        let (base_query, _) = query_parser.parse_query_lenient(query_text);
-        let final_query = build_phrase_boosted_query(&query_parser, query_text, base_query);
+        let (base_query, has_non_bare_syntax) = parse_query_with_aliases(&query_parser, query_text);
+        let final_query =
+            build_phrase_boosted_query(&query_parser, query_text, base_query, has_non_bare_syntax);
         let snippet_generator = self.make_snippet_generator(&searcher, &*final_query);
 
         let mut candidates = Vec::new();
@@ -373,8 +376,9 @@ impl SearchEngine {
         session_cache: &mut HashMap<DocAddress, StoredSession>,
     ) -> Result<Vec<SearchHit>> {
         let query_parser = self.default_query_parser();
-        let (base_query, _) = query_parser.parse_query_lenient(query_text);
-        let final_query = build_phrase_boosted_query(&query_parser, query_text, base_query);
+        let (base_query, has_non_bare_syntax) = parse_query_with_aliases(&query_parser, query_text);
+        let final_query =
+            build_phrase_boosted_query(&query_parser, query_text, base_query, has_non_bare_syntax);
         let snippet_generator = self.make_snippet_generator(searcher, &*final_query);
         let modified_ts_field = self.fields.schema.get_field_name(self.fields.modified_ts);
         let candidate_limit = candidate_limit(request, false);
@@ -427,6 +431,8 @@ impl SearchEngine {
     fn default_query_parser(&self) -> QueryParser {
         let mut query_parser = QueryParser::for_index(&self.index, vec![self.fields.content]);
         query_parser.set_conjunction_by_default();
+        query_parser.set_field_fuzzy(self.fields.working_dir, true, 0, false);
+        query_parser.allow_regexes();
         query_parser
     }
 
@@ -546,8 +552,10 @@ fn build_phrase_boosted_query(
     query_parser: &QueryParser,
     query_text: &str,
     base_query: Box<dyn Query>,
+    has_non_bare_syntax: bool,
 ) -> Box<dyn Query> {
-    if query_text.contains('"')
+    if has_non_bare_syntax
+        || query_text.contains('"')
         || extract_highlight_terms(query_text).len() < 2
         || has_explicit_boolean_operators(query_text)
     {
@@ -560,6 +568,163 @@ fn build_phrase_boosted_query(
         base_query,
         Box::new(BoostQuery::new(phrase_query, 5.0)),
     ]))
+}
+
+fn parse_query_with_aliases(
+    query_parser: &QueryParser,
+    query_text: &str,
+) -> (Box<dyn Query>, bool) {
+    let translated = translate_angle_regexes(query_text).unwrap_or_else(|_| query_text.to_owned());
+    let (mut ast, _) = tantivy::query_grammar::parse_query_lenient(&translated);
+    let has_non_bare_syntax = prepare_query_ast(&mut ast);
+    let (query, _) = query_parser.build_query_from_user_input_ast_lenient(ast);
+    (query, has_non_bare_syntax)
+}
+
+fn prepare_query_ast(ast: &mut UserInputAst) -> bool {
+    match ast {
+        UserInputAst::Clause(clauses) => {
+            let mut has_non_bare_syntax = false;
+            for (_, child) in clauses {
+                if prepare_query_ast(child) {
+                    has_non_bare_syntax = true;
+                }
+            }
+            has_non_bare_syntax
+        }
+        UserInputAst::Boost(child, _) => prepare_query_ast(child),
+        UserInputAst::Leaf(leaf) => match leaf.as_mut() {
+            UserInputLeaf::Literal(literal) => rewrite_optional_field(&mut literal.field_name),
+            UserInputLeaf::Range { field, .. } | UserInputLeaf::Set { field, .. } => {
+                rewrite_optional_field(field);
+                true
+            }
+            UserInputLeaf::Regex { field, .. } => {
+                if field.is_none() {
+                    *field = Some("content".to_owned());
+                } else {
+                    rewrite_optional_field(field);
+                }
+                true
+            }
+            UserInputLeaf::Exists { field } => {
+                rewrite_field(field);
+                true
+            }
+            UserInputLeaf::All => true,
+        },
+    }
+}
+
+fn translate_angle_regexes(query: &str) -> Result<String> {
+    let chars = query.chars().collect::<Vec<_>>();
+    let mut translated = String::with_capacity(query.len());
+    let mut index = 0;
+    let mut quote = None;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if let Some(delimiter) = quote {
+            translated.push(ch);
+            index += 1;
+            if ch == '\\' && index < chars.len() {
+                translated.push(chars[index]);
+                index += 1;
+            } else if ch == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+
+        if ch == '\\' && index + 1 < chars.len() {
+            translated.push(ch);
+            translated.push(chars[index + 1]);
+            index += 2;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+            translated.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch != '<' {
+            translated.push(ch);
+            index += 1;
+            continue;
+        }
+
+        let regex_start = index;
+        index += 1;
+        let mut pattern = String::new();
+        let mut backslash_run = 0usize;
+        let mut closed = false;
+        while index < chars.len() {
+            let pattern_ch = chars[index];
+            if pattern_ch == '>' {
+                if backslash_run.is_multiple_of(2) {
+                    closed = true;
+                    index += 1;
+                    break;
+                }
+                pattern.pop();
+                pattern.push('>');
+                backslash_run = 0;
+                index += 1;
+                continue;
+            }
+
+            pattern.push(pattern_ch);
+            if pattern_ch == '\\' {
+                backslash_run += 1;
+            } else {
+                backslash_run = 0;
+            }
+            index += 1;
+        }
+
+        if !closed {
+            return Err(anyhow!(
+                "unterminated angle regex beginning at character {regex_start}"
+            ));
+        }
+        if pattern.is_empty() {
+            return Err(anyhow!("angle regex cannot be empty"));
+        }
+        if chars
+            .get(index)
+            .is_some_and(|next| !next.is_whitespace() && *next != ')')
+        {
+            return Err(anyhow!(
+                "angle regex closing `>` must be followed by whitespace, `)`, or end of input"
+            ));
+        }
+
+        translated.push('/');
+        for pattern_ch in pattern.chars() {
+            if pattern_ch == '/' {
+                translated.push('\\');
+            }
+            translated.push(pattern_ch);
+        }
+        translated.push('/');
+    }
+
+    Ok(translated)
+}
+
+fn rewrite_optional_field(field: &mut Option<String>) -> bool {
+    let Some(field) = field else {
+        return false;
+    };
+    rewrite_field(field);
+    true
+}
+
+fn rewrite_field(field: &mut String) {
+    if field == "wd" {
+        *field = "working_dir".to_owned();
+    }
 }
 
 fn stored_session_from_document(
@@ -811,7 +976,7 @@ fn replace_case_insensitive(haystack: &str, needle: &str) -> String {
 mod tests {
     use super::{
         emphasize_terms, fallback_snippet, matches_scope, paths_equal, paths_equal_windows,
-        replace_case_insensitive, snippet_display_text, Scope,
+        replace_case_insensitive, snippet_display_text, translate_angle_regexes, Scope,
     };
     use crate::index::writer::StoredSession;
     use crate::parse::{Agent, DerivationType};
@@ -840,6 +1005,41 @@ mod tests {
             original_path: None,
             superseded_by: None,
         }
+    }
+
+    #[test]
+    fn angle_regex_translation_preserves_slashes_without_user_escaping() {
+        assert_eq!(
+            translate_angle_regexes(r"wd:<.*codex/.*8ba3f7e.*>").unwrap(),
+            r"wd:/.*codex\/.*8ba3f7e.*/"
+        );
+    }
+
+    #[test]
+    fn angle_regex_translation_uses_backslash_parity_for_closing_delimiter() {
+        assert_eq!(translate_angle_regexes(r"<c\>.*z>").unwrap(), r"/c>.*z/");
+        assert_eq!(
+            translate_angle_regexes(r"<c\\\>.*z>").unwrap(),
+            r"/c\\>.*z/"
+        );
+    }
+
+    #[test]
+    fn angle_regex_translation_rejects_early_close_followed_by_garbage() {
+        assert!(translate_angle_regexes(r"<c\\>.*z>").is_err());
+        assert!(translate_angle_regexes(r"<unterminated").is_err());
+    }
+
+    #[test]
+    fn angle_regex_translation_ignores_quoted_and_escaped_openers() {
+        assert_eq!(
+            translate_angle_regexes(r#""<not regex>" '<also not>' wd:<yes/now>"#).unwrap(),
+            r#""<not regex>" '<also not>' wd:/yes\/now/"#
+        );
+        assert_eq!(
+            translate_angle_regexes(r"\<literal>").unwrap(),
+            r"\<literal>"
+        );
     }
 
     // -- paths_equal ---------------------------------------------------------

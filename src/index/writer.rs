@@ -550,6 +550,7 @@ impl IndexManager {
                     .map(|fields| (index, fields))
             });
         if let Some(existing) = existing {
+            IndexSchema::register_tokenizers(&existing.0);
             return Ok(existing);
         }
 
@@ -563,6 +564,7 @@ impl IndexManager {
 
         let index = Index::create_in_dir(&self.paths.index_dir, schema.schema.clone())
             .with_context(|| format!("failed to create {}", self.paths.index_dir.display()))?;
+        IndexSchema::register_tokenizers(&index);
         Ok((index, schema))
     }
 }
@@ -580,6 +582,11 @@ fn add_session_document(
 
     document.add_text(fields.file_path, normalize_path_key(&session.file_path));
     document.add_text(fields.content, searchable_content(session));
+    if let Some(cwd) = session.cwd.as_deref() {
+        for term in working_dir_search_terms(cwd) {
+            document.add_text(fields.working_dir, term);
+        }
+    }
     document.add_u64(fields.modified_ts, session.modified_ts);
     document.add_text(fields.session_json, &stored_json);
 
@@ -603,9 +610,27 @@ fn searchable_content(session: &Session) -> String {
     chunks.join("\n\n")
 }
 
-/// Bump when stored fields or searchable-content semantics change so old state
-/// files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 10;
+fn working_dir_search_terms(cwd: &str) -> Vec<String> {
+    let normalized = cwd.replace('\\', "/");
+    let normalized = normalized.trim_end_matches('/');
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+
+    let mut terms = Vec::new();
+    terms.push(normalized.to_owned());
+    for (index, _) in normalized.match_indices('/') {
+        let suffix = &normalized[index + 1..];
+        if !suffix.is_empty() && terms.last().is_none_or(|last| last != suffix) {
+            terms.push(suffix.to_owned());
+        }
+    }
+    terms
+}
+
+/// Bump when indexed/stored fields or searchable-content semantics change so old
+/// state files are discarded and the index is rebuilt against fresh data.
+const INDEX_FORMAT_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {
@@ -1184,6 +1209,36 @@ mod tests {
                 .join("alice")
                 .join(".cache")
                 .join("aics")
+        );
+    }
+
+    #[test]
+    fn working_dir_search_terms_include_each_component_suffix() {
+        assert_eq!(
+            working_dir_search_terms(r"/Users/mclark/p/my/jave7-dizzy/"),
+            [
+                "/Users/mclark/p/my/jave7-dizzy",
+                "Users/mclark/p/my/jave7-dizzy",
+                "mclark/p/my/jave7-dizzy",
+                "p/my/jave7-dizzy",
+                "my/jave7-dizzy",
+                "jave7-dizzy",
+            ]
+        );
+    }
+
+    #[test]
+    fn working_dir_search_terms_normalize_windows_separators() {
+        assert_eq!(
+            working_dir_search_terms(r"C:\Users\mclark\p\my\jave7"),
+            [
+                "C:/Users/mclark/p/my/jave7",
+                "Users/mclark/p/my/jave7",
+                "mclark/p/my/jave7",
+                "p/my/jave7",
+                "my/jave7",
+                "jave7",
+            ]
         );
     }
 

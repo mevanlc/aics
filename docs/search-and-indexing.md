@@ -88,6 +88,16 @@ Queries use Tantivy's lenient query parser:
 - Use uppercase `AND`, `OR`, and `NOT` for explicit boolean logic.
 - Use parentheses to group clauses, such as `(rust OR go) parser`.
 - Use quotes for an exact phrase, such as `"vector db"`.
+- Use `working_dir:PATH` or its `wd:PATH` alias to match a case-insensitive
+  working-directory prefix beginning at any path-component boundary. For example,
+  `wd:my/ja` matches `/Users/me/p/my/javafx-ax` and `/Users/me/p/my/jave7`.
+- Wrap a Tantivy term regex in `<` and `>`, optionally after a field name. Slashes
+  are ordinary regex characters and need no query-language escaping, as in
+  `wd:<.*codex/.*8ba3f7e.*>`. Regexes match whole indexed terms, so use `.*` for
+  substring matching. Without a field prefix they target the `content` field's
+  lowercase word-like terms. Write `\>` for a literal `>` in the regex; an odd
+  run of backslashes escapes the delimiter and the outer parser removes exactly
+  one.
 - Malformed input is handled leniently; usable portions can still be searched.
 
 For bare multi-word queries without explicit boolean operators, AICS also adds
