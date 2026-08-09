@@ -85,6 +85,12 @@ enum FilterSide {
     Display,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MnemonicTarget {
+    Filter(FilterField),
+    Display(DisplayField),
+}
+
 #[derive(Debug, Clone)]
 pub struct FilterModalState {
     pub selected: RingCursor<FilterField>,
@@ -175,9 +181,8 @@ impl FilterModalState {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
             return Ok(FilterOutcome::SaveDefault(self.build_update(local_scope)?));
         }
-        if let Some(field) = self.mnemonic_target(key) {
-            self.selected_side = FilterSide::Filters;
-            self.selected.set(&field);
+        if let Some(target) = self.mnemonic_target(key) {
+            self.handle_mnemonic(target);
             return Ok(FilterOutcome::Stay);
         }
 
@@ -227,21 +232,9 @@ impl FilterModalState {
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(field) = field_at_position(area, column, row) {
-                    let was_selected =
-                        self.selected_side == FilterSide::Filters && self.selected == field;
-                    self.selected_side = FilterSide::Filters;
-                    self.selected.set(&field);
-                    if was_selected && !field.is_text() {
-                        self.adjust_current(true);
-                    }
+                    self.focus_or_adjust_filter(field);
                 } else if let Some(field) = display_at_position(area, column, row) {
-                    let was_selected =
-                        self.selected_side == FilterSide::Display && self.display_selected == field;
-                    self.selected_side = FilterSide::Display;
-                    self.display_selected.set(&field);
-                    if was_selected {
-                        self.toggle_display_current();
-                    }
+                    self.focus_or_toggle_display(field);
                 }
             }
             MouseEventKind::ScrollDown => {
@@ -333,7 +326,8 @@ impl FilterModalState {
                     Style::default().fg(theme.text)
                 };
                 Line::from(vec![
-                    Span::styled(prefix, style),
+                    Span::styled(format!("{prefix} "), style),
+                    Span::styled(format!("[{}] ", field.mnemonic()), style),
                     Span::styled(format!("{:<DISPLAY_LABEL_WIDTH$}", field.label()), style),
                     Span::styled(field.value(self.display_options), style),
                 ])
@@ -463,14 +457,16 @@ impl FilterModalState {
         }
     }
 
-    fn mnemonic_target(&self, key: KeyEvent) -> Option<FilterField> {
+    fn mnemonic_target(&self, key: KeyEvent) -> Option<MnemonicTarget> {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return None;
         }
 
         let is_alt = key.modifiers.contains(KeyModifiers::ALT);
         let is_plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
-        if !is_alt && (!is_plain || self.selected.current().is_text()) {
+        let is_editing_text =
+            self.selected_side == FilterSide::Filters && self.selected.current().is_text();
+        if !is_alt && (!is_plain || is_editing_text) {
             return None;
         }
 
@@ -478,6 +474,34 @@ impl FilterModalState {
             return None;
         };
         FilterField::from_mnemonic(ch)
+            .map(MnemonicTarget::Filter)
+            .or_else(|| DisplayField::from_mnemonic(ch).map(MnemonicTarget::Display))
+    }
+
+    fn handle_mnemonic(&mut self, target: MnemonicTarget) {
+        match target {
+            MnemonicTarget::Filter(field) => self.focus_or_adjust_filter(field),
+            MnemonicTarget::Display(field) => self.focus_or_toggle_display(field),
+        }
+    }
+
+    fn focus_or_adjust_filter(&mut self, field: FilterField) {
+        let was_selected = self.selected_side == FilterSide::Filters && self.selected == field;
+        self.selected_side = FilterSide::Filters;
+        self.selected.set(&field);
+        if was_selected && !field.is_text() {
+            self.adjust_current(true);
+        }
+    }
+
+    fn focus_or_toggle_display(&mut self, field: DisplayField) {
+        let was_selected =
+            self.selected_side == FilterSide::Display && self.display_selected == field;
+        self.selected_side = FilterSide::Display;
+        self.display_selected.set(&field);
+        if was_selected {
+            self.toggle_display_current();
+        }
     }
 
     fn adjust_current(&mut self, forward: bool) {
@@ -761,6 +785,23 @@ impl FilterField {
 }
 
 impl DisplayField {
+    fn mnemonic(self) -> char {
+        match self {
+            Self::ProjectDocsAutodump => '1',
+            Self::SkillTextInjection => '2',
+            Self::ToolCalls => '3',
+            Self::ToolResults => '4',
+            Self::AgentReplies => '5',
+            Self::UserMessages => '6',
+        }
+    }
+
+    fn from_mnemonic(ch: char) -> Option<Self> {
+        DISPLAY_ORDER
+            .into_iter()
+            .find(|field| field.mnemonic() == ch)
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::ProjectDocsAutodump => "AGENTS.md/CLAUDE.md",
@@ -899,6 +940,9 @@ mod tests {
         assert_eq!(DisplayField::SkillTextInjection.value(defaults), "on");
         assert_eq!(DisplayField::ToolResults.label(), "Tool Results");
         assert_eq!(DisplayField::ToolResults.value(defaults), "on");
+        for (field, mnemonic) in super::DISPLAY_ORDER.into_iter().zip('1'..='6') {
+            assert_eq!(field.mnemonic(), mnemonic);
+        }
     }
 
     #[test]
@@ -923,9 +967,24 @@ mod tests {
         let visibility_header = (0.."Visibility".len() as u16)
             .map(|offset| buffer[(right.x + offset, left.y - 1)].symbol())
             .collect::<String>();
-        let first_value_x = right.x + 1 + super::DISPLAY_LABEL_WIDTH as u16;
+        let mnemonic_x = right.x + 2;
+        let first_value_x = right.x + 6 + super::DISPLAY_LABEL_WIDTH as u16;
         assert_eq!(visibility_header, "Visibility");
         assert_eq!(right.x, left.right() + 1);
+        for (row_offset, mnemonic) in ('1'..='6').enumerate() {
+            assert_eq!(
+                buffer[(mnemonic_x, right.y + row_offset as u16)].symbol(),
+                "["
+            );
+            assert_eq!(
+                buffer[(mnemonic_x + 1, right.y + row_offset as u16)].symbol(),
+                mnemonic.to_string()
+            );
+            assert_eq!(
+                buffer[(mnemonic_x + 2, right.y + row_offset as u16)].symbol(),
+                "]"
+            );
+        }
         assert_eq!(buffer[(first_value_x - 2, right.y)].symbol(), " ");
         assert_eq!(buffer[(first_value_x - 1, right.y)].symbol(), " ");
         assert_eq!(buffer[(first_value_x, right.y)].symbol(), "o");
@@ -1027,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_mnemonic_jumps_from_non_text_field() {
+    fn plain_mnemonic_focuses_then_cycles_non_text_field() {
         let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
         let mut state = FilterModalState::new(
             &scope,
@@ -1045,6 +1104,17 @@ mod tests {
 
         assert!(matches!(outcome, super::FilterOutcome::Stay));
         assert_eq!(*state.selected.current(), FilterField::Sort);
+        assert_eq!(state.sort, SortMode::Time);
+
+        state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+                &scope,
+            )
+            .unwrap();
+
+        assert_eq!(*state.selected.current(), FilterField::Sort);
+        assert_eq!(state.sort, SortMode::Relevance);
     }
 
     #[test]
@@ -1086,6 +1156,46 @@ mod tests {
 
         assert_eq!(*state.selected.current(), FilterField::Scope);
         assert_eq!(state.branch.value(), "");
+    }
+
+    #[test]
+    fn display_mnemonic_focuses_then_toggles() {
+        let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
+        let mut state = FilterModalState::new(
+            &scope,
+            &SearchFilters::default(),
+            SortMode::Time,
+            DisplayOptions::default(),
+        );
+        assert!(state.selected.set(&FilterField::Branch));
+        state.selected_side = FilterSide::Display;
+
+        state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+                &scope,
+            )
+            .unwrap();
+
+        assert_eq!(state.selected_side, FilterSide::Display);
+        assert_eq!(
+            *state.display_selected.current(),
+            DisplayField::SkillTextInjection
+        );
+        assert!(!state.display_options.hide_skill_text_injection);
+
+        state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+                &scope,
+            )
+            .unwrap();
+
+        assert_eq!(
+            *state.display_selected.current(),
+            DisplayField::SkillTextInjection
+        );
+        assert!(state.display_options.hide_skill_text_injection);
     }
 
     #[test]
