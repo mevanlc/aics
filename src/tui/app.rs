@@ -28,7 +28,7 @@ use ratatui::{Frame, Terminal};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
-use crate::export::{session_to_plain_text, write_session_export};
+use crate::export::{session_to_plain_text_with_options, write_session_export};
 use crate::index::{
     IndexManager, Scope, SearchEngine, SearchFilters, SearchHit, SearchRequest, SortMode,
     SyncOutcome, TrashFilter,
@@ -2674,7 +2674,12 @@ impl App {
                 };
                 self.dispatch_summarize(&hit)?;
             }
-            SessionAction::Export => self.export_selected_session()?,
+            SessionAction::Export => {
+                self.export_selected_session(DisplayOptions::SHOW_ALL)?;
+            }
+            SessionAction::ExportFiltered => {
+                self.export_selected_session(self.display_options)?;
+            }
             SessionAction::CopyId => {
                 let Some(hit) = self.selected_hit() else {
                     return Ok(());
@@ -2870,11 +2875,11 @@ impl App {
         Ok(())
     }
 
-    fn export_selected_session(&mut self) -> Result<()> {
+    fn export_selected_session(&mut self, display_options: DisplayOptions) -> Result<()> {
         let Some(session) = self.selected_preview().cloned() else {
             bail!("no session selected");
         };
-        let rendered = session_to_plain_text(&session);
+        let rendered = session_to_plain_text_with_options(&session, display_options);
         let path = write_session_export(&session, &rendered)?;
         self.statusline = Some(statusline::Entry::completed(format!(
             "exported {}",

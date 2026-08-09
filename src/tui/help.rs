@@ -69,7 +69,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 20] = [
     HelpItem::new(
         "Enter",
         "open actions",
-        "Open the session actions menu for the selected result. From there you can view, export, copy metadata, delete, resume, or fork the session.",
+        "Open the session actions menu for the selected result. From there you can view, export the complete session or only content visible under the active ^F display options, copy metadata, delete, resume, or fork the session.",
     ),
     HelpItem::new(
         "^F",

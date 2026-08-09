@@ -10,7 +10,7 @@ use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
 use crate::tui::{keymap_hint, layout};
 
-const REGULAR_ACTIONS: [ActionItem; 12] = [
+const REGULAR_ACTIONS: [ActionItem; 13] = [
     ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
     ActionItem::new(SessionAction::ResumeInCwd, 'R', "Resume in CLI in CWD"),
     ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
@@ -18,6 +18,11 @@ const REGULAR_ACTIONS: [ActionItem; 12] = [
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
     ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
+    ActionItem::new(
+        SessionAction::ExportFiltered,
+        'E',
+        "Export as filtered .txt",
+    ),
     ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
     ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
     ActionItem::new(SessionAction::CopyDir, 'o', "Copy session directory"),
@@ -29,7 +34,7 @@ const REGULAR_ACTIONS: [ActionItem; 12] = [
     ),
 ];
 
-const TRASHED_ACTIONS: [ActionItem; 13] = [
+const TRASHED_ACTIONS: [ActionItem; 14] = [
     ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
     ActionItem::new(SessionAction::ResumeInCwd, 'R', "Resume in CLI in CWD"),
     ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
@@ -37,6 +42,11 @@ const TRASHED_ACTIONS: [ActionItem; 13] = [
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
     ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
+    ActionItem::new(
+        SessionAction::ExportFiltered,
+        'E',
+        "Export as filtered .txt",
+    ),
     ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
     ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
     ActionItem::new(SessionAction::CopyDir, 'o', "Copy session directory"),
@@ -73,6 +83,7 @@ pub enum SessionAction {
     View,
     Summarize,
     Export,
+    ExportFiltered,
     CopyId,
     CopyPath,
     CopyDir,
@@ -287,6 +298,7 @@ mod tests {
                 ('v', "View full conversation"),
                 ('s', "Summarize session (AI)"),
                 ('e', "Export as .txt"),
+                ('E', "Export as filtered .txt"),
                 ('i', "Copy session id"),
                 ('p', "Copy session path"),
                 ('o', "Copy session directory"),
@@ -336,6 +348,16 @@ mod tests {
         assert!(matches!(
             state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
             ActionOutcome::Run(SessionAction::ResumeInCwd)
+        ));
+    }
+
+    #[test]
+    fn capital_e_runs_filtered_export() {
+        let mut state = ActionMenuState::new(false);
+
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT)),
+            ActionOutcome::Run(SessionAction::ExportFiltered)
         ));
     }
 

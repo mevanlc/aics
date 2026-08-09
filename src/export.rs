@@ -42,8 +42,19 @@ const MAX_TITLE_SLUG_CHARS: usize = 48;
 /// Render a session as plain text: a role/timestamp line per message, then the
 /// body verbatim. This is what the TUI's export action writes.
 pub fn session_to_plain_text(session: &Session) -> String {
+    session_to_plain_text_with_options(session, DisplayOptions::SHOW_ALL)
+}
+
+/// Render a session as plain text, omitting the parts `display_options` hides.
+pub fn session_to_plain_text_with_options(
+    session: &Session,
+    display_options: DisplayOptions,
+) -> String {
     let mut output = String::new();
     for message in &session.messages {
+        if hides_message(display_options, message.role, &message.content) {
+            continue;
+        }
         let role_display = match (&message.role, &message.tool_name) {
             (MessageRole::ToolCall, Some(name)) => format!("tool_call({name})"),
             (MessageRole::ToolResult, Some(name)) => format!("tool_result({name})"),
@@ -969,6 +980,52 @@ mod tests {
         session.session_id = "!!!".to_owned();
 
         assert_eq!(markdown_export_stem(&session), "undated-claude-session");
+    }
+
+    #[test]
+    fn plain_text_with_options_hides_only_the_selected_message_roles() {
+        let mut session = sample_session();
+        session.messages = vec![
+            SessionMessage {
+                role: MessageRole::User,
+                content: "run the tests".to_owned(),
+                timestamp: None,
+                tool_name: None,
+            },
+            SessionMessage {
+                role: MessageRole::Assistant,
+                content: "on it".to_owned(),
+                timestamp: None,
+                tool_name: None,
+            },
+            SessionMessage {
+                role: MessageRole::ToolCall,
+                content: "cargo nextest run".to_owned(),
+                timestamp: None,
+                tool_name: Some("exec".to_owned()),
+            },
+            SessionMessage {
+                role: MessageRole::ToolResult,
+                content: "all green".to_owned(),
+                timestamp: None,
+                tool_name: Some("exec".to_owned()),
+            },
+        ];
+        let options = DisplayOptions {
+            hide_tool_calls: true,
+            hide_tool_results: true,
+            ..DisplayOptions::SHOW_ALL
+        };
+
+        let complete = session_to_plain_text(&session);
+        let filtered = session_to_plain_text_with_options(&session, options);
+
+        assert!(complete.contains("cargo nextest run"));
+        assert!(complete.contains("all green"));
+        assert!(filtered.contains("run the tests"));
+        assert!(filtered.contains("on it"));
+        assert!(!filtered.contains("cargo nextest run"));
+        assert!(!filtered.contains("all green"));
     }
 
     #[test]
