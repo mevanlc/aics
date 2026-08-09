@@ -41,6 +41,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
         .any(|component| component.as_os_str() == "subagents");
     let mut custom_title = None::<String>;
     let mut model = None::<String>;
+    let mut reasoning_effort = None::<String>;
     let mut messages = Vec::new();
     let mut content_chunks = Vec::new();
     let mut summary_chunks = Vec::new();
@@ -151,6 +152,9 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
                         .and_then(Value::as_str)
                         .and_then(nonempty_trimmed);
                 }
+                if reasoning_effort.is_none() {
+                    reasoning_effort = string_field(&value, "effort").and_then(nonempty_trimmed);
+                }
 
                 let is_meta = value
                     .get("isMeta")
@@ -245,10 +249,15 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
     let (first_msg_role, first_msg_content) = first_message_fields(&messages);
     let (last_msg_role, last_msg_content) = last_message_fields(&messages);
     let cells = cells_from_messages(&messages);
-    let session_info = model.map(|model| SessionInfo {
-        model: Some(model),
-        ..SessionInfo::default()
-    });
+    let session_info = if model.is_some() || reasoning_effort.is_some() {
+        Some(SessionInfo {
+            model,
+            reasoning_effort,
+            ..SessionInfo::default()
+        })
+    } else {
+        None
+    };
     let mut semantic_event_ids = semantic_event_ids.into_iter().collect::<Vec<_>>();
     semantic_event_ids.sort_unstable();
     let mut inherited_event_ids = inherited_event_ids.into_iter().collect::<Vec<_>>();
@@ -742,14 +751,14 @@ mod tests {
     }
 
     #[test]
-    fn parser_populates_first_nonempty_claude_model() {
+    fn parser_populates_first_nonempty_claude_model_and_effort() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("session.jsonl");
         let body = concat!(
             "{\"type\":\"user\",\"sessionId\":\"s1\",\"cwd\":\"/tmp/demo\",\"timestamp\":\"2026-07-01T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
-            "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"cwd\":\"/tmp/demo\",\"timestamp\":\"2026-07-01T00:00:01Z\",\"message\":{\"role\":\"assistant\",\"model\":\"   \",\"content\":[{\"type\":\"text\",\"text\":\"ignored blank model\"}]}}\n",
-            "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"cwd\":\"/tmp/demo\",\"timestamp\":\"2026-07-01T00:00:02Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[{\"type\":\"text\",\"text\":\"first real model\"}]}}\n",
-            "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"cwd\":\"/tmp/demo\",\"timestamp\":\"2026-07-01T00:00:03Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-4-7\",\"content\":[{\"type\":\"text\",\"text\":\"later model\"}]}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"cwd\":\"/tmp/demo\",\"timestamp\":\"2026-07-01T00:00:01Z\",\"effort\":\"   \",\"message\":{\"role\":\"assistant\",\"model\":\"   \",\"content\":[{\"type\":\"text\",\"text\":\"ignored blank metadata\"}]}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"cwd\":\"/tmp/demo\",\"timestamp\":\"2026-07-01T00:00:02Z\",\"effort\":\"xhigh\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[{\"type\":\"text\",\"text\":\"first real metadata\"}]}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"cwd\":\"/tmp/demo\",\"timestamp\":\"2026-07-01T00:00:03Z\",\"effort\":\"high\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-4-7\",\"content\":[{\"type\":\"text\",\"text\":\"later metadata\"}]}}\n",
         );
         std::fs::write(&path, body).expect("write fixture");
 
@@ -759,6 +768,7 @@ mod tests {
         let info = session.session_info.expect("session_info populated");
 
         assert_eq!(info.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(info.reasoning_effort.as_deref(), Some("xhigh"));
     }
 
     #[test]
