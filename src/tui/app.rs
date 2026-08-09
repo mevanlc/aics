@@ -3694,10 +3694,7 @@ fn load_codex_autosummary_index(codex_home: &Path) -> HashMap<String, CodexAutos
 }
 
 fn is_help_key(key: KeyEvent) -> bool {
-    (key.code == KeyCode::Char('?')
-        && !key.modifiers.contains(KeyModifiers::CONTROL)
-        && !key.modifiers.contains(KeyModifiers::ALT))
-        || (key.code == KeyCode::Char('l') && key.modifiers == KeyModifiers::CONTROL)
+    key.code == KeyCode::Char('l') && key.modifiers == KeyModifiers::CONTROL
 }
 
 fn build_resume_command(
@@ -4562,18 +4559,6 @@ mod tests {
     }
 
     #[test]
-    fn question_mark_opens_help_from_main_screen() {
-        let mut app = test_app();
-
-        app.handle_key(crossterm_key(KeyCode::Char('?'))).unwrap();
-
-        assert_eq!(
-            app.help.as_ref().map(|state| state.tab()),
-            Some(HelpTab::SessionList)
-        );
-    }
-
-    #[test]
     fn ctrl_l_opens_help_from_main_screen() {
         let mut app = test_app();
 
@@ -4586,21 +4571,6 @@ mod tests {
         assert_eq!(
             app.help.as_ref().map(|state| state.tab()),
             Some(HelpTab::SessionList)
-        );
-    }
-
-    #[test]
-    fn question_mark_opens_viewer_help_when_viewer_is_visible() {
-        let mut app = test_app();
-        app.results = vec![sample_hit(Agent::Claude)];
-        app.open_viewer();
-
-        app.handle_key(crossterm_key(KeyCode::Char('?'))).unwrap();
-
-        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
-        assert_eq!(
-            app.help.as_ref().map(|state| state.tab()),
-            Some(HelpTab::Viewer)
         );
     }
 

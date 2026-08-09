@@ -42,7 +42,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 20] = [
         "Type in the main search box to filter sessions. Searches dispatch after a short debounce, and the committed query is reused when you open the full viewer.",
     ),
     HelpItem::new(
-        "? / ^L",
+        "^L",
         "open this help",
         "Open the contextual hotkey help for the session list screen. This tab is selected by default when help is opened from the main search screen.",
     ),
@@ -140,7 +140,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 20] = [
 
 const VIEWER_ITEMS: [HelpItem; 16] = [
     HelpItem::new(
-        "?",
+        "^L",
         "open this help",
         "Open the contextual hotkey help while the dedicated viewer is visible. The viewer tab is selected by default when help is opened from the viewer.",
     ),

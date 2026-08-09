@@ -1,8 +1,7 @@
 # TUI keybindings
 
-Press `?` or `Ctrl+L` from the session list to open the contextual help. The
-help modal is searchable and includes separate Session List, Viewer, and Search
-Query tabs.
+Press `Ctrl+L` from the session list to open the contextual help. The help modal
+is searchable and includes separate Session List, Viewer, and Search Query tabs.
 
 In the tables below, `^` means Ctrl.
 
@@ -25,7 +24,7 @@ In the tables below, `^` means Ctrl.
 | `^Y` | Cycle the session-card snippet between session text and available summaries |
 | `^D` | Move the selected session to AICS trash; in rules preview, process marked proposals |
 | `Shift+←` / `Shift+→` | Resize the list/preview split |
-| `?` / `^L` | Open contextual help |
+| `^L` | Open contextual help |
 | `Esc` | Clear a non-empty query; quit when the query is empty |
 | `^C` | Quit immediately |
 | Double click | Open a session directly in the full viewer |
@@ -46,7 +45,7 @@ In the tables below, `^` means Ctrl.
 | `^F` | Open filters and display options |
 | `^D` | Move the current session to AICS trash |
 | `⏎` | Open the current session's actions menu |
-| `?` | Open contextual help on the Viewer tab |
+| `^L` | Open contextual help on the Viewer tab |
 | `Esc` | Close the viewer |
 | Mouse wheel | Scroll the conversation |
 
