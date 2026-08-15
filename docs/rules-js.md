@@ -38,6 +38,8 @@ rule("trash short commit helper sessions", ({ turns }) => {
 A rule can return `nothing()`, `trash(reason)`, or `untrash(reason)`. To evaluate
 trashed sessions for `untrash`, use `--trashed yes` or `--trashed both`.
 Applying `untrash` to a normal session is skipped as already untrashed.
+Antigravity conversations are multi-file bundles, so AICS safely skips both
+`trash` and `untrash` proposals for them.
 
 Rules receive session metadata such as `session.model`,
 `session.modelProvider`, `session.reasoningEffort`, `session.approvalPolicy`, and
@@ -87,7 +89,8 @@ Explicit all-rules evaluation and automatic startup evaluation use separate
 caches.
 
 Each cache tracks the byte length, modification time, and CRC32 of the running
-`aics` binary, `rules.js`, and each session file. Matching byte length and
+`aics` binary, `rules.js`, and each session source. Antigravity fingerprints
+include both transcript files and cache metadata. Matching byte length and
 modification time provide a metadata-only fast path. A byte-length difference is
 an immediate miss, while CRC32 checks same-length files whose modification time
 changed.

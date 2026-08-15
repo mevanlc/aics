@@ -129,6 +129,7 @@ fn long_lived_search_engine_drops_deleted_sessions_after_sync() -> Result<()> {
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     };
     let cache_root = temp.path().join("cache");
@@ -169,6 +170,7 @@ fn fixture_roots(temp: &TempDir) -> Result<SessionRoots> {
     Ok(SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     })
 }

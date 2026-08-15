@@ -1771,6 +1771,7 @@ fn message_colors(
         MessageRole::Assistant => match agent {
             Agent::Claude => (theme.claude, theme.bubble_claude),
             Agent::Codex => (theme.codex, theme.bubble_codex),
+            Agent::Antigravity => (theme.antigravity, theme.bubble_antigravity),
         },
         MessageRole::System => (theme.muted, theme.bubble_system),
         MessageRole::Summary => (theme.highlight, theme.bubble_summary),
@@ -1822,6 +1823,7 @@ fn sticky_header_for_message(agent: Agent, message: &crate::parse::SessionMessag
         MessageRole::Assistant => match agent {
             Agent::Claude => "Claude".to_owned(),
             Agent::Codex => "Codex".to_owned(),
+            Agent::Antigravity => "Antigravity".to_owned(),
         },
         _ => String::new(),
     };

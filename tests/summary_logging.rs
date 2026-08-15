@@ -27,6 +27,8 @@ fn summary_failure_is_durable_even_when_rust_log_is_off() -> Result<()> {
         claude_args: String::new(),
         codex_command: "codex".to_owned(),
         codex_args: String::new(),
+        antigravity_command: "agy".to_owned(),
+        antigravity_args: String::new(),
     })?;
 
     let deadline = Instant::now() + Duration::from_secs(5);

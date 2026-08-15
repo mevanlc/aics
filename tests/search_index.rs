@@ -213,6 +213,7 @@ fn working_dir_field_and_wd_alias_match_component_prefixes() -> Result<()> {
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     };
     let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
@@ -386,6 +387,7 @@ fn fixture_roots(temp: &TempDir) -> Result<SessionRoots> {
     Ok(SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     })
 }

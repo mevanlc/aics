@@ -64,7 +64,7 @@ indexed content.
 | Option | Meaning |
 | --- | --- |
 | `-n N`, `--num-results N` | Load or emit at most `N` results; default: `2000`, minimum effective value: `1` |
-| `--agent AGENT` | Include only `claude` or `codex` sessions |
+| `--agent AGENT` | Include only `claude`, `codex`, or `antigravity` sessions; `agy` is accepted as an Antigravity alias |
 | `--after DATE` | Include sessions on or after a date or timestamp |
 | `--before DATE` | Include sessions on or before a date or timestamp |
 | `--min-lines N` | Require at least `N` content lines |
@@ -228,9 +228,13 @@ and caching.
 | `--delete-index` | Delete the selected index profile and exit |
 | `--claude-home PATH` | Override the Claude Code home for this run |
 | `--codex-home PATH` | Override the Codex CLI home for this run |
+| `--antigravity-home PATH` | Override the Antigravity CLI home for this run |
 
 `--rebuild-index` and `--delete-index` conflict. Home overrides affect session
 discovery and select a cache profile based on the resulting session-root set.
+Antigravity resume is available only for the default
+`~/.gemini/antigravity-cli` home because `agy` does not expose a data-root
+override.
 
 See [Search and indexing](search-and-indexing.md) for default roots, environment
 overrides, cache profiles, and incremental indexing.

@@ -52,6 +52,10 @@ pub struct Settings {
     pub codex_command: String,
     #[serde(default = "default_codex_args")]
     pub codex_args: String,
+    #[serde(default = "default_antigravity_command")]
+    pub antigravity_command: String,
+    #[serde(default = "default_antigravity_args")]
+    pub antigravity_args: String,
     #[serde(default = "default_show_preview")]
     pub show_preview: bool,
     #[serde(default = "default_preview_width_pct")]
@@ -111,6 +115,8 @@ pub struct SettingsPatch {
     claude_args: Option<String>,
     codex_command: Option<String>,
     codex_args: Option<String>,
+    antigravity_command: Option<String>,
+    antigravity_args: Option<String>,
     show_preview: Option<bool>,
     preview_width_pct: Option<u16>,
     session_separator: Option<String>,
@@ -129,6 +135,8 @@ impl SettingsPatch {
             claude_args: Some(settings.claude_args.clone()),
             codex_command: Some(settings.codex_command.clone()),
             codex_args: Some(settings.codex_args.clone()),
+            antigravity_command: Some(settings.antigravity_command.clone()),
+            antigravity_args: Some(settings.antigravity_args.clone()),
             session_separator: Some(settings.session_separator.clone()),
             snippet_line_count: Some(settings.snippet_line_count),
             summarize_command: Some(settings.summarize_command.clone()),
@@ -182,6 +190,12 @@ impl SettingsPatch {
         }
         if let Some(value) = self.codex_args.as_ref() {
             settings.codex_args.clone_from(value);
+        }
+        if let Some(value) = self.antigravity_command.as_ref() {
+            settings.antigravity_command.clone_from(value);
+        }
+        if let Some(value) = self.antigravity_args.as_ref() {
+            settings.antigravity_args.clone_from(value);
         }
         if let Some(value) = self.show_preview {
             settings.show_preview = value;
@@ -249,6 +263,14 @@ fn default_codex_args() -> String {
     "--yolo".to_owned()
 }
 
+fn default_antigravity_command() -> String {
+    "agy".to_owned()
+}
+
+fn default_antigravity_args() -> String {
+    "--dangerously-skip-permissions".to_owned()
+}
+
 fn default_show_preview() -> bool {
     true
 }
@@ -281,6 +303,8 @@ impl Default for Settings {
             claude_args: default_claude_args(),
             codex_command: default_codex_command(),
             codex_args: default_codex_args(),
+            antigravity_command: default_antigravity_command(),
+            antigravity_args: default_antigravity_args(),
             show_preview: default_show_preview(),
             preview_width_pct: default_preview_width_pct(),
             session_separator: default_session_separator(),
@@ -420,6 +444,16 @@ impl Settings {
                 .collect(),
         )
     }
+
+    pub fn antigravity_program_and_args(&self) -> (String, Vec<String>) {
+        (
+            self.antigravity_command.clone(),
+            self.antigravity_args
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect(),
+        )
+    }
 }
 
 fn load_raw_settings(path: &Path) -> Result<Option<Value>> {
@@ -503,6 +537,8 @@ const SETTINGS_FIELD_NAMES: &[&str] = &[
     "claude_args",
     "codex_command",
     "codex_args",
+    "antigravity_command",
+    "antigravity_args",
     "show_preview",
     "preview_width_pct",
     "session_separator",
@@ -594,6 +630,8 @@ mod tests {
         assert_eq!(parsed.claude_args, "--dangerously-skip-permissions");
         assert_eq!(parsed.codex_command, "codex");
         assert_eq!(parsed.codex_args, "--yolo");
+        assert_eq!(parsed.antigravity_command, "agy");
+        assert_eq!(parsed.antigravity_args, "--dangerously-skip-permissions");
         assert!(parsed.show_preview);
         assert_eq!(parsed.preview_width_pct, 40);
         assert_eq!(parsed.display_options, DisplayOptions::default());

@@ -30,9 +30,11 @@ pub struct Theme {
     pub list_body_bg: Color,
     pub claude: Color,
     pub codex: Color,
+    pub antigravity: Color,
     pub bubble_user: Color,
     pub bubble_claude: Color,
     pub bubble_codex: Color,
+    pub bubble_antigravity: Color,
     pub bubble_system: Color,
     pub bubble_summary: Color,
     pub tool: Color,
@@ -64,6 +66,7 @@ impl Theme {
         let text = Color::Rgb(230, 232, 236);
         let muted = muted_greater.brighten(1.600);
         let codex = Color::Rgb(86, 194, 131);
+        let antigravity = Color::Rgb(180, 140, 255);
         let tool = Color::Rgb(100, 200, 210);
 
         Self {
@@ -86,9 +89,11 @@ impl Theme {
             list_body_bg,
             claude: Color::Rgb(242, 153, 74),
             codex,
+            antigravity,
             bubble_user: selection.brighten(0.080),
             bubble_claude: Color::Rgb(74, 50, 28),
             bubble_codex: codex.darken(0.671),
+            bubble_antigravity: antigravity.darken(0.760),
             bubble_system: list_body_bg.brighten(0.963),
             bubble_summary: Color::Rgb(60, 54, 32),
             tool,
@@ -107,6 +112,7 @@ impl Theme {
         let muted_greater = border.darken(0.236);
         let claude = Color::Rgb(242, 153, 74);
         let codex = Color::Rgb(86, 194, 131);
+        let antigravity = Color::Rgb(180, 140, 255);
         let tool = Color::Rgb(80, 190, 200);
 
         Self {
@@ -129,9 +135,11 @@ impl Theme {
             list_body_bg: border.darken(0.692),
             claude,
             codex,
+            antigravity,
             bubble_user: Color::Rgb(20, 20, 50),
             bubble_claude: claude.darken(0.784),
             bubble_codex: codex.darken(0.791),
+            bubble_antigravity: antigravity.darken(0.810),
             bubble_system: border.darken(0.471),
             bubble_summary: Color::Rgb(45, 40, 20),
             tool,
@@ -144,6 +152,7 @@ impl Theme {
     pub fn sunset() -> Self {
         let focus_border = Color::Rgb(255, 122, 89);
         let codex = Color::Rgb(108, 210, 196);
+        let antigravity = Color::Rgb(196, 150, 255);
         let muted = Color::Rgb(164, 155, 162);
         let text = Color::Rgb(248, 239, 234);
         let muted_greater = muted.darken(0.622);
@@ -171,9 +180,11 @@ impl Theme {
             list_body_bg: list_header_bg.darken(0.349),
             claude: bubble_claude.brighten(2.484),
             codex,
+            antigravity,
             bubble_user: list_header_bg.brighten(0.143),
             bubble_claude,
             bubble_codex: Color::Rgb(24, 73, 73),
+            bubble_antigravity: Color::Rgb(58, 36, 78),
             bubble_system: selection.darken(0.286),
             bubble_summary: Color::Rgb(92, 67, 31),
             tool: codex,
@@ -196,6 +207,7 @@ impl Theme {
         let highlight = Color::Rgb(208, 166, 89);
         let claude = Color::Rgb(184, 120, 40);
         let codex = Color::Rgb(104, 136, 88);
+        let antigravity = Color::Rgb(136, 96, 168);
         let tool = Color::Rgb(104, 72, 128);
 
         Self {
@@ -218,9 +230,11 @@ impl Theme {
             list_body_bg,
             claude,
             codex,
+            antigravity,
             bubble_user: Color::Rgb(16, 12, 10),
             bubble_claude: Color::Rgb(32, 20, 12),
             bubble_codex: Color::Rgb(18, 24, 16),
+            bubble_antigravity: Color::Rgb(28, 18, 36),
             bubble_system: Color::Rgb(16, 16, 16),
             bubble_summary: Color::Rgb(24, 30, 18),
             tool,
@@ -228,7 +242,7 @@ impl Theme {
         }
     }
 
-    pub fn palette_entries(&self) -> [PaletteEntry; 26] {
+    pub fn palette_entries(&self) -> [PaletteEntry; 28] {
         [
             PaletteEntry {
                 name: "border",
@@ -307,6 +321,10 @@ impl Theme {
                 color: self.codex,
             },
             PaletteEntry {
+                name: "antigravity",
+                color: self.antigravity,
+            },
+            PaletteEntry {
                 name: "bubble_user",
                 color: self.bubble_user,
             },
@@ -317,6 +335,10 @@ impl Theme {
             PaletteEntry {
                 name: "bubble_codex",
                 color: self.bubble_codex,
+            },
+            PaletteEntry {
+                name: "bubble_antigravity",
+                color: self.bubble_antigravity,
             },
             PaletteEntry {
                 name: "bubble_system",
@@ -409,9 +431,9 @@ mod tests {
     fn palette_entries_cover_all_theme_fields() {
         let entries = Theme::aics().palette_entries();
 
-        assert_eq!(entries.len(), 26);
+        assert_eq!(entries.len(), 28);
         assert_eq!(entries[0].name, "border");
-        assert_eq!(entries[25].name, "bubble_tool");
+        assert_eq!(entries[27].name, "bubble_tool");
     }
 
     #[test]

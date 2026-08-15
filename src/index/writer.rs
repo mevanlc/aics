@@ -17,8 +17,8 @@ use crate::index::reader::SearchEngine;
 use crate::index::schema::IndexSchema;
 use crate::live::LiveSessionTracker;
 use crate::parse::{
-    parse_codex_session_meta_lineage_file, parse_session_file, Agent, DerivationType, MessageRole,
-    Session, SessionInfo, SessionLineage,
+    parse_codex_session_meta_lineage_file, parse_scanned_session_file, Agent, DerivationType,
+    MessageRole, Session, SessionInfo, SessionLineage,
 };
 use crate::scan::{
     default_session_roots, scan_session_files_with_progress, ResolvedPaths, SessionFile,
@@ -220,9 +220,10 @@ impl IndexManager {
             .with_context(|| format!("failed to create {}", self.paths.cache_root.display()))?;
 
         let metadata = ProfileMetadata {
-            version: 1,
+            version: 2,
             claude_home: resolved.homes.claude_home.clone(),
             codex_home: resolved.homes.codex_home.clone(),
+            antigravity_home: resolved.homes.antigravity_home.clone(),
             claude_projects: resolved.roots.claude_projects.clone(),
             claude_sessions: resolved.claude_sessions.clone(),
             codex_sessions: resolved.roots.codex_sessions.clone(),
@@ -388,7 +389,7 @@ impl IndexManager {
         let mut parsed_sessions = HashMap::<String, Session>::new();
         for (index, file) in pending_files.iter().enumerate() {
             let key = normalize_path_key(&file.path);
-            let state = match parse_session_file(file.agent, &file.path) {
+            let state = match parse_scanned_session_file(file) {
                 Ok(Some(session)) => {
                     let state = IndexedFileState::from_session(file, &session);
                     parsed_sessions.insert(key.clone(), session);
@@ -454,7 +455,7 @@ impl IndexManager {
             let Some(file) = scanned_by_key.get(&key) else {
                 continue;
             };
-            match parse_session_file(file.agent, &file.path) {
+            match parse_scanned_session_file(file) {
                 Ok(Some(session)) => {
                     writer.delete_term(Term::from_field_text(fields.file_path, &key));
                     let superseded_by = next_state
@@ -630,7 +631,7 @@ fn working_dir_search_terms(cwd: &str) -> Vec<String> {
 
 /// Bump when indexed/stored fields or searchable-content semantics change so old
 /// state files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 11;
+const INDEX_FORMAT_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {
@@ -646,6 +647,8 @@ struct IndexedFileState {
     agent: Agent,
     trashed: bool,
     original_path: Option<PathBuf>,
+    #[serde(default)]
+    source_signature: u64,
     indexed: bool,
     #[serde(default)]
     session_id: Option<String>,
@@ -667,6 +670,7 @@ impl IndexedFileState {
             agent: file.agent,
             trashed: file.trashed,
             original_path: file.original_path.clone(),
+            source_signature: file.source_signature,
             indexed,
             session_id: None,
             lineage: SessionLineage::default(),
@@ -688,6 +692,7 @@ impl IndexedFileState {
             agent: self.agent,
             trashed: self.trashed,
             original_path: self.original_path.clone(),
+            source_signature: self.source_signature,
         }
     }
 }
@@ -966,6 +971,7 @@ fn lineage_relation(
 ) -> LineageRelation {
     match agent {
         Agent::Codex => codex_lineage_relation(parent, child),
+        Agent::Antigravity => LineageRelation::Unrelated,
         Agent::Claude => {
             if !parent
                 .semantic_event_ids
@@ -1077,6 +1083,7 @@ fn semantic_equivalence_key(agent: Agent, lineage: &SessionLineage) -> Vec<Strin
             event_ids.dedup();
             event_ids
         }
+        Agent::Antigravity => Vec::new(),
     }
 }
 
@@ -1106,6 +1113,7 @@ struct FileFingerprint {
     agent: Agent,
     trashed: bool,
     original_path: Option<PathBuf>,
+    source_signature: u64,
 }
 
 impl From<&SessionFile> for FileFingerprint {
@@ -1120,6 +1128,7 @@ impl From<&SessionFile> for FileFingerprint {
             agent: file.agent,
             trashed: file.trashed,
             original_path: file.original_path.clone(),
+            source_signature: file.source_signature,
         }
     }
 }
@@ -1162,6 +1171,7 @@ struct ProfileMetadata {
     version: u32,
     claude_home: PathBuf,
     codex_home: PathBuf,
+    antigravity_home: PathBuf,
     claude_projects: PathBuf,
     claude_sessions: PathBuf,
     codex_sessions: PathBuf,

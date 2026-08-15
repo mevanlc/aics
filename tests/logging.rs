@@ -43,6 +43,7 @@ fn built_in_json_warning_obeys_rust_log_without_contaminating_stdout() -> Result
             .env("AICS_DATA_ROOT", temp.path().join("data"))
             .env("AICS_CLAUDE_PROJECTS_DIR", temp.path().join("claude"))
             .env("AICS_CODEX_SESSIONS_DIR", &codex)
+            .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
             .env("RUST_LOG", rust_log)
             .args(["--json", "--progress", "none", "-g"])
             .output()
@@ -138,6 +139,7 @@ fn copied_template_is_authoritative_and_uses_reserved_process_paths() -> Result<
         .env("AICS_DATA_ROOT", temp.path().join("data"))
         .env("AICS_CLAUDE_PROJECTS_DIR", temp.path().join("claude"))
         .env("AICS_CODEX_SESSIONS_DIR", &codex)
+        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
         .env("RUST_LOG", "off")
         .args(["--json", "--progress", "none", "-g"])
         .output()?;
@@ -222,6 +224,7 @@ fn interactive_command(temp: &TempDir, config: &Path, claude: &Path, codex: &Pat
         .env("AICS_DATA_ROOT", temp.path().join("data"))
         .env("AICS_CLAUDE_PROJECTS_DIR", claude)
         .env("AICS_CODEX_SESSIONS_DIR", codex)
+        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
         .env("RUST_LOG", "off")
         .arg("--progress")
         .arg("none")

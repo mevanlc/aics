@@ -41,6 +41,10 @@ pub struct SummaryCommand {
     pub codex_command: String,
     /// Value to substitute for `{{codex_args}}` (raw, unescaped).
     pub codex_args: String,
+    /// Value to substitute for `{{antigravity_command}}` (program name only).
+    pub antigravity_command: String,
+    /// Value to substitute for `{{antigravity_args}}` (raw, unescaped).
+    pub antigravity_args: String,
 }
 
 /// Lifecycle events emitted by the worker.
@@ -168,9 +172,11 @@ fn run_one(command: &SummaryCommand) -> Result<PathBuf> {
     escape_vars.insert("output_file", &output_file_str);
     escape_vars.insert("claude_command", &command.claude_command);
     escape_vars.insert("codex_command", &command.codex_command);
+    escape_vars.insert("antigravity_command", &command.antigravity_command);
     let mut raw_vars: HashMap<&str, &str> = HashMap::new();
     raw_vars.insert("claude_args", &command.claude_args);
     raw_vars.insert("codex_args", &command.codex_args);
+    raw_vars.insert("antigravity_args", &command.antigravity_args);
     let expanded_cmd = expand_shell(&command.command_template, &escape_vars, &raw_vars)
         .context("failed to expand summary command template")?;
     debug!("summary exec: {expanded_cmd}");
@@ -299,6 +305,8 @@ mod tests {
                 claude_args: String::new(),
                 codex_command: "codex".to_owned(),
                 codex_args: String::new(),
+                antigravity_command: "agy".to_owned(),
+                antigravity_args: String::new(),
             })
             .unwrap();
 
@@ -351,6 +359,8 @@ mod tests {
                 claude_args: String::new(),
                 codex_command: "codex".to_owned(),
                 codex_args: String::new(),
+                antigravity_command: "agy".to_owned(),
+                antigravity_args: String::new(),
             })
             .unwrap();
 

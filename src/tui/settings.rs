@@ -31,6 +31,8 @@ enum SettingsField {
     ClaudeArgs,
     CodexCommand,
     CodexArgs,
+    AntigravityCommand,
+    AntigravityArgs,
     EditSummarizer,
 }
 
@@ -44,6 +46,8 @@ pub struct SettingsModalState {
     claude_args_input: Input,
     codex_command_input: Input,
     codex_args_input: Input,
+    antigravity_command_input: Input,
+    antigravity_args_input: Input,
     summarizer: Option<SummarizerModalState>,
     base: Settings,
 }
@@ -67,6 +71,9 @@ impl SettingsModalState {
             claude_args_input: Input::default().with_value(settings.claude_args.clone()),
             codex_command_input: Input::default().with_value(settings.codex_command.clone()),
             codex_args_input: Input::default().with_value(settings.codex_args.clone()),
+            antigravity_command_input: Input::default()
+                .with_value(settings.antigravity_command.clone()),
+            antigravity_args_input: Input::default().with_value(settings.antigravity_args.clone()),
             summarizer: None,
             base: settings.clone(),
         }
@@ -137,6 +144,13 @@ impl SettingsModalState {
             SettingsField::CodexArgs => {
                 self.codex_args_input.handle_event(&Event::Key(key));
             }
+            SettingsField::AntigravityCommand => {
+                self.antigravity_command_input
+                    .handle_event(&Event::Key(key));
+            }
+            SettingsField::AntigravityArgs => {
+                self.antigravity_args_input.handle_event(&Event::Key(key));
+            }
             SettingsField::EditSummarizer => {}
         }
         SettingsOutcome::Stay
@@ -199,7 +213,9 @@ impl SettingsModalState {
                         | SettingsField::ClaudeCommand
                         | SettingsField::ClaudeArgs
                         | SettingsField::CodexCommand
-                        | SettingsField::CodexArgs => {}
+                        | SettingsField::CodexArgs
+                        | SettingsField::AntigravityCommand
+                        | SettingsField::AntigravityArgs => {}
                     }
                 }
             }
@@ -308,23 +324,42 @@ impl SettingsModalState {
             codex_args_focused,
         );
 
+        let antigravity_cmd_focused = self.field == SettingsField::AntigravityCommand;
+        render_inline_text_field(
+            frame,
+            rows[16],
+            theme,
+            "Antigravity Command",
+            &self.antigravity_command_input,
+            antigravity_cmd_focused,
+        );
+        let antigravity_args_focused = self.field == SettingsField::AntigravityArgs;
+        render_inline_text_field(
+            frame,
+            rows[17],
+            theme,
+            "Antigravity Args",
+            &self.antigravity_args_input,
+            antigravity_args_focused,
+        );
+
         frame.render_widget(
             Paragraph::new("─".repeat(inner.width as usize))
                 .style(Style::default().fg(theme.focus_border)),
-            rows[16],
+            rows[19],
         );
 
         let button_focused = self.field == SettingsField::EditSummarizer;
-        render_edit_summarizer_button(frame, rows[18], theme, button_focused);
+        render_edit_summarizer_button(frame, rows[21], theme, button_focused);
         if button_focused {
-            set_row_cursor(frame, rows[18], 2);
+            set_row_cursor(frame, rows[21], 2);
         }
 
         // Bottom divider + hints
         frame.render_widget(
             Paragraph::new("─".repeat(inner.width as usize))
                 .style(Style::default().fg(theme.focus_border)),
-            rows[20],
+            rows[23],
         );
         const HINTS: [keymap_hint::KeymapHint; 4] = [
             keymap_hint::KeymapHint::new("Tab/⇧Tab", "navigate"),
@@ -332,7 +367,7 @@ impl SettingsModalState {
             keymap_hint::KeymapHint::new("^S", "save"),
             keymap_hint::KeymapHint::new("Esc", "cancel"),
         ];
-        keymap_hint::render(frame, rows[21], &HINTS, theme, "");
+        keymap_hint::render(frame, rows[24], &HINTS, theme, "");
 
         if let Some(summarizer) = self.summarizer.as_mut() {
             summarizer.render(frame, popup, theme);
@@ -466,6 +501,8 @@ impl SettingsModalState {
             claude_args: self.claude_args_input.value().to_owned(),
             codex_command: self.codex_command_input.value().to_owned(),
             codex_args: self.codex_args_input.value().to_owned(),
+            antigravity_command: self.antigravity_command_input.value().to_owned(),
+            antigravity_args: self.antigravity_args_input.value().to_owned(),
             session_separator: self.separator_input.value().to_owned(),
             snippet_line_count,
             summarize_command: self.base.summarize_command.clone(),
@@ -490,7 +527,7 @@ impl SettingsModalState {
 }
 
 fn settings_popup_area(area: Rect) -> Rect {
-    layout::centered_rect(area, 72, 70)
+    layout::centered_rect(area, 72, 78)
 }
 
 fn settings_rows(area: Rect) -> Vec<Rect> {
@@ -517,12 +554,15 @@ fn settings_rows_from_inner(inner: Rect) -> Vec<Rect> {
         Constraint::Length(1), // 13 Codex CLI Command inline
         Constraint::Length(1), // 14 Codex CLI Args inline
         Constraint::Length(1), // 15 spacing
-        Constraint::Length(1), // 16 divider
-        Constraint::Length(1), // 17 spacing
-        Constraint::Length(1), // 18 Edit summarizer button
-        Constraint::Min(0),    // 19 flex slack
-        Constraint::Length(1), // 20 bottom divider
-        Constraint::Length(1), // 21 hints
+        Constraint::Length(1), // 16 Antigravity Command inline
+        Constraint::Length(1), // 17 Antigravity Args inline
+        Constraint::Length(1), // 18 spacing
+        Constraint::Length(1), // 19 divider
+        Constraint::Length(1), // 20 spacing
+        Constraint::Length(1), // 21 Edit summarizer button
+        Constraint::Min(0),    // 22 flex slack
+        Constraint::Length(1), // 23 bottom divider
+        Constraint::Length(1), // 24 hints
     ])
     .split(inner)
     .to_vec()
@@ -538,7 +578,9 @@ fn settings_field_at(area: Rect, column: u16, row: u16) -> Option<SettingsField>
         (11, SettingsField::ClaudeArgs),
         (13, SettingsField::CodexCommand),
         (14, SettingsField::CodexArgs),
-        (18, SettingsField::EditSummarizer),
+        (16, SettingsField::AntigravityCommand),
+        (17, SettingsField::AntigravityArgs),
+        (21, SettingsField::EditSummarizer),
     ]
     .into_iter()
     .find_map(|(index, field)| contains(rows[index], column, row).then_some(field))
@@ -557,6 +599,8 @@ fn settings_field_cursor(selected: SettingsField) -> RingCursor<SettingsField> {
         SettingsField::ClaudeArgs,
         SettingsField::CodexCommand,
         SettingsField::CodexArgs,
+        SettingsField::AntigravityCommand,
+        SettingsField::AntigravityArgs,
         SettingsField::EditSummarizer,
     ]);
     assert!(cursor.set(&selected));
@@ -1842,6 +1886,7 @@ impl TemplatePicker {
         let docs = concat!(
             "Placeholders: {{jsonl_dir}}, {{prompt_file}}, {{output_file}},\n",
             "  {{claude_command}}, {{claude_args}}, {{codex_command}}, {{codex_args}},\n",
+            "  {{antigravity_command}}, {{antigravity_args}},\n",
             "  {{model_flag}}, {{effort_flag}} (resolved on insert from pickers above).\n",
             "Edit after inserting; we run it verbatim through your shell."
         );
@@ -2253,8 +2298,8 @@ mod tests {
         state.handle_mouse(
             area,
             MouseEventKind::Down(MouseButton::Left),
-            rows[18].x,
-            rows[18].y,
+            rows[21].x,
+            rows[21].y,
         );
 
         assert_eq!(*state.field.current(), SettingsField::EditSummarizer);
@@ -2358,7 +2403,7 @@ mod tests {
 
         assert_eq!(
             terminal.backend().cursor_position(),
-            Position::new(rows[18].x + 2, rows[18].y)
+            Position::new(rows[21].x + 2, rows[21].y)
         );
     }
 

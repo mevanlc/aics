@@ -57,16 +57,18 @@ AICS expands these placeholders when it runs the command:
 | `{{claude_args}}` | Configured Claude Code arguments |
 | `{{codex_command}}` | Configured Codex CLI executable |
 | `{{codex_args}}` | Configured Codex CLI arguments |
+| `{{antigravity_command}}` | Configured Antigravity CLI executable |
+| `{{antigravity_args}}` | Configured Antigravity CLI arguments |
 
 `{{model_flag}}` and `{{effort_flag}}` appear only in the template picker. The
 picker replaces them before inserting the command.
 
 The command is run verbatim through the user's shell. Path-like placeholder
-values are escaped for use inside single quotes; `{{claude_args}}` and
-`{{codex_args}}` are inserted as raw shell fragments. The command must write a
-non-empty result to `{{output_file}}`; writing only to stdout is not sufficient.
-Unknown or unterminated placeholders cause the job to fail instead of silently
-producing a malformed command.
+values are escaped for use inside single quotes; `{{claude_args}}`,
+`{{codex_args}}`, and `{{antigravity_args}}` are inserted as raw shell fragments.
+The command must write a non-empty result to `{{output_file}}`; writing only to
+stdout is not sufficient. Unknown or unterminated placeholders cause the job to
+fail instead of silently producing a malformed command.
 
 ## Prompt template
 

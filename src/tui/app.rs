@@ -39,7 +39,7 @@ use crate::parse::{parse_session_file, Agent, Session};
 use crate::rules::{
     apply_rule_proposals, RuleEvaluationError, RulePreviewMatch, RuleProposal, RulesReport,
 };
-use crate::scan::{AgentHomes, SessionRoots};
+use crate::scan::{is_default_antigravity_home, AgentHomes, SessionRoots};
 use crate::settings::{
     DefaultFilter, DefaultFilterScope, DisplayOptions, Settings, SettingsPatch, ThemeName,
 };
@@ -2178,6 +2178,9 @@ impl App {
             return;
         };
         let trashed = hit.session.trashed;
+        let agent = hit.session.agent;
+        let resume_supported = agent != Agent::Antigravity
+            || is_default_antigravity_home(&self.homes.antigravity_home);
 
         let previous_overlay = std::mem::replace(&mut self.overlay, Overlay::None);
         self.viewer_before_actions = match previous_overlay {
@@ -2187,7 +2190,11 @@ impl App {
                 None
             }
         };
-        self.overlay = Overlay::Actions(ActionMenuState::new(trashed));
+        self.overlay = Overlay::Actions(ActionMenuState::new_for_agent_with_resume(
+            agent,
+            trashed,
+            resume_supported,
+        ));
     }
 
     fn open_rules_action_menu(&mut self) {
@@ -2517,6 +2524,8 @@ impl App {
             claude_args: self.settings.claude_args.clone(),
             codex_command: self.settings.codex_command.clone(),
             codex_args: self.settings.codex_args.clone(),
+            antigravity_command: self.settings.antigravity_command.clone(),
+            antigravity_args: self.settings.antigravity_args.clone(),
         };
         self.summary_worker.send(command)?;
         self.summary_inflight.insert(path);
@@ -2699,10 +2708,16 @@ impl App {
                 let Some(hit) = self.selected_hit() else {
                     return Ok(());
                 };
-                let value = hit
-                    .session
-                    .file_path
-                    .parent()
+                let directory = if hit.session.agent == Agent::Antigravity {
+                    hit.session
+                        .file_path
+                        .parent()
+                        .and_then(Path::parent)
+                        .and_then(Path::parent)
+                } else {
+                    hit.session.file_path.parent()
+                };
+                let value = directory
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| hit.session.file_path.display().to_string());
                 self.copy_to_clipboard(&value, "session directory")?;
@@ -2892,6 +2907,12 @@ impl App {
         let Some(hit) = self.selected_hit() else {
             return Ok(());
         };
+        if hit.session.agent == Agent::Antigravity {
+            self.statusline = Some(statusline::Entry::failed(
+                "Antigravity bundle deletion is unsupported",
+            ));
+            return Ok(());
+        }
         debug!(
             "delete_selected_session selected={} results_before={} mode={:?} path={}",
             self.selected,
@@ -3670,6 +3691,7 @@ fn load_summary_sources(
         Agent::Codex => {
             sources.codex_autosummary = codex_autosummary;
         }
+        Agent::Antigravity => {}
     }
     sources
 }
@@ -3755,6 +3777,10 @@ where
             command.cwd = Some(process_cwd);
             Ok(command)
         }
+        Agent::Antigravity => Err(ResumeErrorDialog {
+            title: "Resume in CLI in CWD unsupported".to_owned(),
+            body: "Antigravity does not expose a safe session-CWD rewrite operation.".to_owned(),
+        }),
     }
 }
 
@@ -3768,7 +3794,7 @@ fn build_resume_command_for_hit(
         .cwd
         .as_ref()
         .map(PathBuf::from)
-        .or_else(|| hit.session.file_path.parent().map(Path::to_path_buf));
+        .or_else(|| session_source_directory(hit));
 
     let command = match hit.session.agent {
         crate::parse::Agent::Claude => {
@@ -3795,6 +3821,22 @@ fn build_resume_command_for_hit(
                     "CODEX_HOME".to_owned(),
                     homes.codex_home.display().to_string(),
                 )],
+            }
+        }
+        crate::parse::Agent::Antigravity => {
+            if !is_default_antigravity_home(&homes.antigravity_home) {
+                bail!(
+                    "cannot resume an Antigravity session from non-default home {}: agy exposes no data-root override",
+                    homes.antigravity_home.display()
+                );
+            }
+            let (program, mut args) = settings.antigravity_program_and_args();
+            args.extend(["--conversation".to_owned(), hit.session.session_id.clone()]);
+            ExternalCommand {
+                program,
+                args,
+                cwd,
+                env: Vec::new(),
             }
         }
     };
@@ -3915,7 +3957,7 @@ fn build_fork_command(
         .cwd
         .as_ref()
         .map(PathBuf::from)
-        .or_else(|| hit.session.file_path.parent().map(Path::to_path_buf));
+        .or_else(|| session_source_directory(hit));
 
     let command = match hit.session.agent {
         crate::parse::Agent::Claude => {
@@ -3948,8 +3990,24 @@ fn build_fork_command(
                 )],
             }
         }
+        crate::parse::Agent::Antigravity => {
+            bail!("forking Antigravity sessions is unsupported")
+        }
     };
     Ok(command)
+}
+
+fn session_source_directory(hit: &SearchHit) -> Option<PathBuf> {
+    if hit.session.agent == Agent::Antigravity {
+        hit.session
+            .file_path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+    } else {
+        hit.session.file_path.parent().map(Path::to_path_buf)
+    }
 }
 
 fn build_fork_in_cwd_command(
@@ -4074,9 +4132,9 @@ mod tests {
     }
 
     #[test]
-    fn builds_resume_commands_for_both_agents() {
+    fn builds_resume_commands_for_all_agents() {
         let settings = Settings::default();
-        let homes = sample_homes();
+        let mut homes = sample_homes();
         let claude = build_resume_command(&sample_hit(Agent::Claude), &settings, &homes).unwrap();
         assert_eq!(claude.program, "claude");
         assert_eq!(
@@ -4098,6 +4156,37 @@ mod tests {
             codex.env,
             vec![("CODEX_HOME".to_owned(), "/tmp/codex-home".to_owned())]
         );
+
+        homes.antigravity_home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .join(".gemini/antigravity-cli");
+        let antigravity =
+            build_resume_command(&sample_hit(Agent::Antigravity), &settings, &homes).unwrap();
+        assert_eq!(antigravity.program, "agy");
+        assert_eq!(
+            antigravity.args,
+            vec![
+                "--dangerously-skip-permissions",
+                "--conversation",
+                "session-123"
+            ]
+        );
+        assert!(antigravity.env.is_empty());
+    }
+
+    #[test]
+    fn antigravity_resume_rejects_alternate_data_root() {
+        let error = build_resume_command(
+            &sample_hit(Agent::Antigravity),
+            &Settings::default(),
+            &sample_homes(),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("agy exposes no data-root override"));
     }
 
     #[test]
@@ -4463,6 +4552,29 @@ mod tests {
         assert_eq!(trash_entries, 1);
         let metadata = fs::read_to_string(data_root.join("trash.jsonl")).unwrap();
         assert!(metadata.contains("\"tn\":\"claude\""));
+    }
+
+    #[test]
+    fn ctrl_d_does_not_delete_antigravity_bundle_transcript() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("transcript.jsonl");
+        fs::write(&source, "{}\n").unwrap();
+        let mut app = test_app();
+        app.roots.trash = Some(TrashPaths::from_data_root(temp.path().join("data")));
+        app.results = vec![sample_hit_with_path(Agent::Antigravity, source.clone())];
+
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+
+        assert!(source.exists());
+        assert_eq!(app.results.len(), 1);
+        assert_eq!(
+            app.statusline.as_ref().map(|entry| entry.label.as_str()),
+            Some("Antigravity bundle deletion is unsupported")
+        );
     }
 
     #[test]
@@ -5779,6 +5891,7 @@ mod tests {
         AgentHomes {
             claude_home: PathBuf::from("/tmp/claude-home"),
             codex_home: PathBuf::from("/tmp/codex-home"),
+            antigravity_home: PathBuf::from("/tmp/antigravity-home"),
         }
     }
 
@@ -5786,6 +5899,7 @@ mod tests {
         SessionRoots {
             claude_projects: base.join(".claude/projects"),
             codex_sessions: base.join(".codex/sessions"),
+            antigravity_home: base.join(".gemini/antigravity-cli"),
             trash: None,
         }
     }

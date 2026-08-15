@@ -126,6 +126,7 @@ fn sub_agent_sessions_are_hidden_unless_requested() -> Result<()> {
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     };
     let cache_root = temp.path().join("cache");
@@ -231,6 +232,7 @@ fn trashed_filter_defaults_to_normal_sessions_and_can_include_trash() -> Result<
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: Some(trash_paths),
     };
     let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
@@ -329,6 +331,7 @@ fn superseded_filter_tracks_direct_codex_forks_across_incremental_sync() -> Resu
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     };
     let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
@@ -401,6 +404,7 @@ fn superseded_filter_excludes_families_with_reference_backed_codex_history() -> 
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     };
     let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
@@ -469,6 +473,7 @@ fn superseded_filter_collapses_equivalent_codex_fork_siblings() -> Result<()> {
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     };
     let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
@@ -530,6 +535,7 @@ fn superseded_filter_collapses_empty_aborted_codex_fork_parent() -> Result<()> {
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     };
     let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
@@ -591,6 +597,7 @@ fn superseded_filter_recognizes_trailing_aborted_codex_parent_turn() -> Result<(
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     };
     let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
@@ -657,6 +664,7 @@ fn superseded_filter_recognizes_retried_legacy_codex_aborted_turn() -> Result<()
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     };
     let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
@@ -712,6 +720,7 @@ fn superseded_filter_recognizes_claude_fork_lineage() -> Result<()> {
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     };
     let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
@@ -756,6 +765,7 @@ fn superseded_filter_collapses_equivalent_claude_fork() -> Result<()> {
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     };
     let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
@@ -808,6 +818,7 @@ fn fixture_roots(temp: &TempDir) -> Result<SessionRoots> {
     Ok(SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     })
 }

@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::index::reader::fallback_snippet;
 use crate::index::{Scope, SearchFilters, SearchHit, StoredSession, TrashFilter};
 use crate::parse::{
-    is_contextual_user_message_content, parse_session_file, Agent, DerivationType, MessageRole,
-    PatchFile, Session, SessionCell,
+    is_contextual_user_message_content, parse_scanned_session_file, Agent, DerivationType,
+    MessageRole, PatchFile, Session, SessionCell,
 };
 use crate::scan::{scan_session_files, SessionFile, SessionRoots};
 use crate::settings::config_dir;
@@ -23,7 +23,9 @@ use crate::trash::TrashStore;
 
 mod cache;
 
-use cache::{fingerprint_file, CacheLookup, CachedDetermination, ContentFingerprint, RulesCache};
+use cache::{
+    fingerprint_session, CacheLookup, CachedDetermination, ContentFingerprint, RulesCache,
+};
 
 const RULE_STACK_LIMIT: usize = 512 * 1024;
 const BOA_RULE_LOOP_ITERATION_LIMIT: u64 = 10_000_000;
@@ -363,7 +365,7 @@ where
             }
         }
 
-        let determination = match parse_session_file(file.agent, &file.path) {
+        let determination = match parse_scanned_session_file(file) {
             Ok(Some(session)) => {
                 let stored = stored_rule_session(&session, file, superseded_by);
                 if !session_matches_scope(&options.scope, &stored)
@@ -440,7 +442,7 @@ where
 }
 
 fn fingerprint_session_for_cache(file: &SessionFile) -> Option<ContentFingerprint> {
-    match fingerprint_file(&file.path) {
+    match fingerprint_session(file) {
         Ok(fingerprint) => Some(fingerprint),
         Err(error) => {
             warn!(
@@ -827,6 +829,17 @@ pub fn apply_rule_proposals(
 
     let store = TrashStore::new(paths);
     for proposal in proposals {
+        if proposal.agent == Agent::Antigravity {
+            skipped.push(SkippedRuleAction {
+                rule: proposal.rule.clone(),
+                session_id: proposal.session_id.clone(),
+                path: proposal.path.clone(),
+                agent: proposal.agent,
+                action: proposal.action.clone(),
+                skip_reason: "Antigravity bundle lifecycle actions are unsupported".to_owned(),
+            });
+            continue;
+        }
         match &proposal.action {
             RuleAction::Trash { .. } => {
                 if proposal.path.starts_with(store.paths().trash_dir.as_path()) {

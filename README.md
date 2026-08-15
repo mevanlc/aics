@@ -1,12 +1,12 @@
 # aics
 
-`aics` (AI Chat Search) is a cross-platform Rust TUI for searching local Claude Code and Codex CLI chat session history.
+`aics` (AI Chat Search) is a cross-platform Rust TUI for searching local Claude Code, Codex CLI, and Antigravity CLI chat session history.
 
-It builds a local Tantivy index over your session JSONL files and gives you an interactive terminal UI with full-text search, live previews, filters, and a markdown-rendered session viewer. It can also emit JSONL results for scripting, delete unwanted sessions, resume sessions, attach an AI-generated (Claude Code or Codex CLI) summary to sessions, and more.
+It builds a local Tantivy index over your session JSONL files and gives you an interactive terminal UI with full-text search, live previews, filters, and a markdown-rendered session viewer. It can also emit JSONL results for scripting, manage supported session files, resume sessions, attach an AI-generated summary to sessions, and more.
 
 ## Features
 
-- Full-text search across Claude Code and Codex CLI sessions
+- Full-text search across Claude Code, Codex CLI, and Antigravity CLI sessions
 - Native Claude Code autosummaries and Codex rollout summaries in previews and summary snippets
 - Incremental indexing — only new or changed sessions get re-indexed on startup
 - Interactive TUI with session list, snippet preview, and scrollable full-session viewer
@@ -14,7 +14,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Sort by time or text relevance
 - Markdown rendering with syntax highlighting and search-term highlighting in the viewer
 - Multiple themes (lazygit, aics, sunset, late), configurable via settings modal
-- Configurable claude/codex launch commands so `aics` can hand off to resume a session
+- Configurable Claude, Codex, and Antigravity launch commands so `aics` can hand off to resume a session
 - `--json` mode for scripting, and `--export DIR` to batch-export matching sessions as Markdown
 - JavaScript rules for previewing or applying batch session cleanup actions
 - Cross-platform: Windows, macOS, Linux, Android (Termux), FreeBSD, and NetBSD
@@ -98,10 +98,11 @@ Markdown sidecar summaries using a configurable AI CLI command and prompt.
 
 ### Indexing
 
-AICS incrementally indexes Claude Code sessions from `~/.claude/projects/` and
-Codex CLI sessions from `~/.codex/sessions/`. Index data is stored in a separate
-cache profile for each discovered session-root set; set `AICS_CACHE_ROOT` to
-override the cache location.
+AICS incrementally indexes Claude Code sessions from `~/.claude/projects/`,
+Codex CLI sessions from `~/.codex/sessions/`, and Antigravity conversations from
+`~/.gemini/antigravity-cli/brain/`. Index data is stored in a separate cache
+profile for each discovered session-root set; set `AICS_CACHE_ROOT` to override
+the cache location.
 
 [Learn more about search behavior and index storage.](docs/search-and-indexing.md)
 

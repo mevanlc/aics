@@ -1,0 +1,11 @@
+{
+  "conversations": {
+    "aaaa1111-bbbb-2222-cccc-333344445555": {
+      "summary": {
+        "Title": "Antigravity fixture title",
+        "Preview": "Antigravity fixture preview",
+        "WorkspaceURIs": ["file:///tmp/agy%20workspace"]
+      }
+    }
+  }
+}

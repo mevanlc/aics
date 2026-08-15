@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
+use crate::parse::Agent;
 use crate::ring_cursor::RingCursor;
 use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
@@ -59,7 +60,39 @@ const TRASHED_ACTIONS: [ActionItem; 14] = [
     ),
 ];
 
-fn actions(trashed: bool) -> &'static [ActionItem] {
+const ANTIGRAVITY_ACTIONS: [ActionItem; 8] = [
+    ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
+    ActionItem::new(SessionAction::View, 'v', "View full conversation"),
+    ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
+    ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
+    ActionItem::new(
+        SessionAction::ExportFiltered,
+        'E',
+        "Export as filtered .txt",
+    ),
+    ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
+    ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
+    ActionItem::new(SessionAction::CopyDir, 'o', "Copy session directory"),
+];
+
+const ANTIGRAVITY_ACTIONS_WITHOUT_RESUME: [ActionItem; 7] = [
+    ActionItem::new(SessionAction::View, 'v', "View full conversation"),
+    ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
+    ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
+    ActionItem::new(
+        SessionAction::ExportFiltered,
+        'E',
+        "Export as filtered .txt",
+    ),
+    ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
+    ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
+    ActionItem::new(SessionAction::CopyDir, 'o', "Copy session directory"),
+];
+
+fn actions(agent: Agent, trashed: bool) -> &'static [ActionItem] {
+    if agent == Agent::Antigravity {
+        return &ANTIGRAVITY_ACTIONS;
+    }
     if trashed {
         &TRASHED_ACTIONS
     } else {
@@ -67,15 +100,29 @@ fn actions(trashed: bool) -> &'static [ActionItem] {
     }
 }
 
+fn actions_with_resume(
+    agent: Agent,
+    trashed: bool,
+    antigravity_resume_supported: bool,
+) -> &'static [ActionItem] {
+    if agent == Agent::Antigravity && !antigravity_resume_supported {
+        &ANTIGRAVITY_ACTIONS_WITHOUT_RESUME
+    } else {
+        actions(agent, trashed)
+    }
+}
+
 pub fn action_for_key(ch: char, trashed: bool) -> Option<SessionAction> {
-    actions(trashed)
+    actions(Agent::Claude, trashed)
         .iter()
         .find(|item| item.key == ch)
         .map(|item| item.action)
 }
 
 pub fn action_at(index: usize, trashed: bool) -> Option<SessionAction> {
-    actions(trashed).get(index).map(|item| item.action)
+    actions(Agent::Claude, trashed)
+        .get(index)
+        .map(|item| item.action)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +146,9 @@ pub enum SessionAction {
 #[derive(Debug, Clone)]
 pub struct ActionMenuState {
     pub selected: RingCursor<SessionAction>,
+    agent: Agent,
     trashed: bool,
+    antigravity_resume_supported: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -117,9 +166,28 @@ impl Default for ActionMenuState {
 
 impl ActionMenuState {
     pub fn new(trashed: bool) -> Self {
+        Self::new_for_agent(Agent::Claude, trashed)
+    }
+
+    pub fn new_for_agent(agent: Agent, trashed: bool) -> Self {
+        Self::new_for_agent_with_resume(agent, trashed, true)
+    }
+
+    pub fn new_for_agent_with_resume(
+        agent: Agent,
+        trashed: bool,
+        antigravity_resume_supported: bool,
+    ) -> Self {
         Self {
-            selected: RingCursor::new(actions(trashed).iter().map(|item| item.action).collect()),
+            selected: RingCursor::new(
+                actions_with_resume(agent, trashed, antigravity_resume_supported)
+                    .iter()
+                    .map(|item| item.action)
+                    .collect(),
+            ),
+            agent,
             trashed,
+            antigravity_resume_supported,
         }
     }
 
@@ -135,9 +203,14 @@ impl ActionMenuState {
                 self.selected.move_next();
                 ActionOutcome::Stay
             }
-            KeyCode::Char(ch) => action_for_key(ch, self.trashed)
-                .map(ActionOutcome::Run)
-                .unwrap_or(ActionOutcome::Stay),
+            KeyCode::Char(ch) => {
+                actions_with_resume(self.agent, self.trashed, self.antigravity_resume_supported)
+                    .iter()
+                    .find(|item| item.key == ch)
+                    .map(|item| item.action)
+                    .map(ActionOutcome::Run)
+                    .unwrap_or(ActionOutcome::Stay)
+            }
             _ => ActionOutcome::Stay,
         }
     }
@@ -165,20 +238,21 @@ impl ActionMenuState {
         .split(inner);
 
         // List (no block — border lives on the outer block above)
-        let items = actions(self.trashed)
-            .iter()
-            .map(|item| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("{} ", item.key),
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(item.label, Style::default().fg(theme.text)),
-                ]))
-            })
-            .collect::<Vec<_>>();
+        let items =
+            actions_with_resume(self.agent, self.trashed, self.antigravity_resume_supported)
+                .iter()
+                .map(|item| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!("{} ", item.key),
+                            Style::default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(item.label, Style::default().fg(theme.text)),
+                    ]))
+                })
+                .collect::<Vec<_>>();
 
         let list = List::new(items).highlight_symbol("› ").highlight_style(
             Style::default()
@@ -223,11 +297,13 @@ impl ActionMenuState {
     }
 
     pub fn action_at(&self, index: usize) -> Option<SessionAction> {
-        action_at(index, self.trashed)
+        actions_with_resume(self.agent, self.trashed, self.antigravity_resume_supported)
+            .get(index)
+            .map(|item| item.action)
     }
 
     pub fn action_count(&self) -> usize {
-        actions(self.trashed).len()
+        actions_with_resume(self.agent, self.trashed, self.antigravity_resume_supported).len()
     }
 
     pub fn trashed(&self) -> bool {
@@ -276,14 +352,18 @@ pub fn index_at_row(area: Rect, column: u16, row: u16, action_count: usize) -> O
 
 #[cfg(test)]
 mod tests {
+    use crate::parse::Agent;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
 
-    use super::{actions, index_at_row, list_area, ActionMenuState, ActionOutcome, SessionAction};
+    use super::{
+        actions, actions_with_resume, index_at_row, list_area, ActionMenuState, ActionOutcome,
+        SessionAction,
+    };
 
     #[test]
     fn regular_actions_follow_the_expected_order() {
-        let items = actions(false)
+        let items = actions(Agent::Claude, false)
             .iter()
             .map(|item| (item.key, item.label))
             .collect::<Vec<_>>();
@@ -306,6 +386,45 @@ mod tests {
                 ('D', "Delete session immediately"),
             ]
         );
+    }
+
+    #[test]
+    fn antigravity_actions_exclude_unsafe_bundle_mutations() {
+        let actions = actions(Agent::Antigravity, false)
+            .iter()
+            .map(|item| item.action)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actions,
+            vec![
+                SessionAction::Resume,
+                SessionAction::View,
+                SessionAction::Summarize,
+                SessionAction::Export,
+                SessionAction::ExportFiltered,
+                SessionAction::CopyId,
+                SessionAction::CopyPath,
+                SessionAction::CopyDir,
+            ]
+        );
+        assert!(!actions.contains(&SessionAction::ResumeInCwd));
+        assert!(!actions.contains(&SessionAction::Fork));
+        assert!(!actions.contains(&SessionAction::Delete));
+    }
+
+    #[test]
+    fn antigravity_alternate_root_hides_resume() {
+        assert!(!actions_with_resume(Agent::Antigravity, false, false)
+            .iter()
+            .any(|item| item.action == SessionAction::Resume));
+
+        let mut state =
+            ActionMenuState::new_for_agent_with_resume(Agent::Antigravity, false, false);
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            ActionOutcome::Stay
+        ));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 /** AICS rules API declarations. Install with `aics --write-rules-dts`. */
 
 /** CLI that created the session. */
-type AicsAgent = "claude" | "codex";
+type AicsAgent = "claude" | "codex" | "antigravity";
 
 /** Relationship between this session and its source session, if any. */
 type AicsDerivationType = "original" | "trimmed" | "continued" | "sub_agent";
@@ -20,7 +20,7 @@ interface AicsRuleContext {
 
 /** Session metadata available to rules. */
 interface AicsRuleSession {
-  /** Session identifier recorded by Claude Code or Codex CLI. */
+  /** Session identifier recorded by Claude Code, Codex CLI, or Antigravity. */
   id: string;
 
   /** CLI that created the session. */
@@ -294,7 +294,7 @@ declare function nothing(): AicsNothingAction;
 
 /**
  * Returns an action that moves the session into the AICS trash store.
- * Applying it to an already-trashed session is skipped.
+ * Applying it to an already-trashed session or an Antigravity bundle is skipped.
  *
  * @param reason Optional human-readable explanation.
  */
@@ -302,7 +302,7 @@ declare function trash(reason?: string): AicsTrashAction;
 
 /**
  * Returns an action that restores a trashed session to its original path.
- * Applying it to a normal session is skipped as already untrashed.
+ * Applying it to a normal session or an Antigravity bundle is skipped.
  *
  * @param reason Optional human-readable explanation.
  */

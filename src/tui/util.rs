@@ -104,6 +104,7 @@ pub fn agent_badge(agent: Agent, theme: &Theme) -> (&'static str, Color) {
     match agent {
         Agent::Claude => ("C", theme.claude),
         Agent::Codex => ("X", theme.codex),
+        Agent::Antigravity => ("A", theme.antigravity),
     }
 }
 
@@ -159,6 +160,7 @@ pub fn session_display_title(agent: Agent, project: &str) -> String {
     match agent {
         Agent::Claude => project.to_owned(),
         Agent::Codex => project.to_owned(),
+        Agent::Antigravity => project.to_owned(),
     }
 }
 

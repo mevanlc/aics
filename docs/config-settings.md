@@ -27,6 +27,9 @@ stderr and in the TUI status line.
   arguments; defaults are `claude` and `--dangerously-skip-permissions`
 - `codex_command` and `codex_args`: the Codex CLI resume command and arguments;
   defaults are `codex` and `--yolo`
+- `antigravity_command` and `antigravity_args`: the Antigravity CLI resume
+  command and arguments; defaults are `agy` and
+  `--dangerously-skip-permissions`
 - `show_preview`: whether the preview panel is visible
 - `preview_width_pct`: the preview panel's percentage width
 - `session_separator`: separator shown between session messages

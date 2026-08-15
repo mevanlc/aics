@@ -5,7 +5,10 @@ use std::process::Command;
 
 use aics::index::{IndexManager, IndexPaths, Scope, SearchFilters};
 use aics::parse::Agent;
-use aics::rules::{run_rules_with_progress, RuleSelection, RulesMode, RulesOptions, RulesProgress};
+use aics::rules::{
+    apply_rule_proposals, run_rules_with_progress, RuleAction, RuleProposal, RuleSelection,
+    RulesMode, RulesOptions, RulesProgress,
+};
 use aics::scan::SessionRoots;
 use aics::trash::{TrashPaths, TrashStore};
 use anyhow::Result;
@@ -102,6 +105,7 @@ fn rules_expose_missing_session_strings_as_empty() -> Result<()> {
     let session_roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     };
 
@@ -153,6 +157,7 @@ fn rules_expose_supersession_keeper_id_and_invalidate_cached_outcomes() -> Resul
     let roots = SessionRoots {
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     };
     let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("index-cache")));
@@ -239,6 +244,7 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
         .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
         .args(["--preview-rules", "--json", "--progress", "none", "-g"])
         .output()?;
     assert!(default_output.status.success(), "{default_output:#?}");
@@ -253,6 +259,7 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
         .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
         .args([
             "--preview-rules",
             "--rules",
@@ -316,6 +323,7 @@ fn ordinary_json_startup_applies_only_rules_enabled_at_startup() -> Result<()> {
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
         .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
         .args(["--json", "--progress", "none", "-g"])
         .output()?;
     assert!(default_output.status.success(), "{default_output:#?}");
@@ -330,6 +338,7 @@ fn ordinary_json_startup_applies_only_rules_enabled_at_startup() -> Result<()> {
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
         .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
         .args([
             "--rules",
             rules.to_str().unwrap(),
@@ -373,6 +382,7 @@ fn no_apply_rules_disables_automatic_startup_rules() -> Result<()> {
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
         .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
         .args(["--no-apply-rules", "--json", "--progress", "none"])
         .output()?;
 
@@ -407,6 +417,7 @@ fn preview_rules_exposes_reasoning_effort() -> Result<()> {
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
         .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
         .args([
             "--preview-rules",
             "--rules",
@@ -457,6 +468,7 @@ fn apply_rules_moves_matching_session_to_trash() -> Result<()> {
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
         .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
         .args([
             "--apply-rules",
             "--rules",
@@ -516,6 +528,7 @@ fn apply_rules_restores_matching_trashed_session() -> Result<()> {
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
         .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
         .args([
             "--apply-rules",
             "--rules",
@@ -562,6 +575,7 @@ fn apply_rules_skips_untrash_for_normal_session() -> Result<()> {
         .env("AICS_DATA_ROOT", temp.path().join("data"))
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
         .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
         .args([
             "--apply-rules",
             "--rules",
@@ -606,6 +620,7 @@ fn benchmark_rules_evaluates_without_output_or_applying_actions() -> Result<()> 
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
         .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
         .args([
             "--benchmark-rules",
             "--rules",
@@ -627,6 +642,39 @@ fn benchmark_rules_evaluates_without_output_or_applying_actions() -> Result<()> 
 }
 
 #[test]
+fn applying_antigravity_lifecycle_action_is_safely_skipped() -> Result<()> {
+    let temp = TempDir::new()?;
+    let transcript = temp.path().join("transcript.jsonl");
+    fs::write(&transcript, "bundle stays intact")?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join("claude"),
+        codex_sessions: temp.path().join("codex"),
+        antigravity_home: temp.path().join("antigravity"),
+        trash: Some(TrashPaths::from_data_root(temp.path().join("data"))),
+    };
+    let proposal = RuleProposal {
+        rule: "cleanup".to_owned(),
+        session_id: "agy-session".to_owned(),
+        path: transcript.clone(),
+        agent: Agent::Antigravity,
+        action: RuleAction::Trash {
+            reason: Some("test".to_owned()),
+        },
+    };
+
+    let (applied, skipped) = apply_rule_proposals(&roots, &[proposal]);
+
+    assert!(applied.is_empty());
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(
+        skipped[0].skip_reason,
+        "Antigravity bundle lifecycle actions are unsupported"
+    );
+    assert!(transcript.exists());
+    Ok(())
+}
+
+#[test]
 fn rules_progress_reports_processing_count() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
@@ -639,6 +687,7 @@ fn rules_progress_reports_processing_count() -> Result<()> {
     let session_roots = SessionRoots {
         claude_projects: roots.claude_projects,
         codex_sessions: roots.codex_sessions,
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
         trash: None,
     };
     let mut events = Vec::new();

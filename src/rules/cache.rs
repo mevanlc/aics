@@ -13,13 +13,15 @@ use super::RawRuleOutcome;
 use crate::index::StoredSession;
 use crate::scan::SessionFile;
 
-const RULES_CACHE_FORMAT_VERSION: u32 = 3;
+const RULES_CACHE_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct ContentFingerprint {
     byte_len: u64,
     modified_ns: u64,
     crc32: u32,
+    #[serde(default)]
+    source_signature: u64,
 }
 
 impl ContentFingerprint {
@@ -27,11 +29,14 @@ impl ContentFingerprint {
         FileMetadataFingerprint {
             byte_len: self.byte_len,
             modified_ns: self.modified_ns,
+            source_signature: self.source_signature,
         }
     }
 
     fn has_same_content(self, other: Self) -> bool {
-        self.byte_len == other.byte_len && self.crc32 == other.crc32
+        self.byte_len == other.byte_len
+            && self.crc32 == other.crc32
+            && self.source_signature == other.source_signature
     }
 }
 
@@ -39,6 +44,7 @@ impl ContentFingerprint {
 struct FileMetadataFingerprint {
     byte_len: u64,
     modified_ns: u64,
+    source_signature: u64,
 }
 
 impl FileMetadataFingerprint {
@@ -46,6 +52,7 @@ impl FileMetadataFingerprint {
         Self {
             byte_len: file.size,
             modified_ns: modified_ns(file.modified),
+            source_signature: file.source_signature,
         }
     }
 }
@@ -199,7 +206,7 @@ impl RulesCache {
             return Ok(CacheLookup::Miss(None));
         }
 
-        let current = fingerprint_file(&file.path)?;
+        let current = fingerprint_session(file)?;
         if cached.content.has_same_content(current) {
             cached.content = current;
             self.dirty = true;
@@ -287,6 +294,38 @@ pub(super) fn fingerprint_file(path: &Path) -> Result<ContentFingerprint> {
         byte_len: metadata_after.byte_len,
         modified_ns: metadata_after.modified_ns,
         crc32: hasher.finalize(),
+        source_signature: 0,
+    })
+}
+
+pub(super) fn fingerprint_session(file: &SessionFile) -> Result<ContentFingerprint> {
+    let mut hasher = Hasher::new();
+    let mut byte_len = 0_u64;
+    for path in file.source_paths() {
+        hasher.update(path.as_os_str().to_string_lossy().as_bytes());
+        hasher.update(&[0]);
+        let mut input = fs::File::open(path)
+            .with_context(|| format!("failed to open {} for fingerprinting", path.display()))?;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = input
+                .read(&mut buffer)
+                .with_context(|| format!("failed to read {} for fingerprinting", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            byte_len = byte_len
+                .checked_add(read as u64)
+                .context("session source length overflow while fingerprinting")?;
+        }
+    }
+    hasher.update(&file.source_signature.to_be_bytes());
+    Ok(ContentFingerprint {
+        byte_len,
+        modified_ns: modified_ns(file.modified),
+        crc32: hasher.finalize(),
+        source_signature: file.source_signature,
     })
 }
 
@@ -307,6 +346,7 @@ fn fingerprint_metadata(path: &Path) -> Result<FileMetadataFingerprint> {
     Ok(FileMetadataFingerprint {
         byte_len: metadata.len(),
         modified_ns: modified_ns(modified),
+        source_signature: 0,
     })
 }
 
@@ -375,6 +415,9 @@ mod tests {
             size: metadata.len(),
             trashed: false,
             original_path: None,
+            companion_paths: Vec::new(),
+            source_signature: 0,
+            antigravity_metadata: None,
         })
     }
 
@@ -595,6 +638,7 @@ mod tests {
         let roots = SessionRoots {
             claude_projects: temp.path().join(".claude/projects"),
             codex_sessions: temp.path().join(".codex/sessions"),
+            antigravity_home: temp.path().join(".gemini/antigravity-cli"),
             trash: None,
         };
         let mut options = RulesOptions {
@@ -652,6 +696,7 @@ mod tests {
         let roots = SessionRoots {
             claude_projects: temp.path().join(".claude/projects"),
             codex_sessions: temp.path().join(".codex/sessions"),
+            antigravity_home: temp.path().join(".gemini/antigravity-cli"),
             trash: None,
         };
         let options = RulesOptions {

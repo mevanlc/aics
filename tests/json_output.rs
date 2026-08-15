@@ -19,6 +19,7 @@ fn json_mode_emits_valid_jsonl_hits() -> Result<()> {
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.0)
         .env("AICS_CODEX_SESSIONS_DIR", &roots.1)
+        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
         .args(["--json", "-g", "-n", "2", "--agent", "claude", "git status"])
         .output()?;
 
@@ -56,6 +57,7 @@ fn json_mode_accepts_sort_by_relevance() -> Result<()> {
         .env("AICS_DATA_ROOT", &data_root)
         .env("AICS_CLAUDE_PROJECTS_DIR", &roots.0)
         .env("AICS_CODEX_SESSIONS_DIR", &roots.1)
+        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
         .args([
             "--json",
             "--sort-by",

@@ -11,6 +11,7 @@ use serde_json::Value;
 pub enum Agent {
     Claude,
     Codex,
+    Antigravity,
 }
 
 impl Agent {
@@ -18,6 +19,7 @@ impl Agent {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Antigravity => "antigravity",
         }
     }
 }
@@ -35,6 +37,7 @@ impl FromStr for Agent {
         match value {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
+            "antigravity" | "agy" => Ok(Self::Antigravity),
             _ => Err(()),
         }
     }

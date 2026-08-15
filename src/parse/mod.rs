@@ -1,3 +1,4 @@
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod codex_summary;
@@ -19,9 +20,21 @@ pub use session::{
 use anyhow::Result;
 use std::path::Path;
 
+use crate::scan::SessionFile;
+
 pub fn parse_session_file(agent: Agent, path: impl AsRef<Path>) -> Result<Option<Session>> {
     match agent {
         Agent::Claude => parse_claude_session_file(path),
         Agent::Codex => parse_codex_session_file(path),
+        Agent::Antigravity => parse_antigravity_session_file(path),
     }
 }
+
+pub fn parse_scanned_session_file(file: &SessionFile) -> Result<Option<Session>> {
+    match file.agent {
+        Agent::Claude => parse_claude_session_file(&file.path),
+        Agent::Codex => parse_codex_session_file(&file.path),
+        Agent::Antigravity => antigravity::parse_antigravity_session(file),
+    }
+}
+pub use antigravity::parse_antigravity_session_file;

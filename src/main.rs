@@ -32,7 +32,7 @@ use aics::tui::{run_app, run_rules_preview_app};
 #[command(
     name = "aics",
     version,
-    about = "Search local Claude Code and Codex CLI session history",
+    about = "Search local Claude Code, Codex CLI, and Antigravity session history",
     after_help = "Examples:\n  aics deploy\n      Search sessions for the current directory and open the TUI.\n\n  aics -g --agent claude --after 2026-03-01 deploy\n      Search all Claude sessions after 2026-03-01.\n\n  aics --json -g --sort-by relevance \"vector db\"\n      Print matching sessions as JSONL instead of launching the TUI.\n\n  aics -g --export ./transcripts \"vector db\"\n      Write every matching session to ./transcripts as Markdown.\n\nDate filters:\n  --after and --before accept YYYY-MM-DD or RFC3339 timestamps.\n\nScope:\n  By default, searches are scoped to the current directory.\n  Use --global to search everything, --no-global to override a saved global startup scope,\n  or --dir PATH[:BRANCH] to target a project."
 )]
 struct Cli {
@@ -73,7 +73,7 @@ struct Cli {
     num_results: usize,
     #[arg(
         long = "agent",
-        value_parser = ["claude", "codex"],
+        value_parser = ["claude", "codex", "antigravity", "agy"],
         help = "Only include sessions recorded by one agent"
     )]
     agent: Option<String>,
@@ -207,6 +207,12 @@ struct Cli {
         help = "Override the Codex CLI home directory for this run"
     )]
     codex_home: Option<PathBuf>,
+    #[arg(
+        long = "antigravity-home",
+        value_name = "PATH",
+        help = "Override the Antigravity CLI home directory for this run"
+    )]
+    antigravity_home: Option<PathBuf>,
     #[arg(long = "delete-index", conflicts_with = "rebuild_index")]
     delete_index: bool,
     #[arg(
@@ -349,8 +355,11 @@ fn main() -> Result<()> {
         println!("{}", path.display());
         return Ok(());
     }
-    let resolved_paths =
-        ResolvedPaths::discover(cli.claude_home.as_deref(), cli.codex_home.as_deref())?;
+    let resolved_paths = ResolvedPaths::discover(
+        cli.claude_home.as_deref(),
+        cli.codex_home.as_deref(),
+        cli.antigravity_home.as_deref(),
+    )?;
     let index_paths = aics::index::IndexPaths::discover_for_roots(&resolved_paths.roots)?;
     let rules_cache_path = index_paths.cache_root.join("rules-cache.json");
     let startup_rules_cache_path = index_paths.cache_root.join("startup-rules-cache.json");
@@ -871,6 +880,7 @@ fn parse_agent_arg(raw: &str) -> Option<Agent> {
     match raw {
         "claude" => Some(Agent::Claude),
         "codex" => Some(Agent::Codex),
+        "antigravity" | "agy" => Some(Agent::Antigravity),
         _ => None,
     }
 }
@@ -1204,6 +1214,15 @@ mod tests {
         assert!(request.filters.live_only);
         assert!(request.filters.after_ts.is_some());
         assert!(request.filters.before_ts.is_some());
+    }
+
+    #[test]
+    fn antigravity_agent_accepts_canonical_name_and_agy_alias() {
+        for value in ["antigravity", "agy"] {
+            let cli = Cli::parse_from(["aics", "--agent", value]);
+            let request = build_request(&cli).unwrap();
+            assert_eq!(request.filters.agent, Some(Agent::Antigravity));
+        }
     }
 
     #[test]

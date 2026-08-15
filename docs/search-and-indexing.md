@@ -1,8 +1,8 @@
 # Search and indexing
 
-AICS builds a local Tantivy index of Claude Code and Codex CLI session files. It
-synchronizes the index at startup, then searches the indexed metadata and parsed
-transcript content.
+AICS builds a local Tantivy index of Claude Code, Codex CLI, and Antigravity CLI
+sessions. It synchronizes the index at startup, then searches the indexed
+metadata and parsed transcript content.
 
 ## Session sources
 
@@ -10,6 +10,7 @@ The default session roots are:
 
 - `~/.claude/projects/` for Claude Code
 - `~/.codex/sessions/` for Codex CLI
+- `~/.gemini/antigravity-cli/` for Antigravity CLI
 
 Claude and Codex homes follow `CLAUDE_CONFIG_DIR` and `CODEX_HOME`. For a single
 run, `--claude-home PATH` and `--codex-home PATH` override those homes. When the
@@ -19,12 +20,22 @@ corresponding CLI home override is not used, `AICS_CLAUDE_PROJECTS_DIR` and
 `AICS_CLAUDE_SESSIONS_DIR` separately overrides the Claude session directory
 used for live-session detection.
 
+Set `AICS_ANTIGRAVITY_HOME` or pass `--antigravity-home PATH` to override the
+Antigravity home. Each `brain/<conversation-id>/` directory is one logical
+session. AICS requires its `.system_generated/logs/transcript.jsonl`, uses
+`transcript_full.jsonl` as a richer companion when present, and reads title,
+preview, and workspace metadata from the Antigravity cache and `history.jsonl`.
+When regular and full transcripts contain the same `step_index`, the full record
+wins; regular-only tail records remain visible.
+
 ## Incremental indexing
 
-On startup, AICS scans the session roots and compares each file with its saved
-index state. Unchanged files are skipped, new and changed files are parsed and
-indexed, and records for deleted files are removed. Malformed or unrecognized
-session data is skipped rather than crashing the scan.
+On startup, AICS scans the session roots and compares each logical session with
+its saved index state. Unchanged sessions are skipped, new and changed sessions
+are parsed and indexed, and records for deleted sessions are removed. For an
+Antigravity bundle, changes to either transcript or the cache metadata invalidate
+the indexed record. Malformed or unrecognized session data is skipped rather
+than crashing the scan.
 
 Fork lineage and stable semantic event IDs are cached in the same state. AICS
 uses declared parent session IDs to form fork families, then checks direct

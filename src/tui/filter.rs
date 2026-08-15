@@ -511,8 +511,10 @@ impl FilterModalState {
                 self.agent = match (self.agent, forward) {
                     (None, true) => Some(Agent::Claude),
                     (Some(Agent::Claude), true) => Some(Agent::Codex),
-                    (Some(Agent::Codex), true) => None,
-                    (None, false) => Some(Agent::Codex),
+                    (Some(Agent::Codex), true) => Some(Agent::Antigravity),
+                    (Some(Agent::Antigravity), true) => None,
+                    (None, false) => Some(Agent::Antigravity),
+                    (Some(Agent::Antigravity), false) => Some(Agent::Codex),
                     (Some(Agent::Codex), false) => Some(Agent::Claude),
                     (Some(Agent::Claude), false) => None,
                 };
@@ -734,7 +736,9 @@ impl FilterField {
     fn description(self) -> &'static str {
         match self {
             FilterField::Scope => "Limit results to sessions from the launch directory or search globally across all sessions.",
-            FilterField::Agent => "Filter by agent type: Claude, Codex, or all. Use Space to cycle.",
+            FilterField::Agent => {
+                "Filter by agent type: Claude, Codex, Antigravity, or all. Use Space to cycle."
+            }
             FilterField::Session => "Filter to one exact session id. Leave empty to show all sessions.",
             FilterField::Branch => "Filter sessions by git branch name. Leave empty to show all branches.",
             FilterField::After => "Only show sessions modified after this date. Use YYYY-MM-DD or RFC3339 format.",
@@ -1043,6 +1047,33 @@ mod tests {
             }
             other => panic!("expected save-default outcome, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn agent_filter_cycles_through_antigravity() {
+        let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
+        let mut state = FilterModalState::new(
+            &scope,
+            &SearchFilters::default(),
+            SortMode::Time,
+            DisplayOptions::default(),
+        );
+        assert!(state.selected.set(&FilterField::Agent));
+
+        let mut values = Vec::new();
+        for _ in 0..4 {
+            state.adjust_current(true);
+            values.push(state.agent);
+        }
+        assert_eq!(
+            values,
+            vec![
+                Some(Agent::Claude),
+                Some(Agent::Codex),
+                Some(Agent::Antigravity),
+                None,
+            ]
+        );
     }
 
     #[test]
