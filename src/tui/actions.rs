@@ -11,7 +11,7 @@ use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
 use crate::tui::{keymap_hint, layout};
 
-const REGULAR_ACTIONS: [ActionItem; 13] = [
+const REGULAR_ACTIONS: [ActionItem; 14] = [
     ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
     ActionItem::new(SessionAction::ResumeInCwd, 'R', "Resume in CLI in CWD"),
     ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
@@ -23,6 +23,11 @@ const REGULAR_ACTIONS: [ActionItem; 13] = [
         SessionAction::ExportFiltered,
         'E',
         "Export as filtered .txt",
+    ),
+    ActionItem::new(
+        SessionAction::ExportRulesJson,
+        'J',
+        "Export as rules.js JSON",
     ),
     ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
     ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
@@ -35,7 +40,7 @@ const REGULAR_ACTIONS: [ActionItem; 13] = [
     ),
 ];
 
-const TRASHED_ACTIONS: [ActionItem; 14] = [
+const TRASHED_ACTIONS: [ActionItem; 15] = [
     ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
     ActionItem::new(SessionAction::ResumeInCwd, 'R', "Resume in CLI in CWD"),
     ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
@@ -47,6 +52,11 @@ const TRASHED_ACTIONS: [ActionItem; 14] = [
         SessionAction::ExportFiltered,
         'E',
         "Export as filtered .txt",
+    ),
+    ActionItem::new(
+        SessionAction::ExportRulesJson,
+        'J',
+        "Export as rules.js JSON",
     ),
     ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
     ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
@@ -60,7 +70,7 @@ const TRASHED_ACTIONS: [ActionItem; 14] = [
     ),
 ];
 
-const ANTIGRAVITY_ACTIONS: [ActionItem; 8] = [
+const ANTIGRAVITY_ACTIONS: [ActionItem; 9] = [
     ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
@@ -70,12 +80,17 @@ const ANTIGRAVITY_ACTIONS: [ActionItem; 8] = [
         'E',
         "Export as filtered .txt",
     ),
+    ActionItem::new(
+        SessionAction::ExportRulesJson,
+        'J',
+        "Export as rules.js JSON",
+    ),
     ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
     ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
     ActionItem::new(SessionAction::CopyDir, 'o', "Copy session directory"),
 ];
 
-const ANTIGRAVITY_ACTIONS_WITHOUT_RESUME: [ActionItem; 7] = [
+const ANTIGRAVITY_ACTIONS_WITHOUT_RESUME: [ActionItem; 8] = [
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
     ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
@@ -83,6 +98,11 @@ const ANTIGRAVITY_ACTIONS_WITHOUT_RESUME: [ActionItem; 7] = [
         SessionAction::ExportFiltered,
         'E',
         "Export as filtered .txt",
+    ),
+    ActionItem::new(
+        SessionAction::ExportRulesJson,
+        'J',
+        "Export as rules.js JSON",
     ),
     ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
     ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
@@ -131,6 +151,7 @@ pub enum SessionAction {
     Summarize,
     Export,
     ExportFiltered,
+    ExportRulesJson,
     CopyId,
     CopyPath,
     CopyDir,
@@ -379,6 +400,7 @@ mod tests {
                 ('s', "Summarize session (AI)"),
                 ('e', "Export as .txt"),
                 ('E', "Export as filtered .txt"),
+                ('J', "Export as rules.js JSON"),
                 ('i', "Copy session id"),
                 ('p', "Copy session path"),
                 ('o', "Copy session directory"),
@@ -403,6 +425,7 @@ mod tests {
                 SessionAction::Summarize,
                 SessionAction::Export,
                 SessionAction::ExportFiltered,
+                SessionAction::ExportRulesJson,
                 SessionAction::CopyId,
                 SessionAction::CopyPath,
                 SessionAction::CopyDir,
@@ -477,6 +500,16 @@ mod tests {
         assert!(matches!(
             state.handle_key(KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT)),
             ActionOutcome::Run(SessionAction::ExportFiltered)
+        ));
+    }
+
+    #[test]
+    fn capital_j_runs_rules_json_export() {
+        let mut state = ActionMenuState::new(false);
+
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT)),
+            ActionOutcome::Run(SessionAction::ExportRulesJson)
         ));
     }
 

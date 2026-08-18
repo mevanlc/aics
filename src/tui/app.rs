@@ -28,7 +28,9 @@ use ratatui::{Frame, Terminal};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
-use crate::export::{session_to_plain_text_with_options, write_session_export};
+use crate::export::{
+    session_to_plain_text_with_options, write_session_export, write_session_rule_json_export,
+};
 use crate::index::{
     IndexManager, Scope, SearchEngine, SearchFilters, SearchHit, SearchRequest, SortMode,
     SyncOutcome, TrashFilter,
@@ -37,7 +39,8 @@ use crate::parse::claude::read_claude_autosummaries;
 use crate::parse::codex_summary::read_codex_autosummaries;
 use crate::parse::{parse_session_file, Agent, Session};
 use crate::rules::{
-    apply_rule_proposals, RuleEvaluationError, RulePreviewMatch, RuleProposal, RulesReport,
+    apply_rule_proposals, session_to_rule_context_json, RuleEvaluationError, RulePreviewMatch,
+    RuleProposal, RulesReport,
 };
 use crate::scan::{is_default_antigravity_home, AgentHomes, SessionRoots};
 use crate::settings::{
@@ -2689,6 +2692,9 @@ impl App {
             SessionAction::ExportFiltered => {
                 self.export_selected_session(self.display_options)?;
             }
+            SessionAction::ExportRulesJson => {
+                self.export_selected_rule_json()?;
+            }
             SessionAction::CopyId => {
                 let Some(hit) = self.selected_hit() else {
                     return Ok(());
@@ -2896,6 +2902,27 @@ impl App {
         };
         let rendered = session_to_plain_text_with_options(&session, display_options);
         let path = write_session_export(&session, &rendered)?;
+        self.statusline = Some(statusline::Entry::completed(format!(
+            "exported {}",
+            file_label(&path)
+        )));
+        Ok(())
+    }
+
+    fn export_selected_rule_json(&mut self) -> Result<()> {
+        let Some(hit) = self.selected_hit() else {
+            bail!("no session selected");
+        };
+        let Some(session) = self.selected_preview().cloned() else {
+            bail!("no session selected");
+        };
+        let rendered = session_to_rule_context_json(
+            &session,
+            &hit.session.file_path,
+            hit.session.trashed,
+            hit.session.superseded_by.as_deref(),
+        )?;
+        let path = write_session_rule_json_export(&session, &rendered)?;
         self.statusline = Some(statusline::Entry::completed(format!(
             "exported {}",
             file_label(&path)

@@ -1,8 +1,8 @@
 //! Rendering sessions to standalone files.
 //!
-//! Two envelopes share one set of naming and collision rules: the TUI's export
-//! action writes plain text into the current directory, and `--export` writes
-//! Markdown into a chosen directory.
+//! Three envelopes share one set of naming and collision rules: TUI actions
+//! write plain text or materialized `rules.js` data into the current directory,
+//! and `--export` writes Markdown into a chosen directory.
 //!
 //! Message bodies are already Markdown as the agent wrote them, so the Markdown
 //! envelope has only two jobs: keep its own headings out of the way, and fence
@@ -154,9 +154,23 @@ fn hides_message(display_options: DisplayOptions, role: MessageRole, content: &s
 
 /// Write `rendered` as a `.txt` file in the current directory.
 pub fn write_session_export(session: &Session, rendered: &str) -> Result<PathBuf> {
+    write_session_export_with_extension(session, "txt", rendered)
+}
+
+/// Write a materialized `rules.js` context as a `.json` file in the current
+/// directory.
+pub fn write_session_rule_json_export(session: &Session, rendered: &str) -> Result<PathBuf> {
+    write_session_export_with_extension(session, "json", rendered)
+}
+
+fn write_session_export_with_extension(
+    session: &Session,
+    extension: &str,
+    rendered: &str,
+) -> Result<PathBuf> {
     let stem = export_stem_for_session(session)?;
     let cwd = std::env::current_dir().context("failed to resolve current directory")?;
-    write_unique(&cwd, &stem, "txt", rendered)
+    write_unique(&cwd, &stem, extension, rendered)
 }
 
 /// Filename stem for the TUI's plain-text export: the custom title when the

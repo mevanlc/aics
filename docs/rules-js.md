@@ -65,6 +65,19 @@ byte limit:
 injected AGENTS.md content. Those entries are exposed separately as
 `turns.contextualUser`.
 
+## Exporting rule data
+
+Choose **Export as rules.js JSON** from a session's actions menu, or press its
+`J` hotkey, to write the callback data for that session to the current
+directory. The file uses the same top-level `{ "session": ..., "turns": ... }`
+structure and camel-case property names documented by `rules.d.ts`.
+
+JSON cannot contain the lazy accessor functions available at runtime. Their
+complete values are materialized as strings under the corresponding property
+names: `text`, `stdout`, `stderr`, and patch-file `content`. Export filenames use
+the session's custom title when available, otherwise its session ID, and gain a
+numeric suffix instead of overwriting an existing file.
+
 ## Startup rules
 
 Set `config.applyAtStartup` to `true` to apply a rule automatically during

@@ -271,6 +271,29 @@ pub fn write_default_rules_dts() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Render the data exposed to a `rules.js` callback as standalone JSON.
+///
+/// The callback API uses functions for potentially large transcript fields so
+/// rules can fetch them lazily. JSON cannot represent functions, so this export
+/// keeps the same property names and materializes their complete values as
+/// strings instead.
+pub fn session_to_rule_context_json(
+    session: &Session,
+    path: &Path,
+    trashed: bool,
+    superseded_by: Option<&str>,
+) -> Result<String> {
+    let input = RuleInput::from_source(session, path, trashed, superseded_by);
+    let details = RuleDetails::from_session(session);
+    let mut context =
+        serde_json::to_value(input).context("failed to serialize rules session data")?;
+    materialize_rule_context(&mut context, &details)?;
+    let mut rendered = serde_json::to_string_pretty(&context)
+        .context("failed to render rules session data as JSON")?;
+    rendered.push('\n');
+    Ok(rendered)
+}
+
 pub fn run_rules(roots: &SessionRoots, options: &RulesOptions) -> Result<RulesReport> {
     run_rules_with_progress(roots, options, |_| {})
 }
@@ -1031,8 +1054,17 @@ struct RuleInput {
 
 impl RuleInput {
     fn from_session(session: &Session, file: &SessionFile, superseded_by: Option<&str>) -> Self {
+        Self::from_source(session, &file.path, file.trashed, superseded_by)
+    }
+
+    fn from_source(
+        session: &Session,
+        path: &Path,
+        trashed: bool,
+        superseded_by: Option<&str>,
+    ) -> Self {
         Self {
-            session: RuleSession::from_session(session, file, superseded_by),
+            session: RuleSession::from_source(session, path, trashed, superseded_by),
             turns: RuleTurns::from_session(session),
         }
     }
@@ -1142,7 +1174,12 @@ struct RuleSession {
 }
 
 impl RuleSession {
-    fn from_session(session: &Session, file: &SessionFile, superseded_by: Option<&str>) -> Self {
+    fn from_source(
+        session: &Session,
+        path: &Path,
+        trashed: bool,
+        superseded_by: Option<&str>,
+    ) -> Self {
         let info = session.session_info.as_ref();
         Self {
             id: session.session_id.clone(),
@@ -1150,7 +1187,7 @@ impl RuleSession {
             project: session.project.clone(),
             cwd: session.cwd.clone().unwrap_or_default(),
             branch: session.branch.clone().unwrap_or_default(),
-            path: file.path.to_string_lossy().into_owned(),
+            path: path.to_string_lossy().into_owned(),
             modified_ts: session.modified_ts,
             lines: session.lines,
             derivation_type: session.derivation_type.as_str(),
@@ -1170,9 +1207,90 @@ impl RuleSession {
                 .and_then(|info| info.sandbox_mode.clone())
                 .unwrap_or_default(),
             superseded_by: superseded_by.unwrap_or_default().to_owned(),
-            trashed: file.trashed,
+            trashed,
         }
     }
+}
+
+fn materialize_rule_context(context: &mut serde_json::Value, details: &RuleDetails) -> Result<()> {
+    let turns = context
+        .get_mut("turns")
+        .and_then(serde_json::Value::as_object_mut)
+        .context("serialized rules session data is missing `turns`")?;
+
+    for (collection, kind) in [
+        ("user", "user"),
+        ("contextualUser", "contextual_user"),
+        ("agent", "agent"),
+        ("system", "system"),
+        ("toolResults", "tool_result"),
+    ] {
+        materialize_rule_turn_field(turns, details, collection, kind, "text")?;
+    }
+    materialize_rule_turn_field(turns, details, "exec", "exec", "stdout")?;
+    materialize_rule_turn_field(turns, details, "exec", "exec", "stderr")?;
+    materialize_rule_patch_content(turns, details)?;
+    Ok(())
+}
+
+fn materialize_rule_turn_field(
+    turns: &mut serde_json::Map<String, serde_json::Value>,
+    details: &RuleDetails,
+    collection: &str,
+    kind: &str,
+    field: &str,
+) -> Result<()> {
+    let entries = turns
+        .get_mut(collection)
+        .and_then(serde_json::Value::as_array_mut)
+        .with_context(|| {
+            format!("serialized rules session data is missing `turns.{collection}`")
+        })?;
+    for entry in entries {
+        let index = entry
+            .get("index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .with_context(|| format!("rules turn in `{collection}` has no valid index"))?;
+        let text = details
+            .fetch(kind, index, field, usize::MAX)
+            .unwrap_or_default();
+        entry
+            .as_object_mut()
+            .with_context(|| format!("rules turn in `{collection}` is not an object"))?
+            .insert(field.to_owned(), serde_json::Value::String(text));
+    }
+    Ok(())
+}
+
+fn materialize_rule_patch_content(
+    turns: &mut serde_json::Map<String, serde_json::Value>,
+    details: &RuleDetails,
+) -> Result<()> {
+    let patches = turns
+        .get_mut("patches")
+        .and_then(serde_json::Value::as_array_mut)
+        .context("serialized rules session data is missing `turns.patches`")?;
+    for patch in patches {
+        let index = patch
+            .get("index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .context("rules patch turn has no valid index")?;
+        let files = patch
+            .get_mut("files")
+            .and_then(serde_json::Value::as_array_mut)
+            .context("rules patch turn is missing `files`")?;
+        for (file_index, file) in files.iter_mut().enumerate() {
+            let content = details
+                .fetch("patch", index, &file_index.to_string(), usize::MAX)
+                .unwrap_or_default();
+            file.as_object_mut()
+                .context("rules patch file is not an object")?
+                .insert("content".to_owned(), serde_json::Value::String(content));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1387,8 +1505,14 @@ struct RulePatchFile {
 
 #[cfg(test)]
 mod tests {
-    use super::{JsRuleEngine, RuleDetails, RuleInput, RuleSelection, RuleSession, RuleTurns};
-    use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionCell};
+    use super::{
+        session_to_rule_context_json, JsRuleEngine, RuleDetails, RuleInput, RuleSelection,
+        RuleSession, RuleTurns,
+    };
+    use crate::parse::{
+        Agent, DerivationType, ExecStatus, MessageRole, PatchFile, PatchOp, Session, SessionCell,
+        ToolStatus,
+    };
     use std::path::PathBuf;
 
     fn input(agent: &'static str, _user_text: &str) -> RuleInput {
@@ -1490,6 +1614,94 @@ mod tests {
             Some(request.to_owned())
         );
         assert_eq!(details.fetch("user", 0, "text", usize::MAX), None);
+    }
+
+    #[test]
+    fn rule_context_json_materializes_lazy_transcript_fields() {
+        let docs = "# AGENTS.md instructions\n\n<INSTRUCTIONS>project context</INSTRUCTIONS>";
+        let mut session = session_with_cells(vec![
+            message(MessageRole::User, docs),
+            message(MessageRole::User, "real request"),
+            SessionCell::Reasoning {
+                header: Some("analysis".to_owned()),
+                body: "consider the request".to_owned(),
+                timestamp: None,
+            },
+            message(MessageRole::System, "system context"),
+            SessionCell::ToolCall {
+                tool: "read".to_owned(),
+                raw_name: "Read".to_owned(),
+                summary: "src/main.rs".to_owned(),
+                input: serde_json::Value::Null,
+                status: ToolStatus::Completed,
+                timestamp: None,
+            },
+            SessionCell::ToolResult {
+                tool: Some("read".to_owned()),
+                output: "file contents".to_owned(),
+                is_error: false,
+                call_summary: None,
+                timestamp: None,
+            },
+            SessionCell::Exec {
+                command: vec!["cargo check".to_owned()],
+                cwd: Some("/tmp/project".to_owned()),
+                parsed_summary: None,
+                stdout: "check stdout".to_owned(),
+                stderr: "check stderr".to_owned(),
+                exit_code: Some(0),
+                duration_ms: None,
+                status: ExecStatus::Completed,
+                timestamp: None,
+            },
+            SessionCell::Patch {
+                files: vec![PatchFile {
+                    path: "src/main.rs".to_owned(),
+                    op: PatchOp::Update,
+                    content: Some("updated file".to_owned()),
+                    additions: 1,
+                    deletions: 1,
+                }],
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+                timestamp: None,
+            },
+        ]);
+        session.custom_title = Some("Rules export".to_owned());
+
+        let rendered = session_to_rule_context_json(
+            &session,
+            std::path::Path::new("/tmp/session.jsonl"),
+            true,
+            Some("keeper-session"),
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+
+        assert_eq!(value["session"]["id"], "s1");
+        assert_eq!(value["session"]["agent"], "codex");
+        assert_eq!(value["session"]["path"], "/tmp/session.jsonl");
+        assert_eq!(value["session"]["customTitle"], "Rules export");
+        assert_eq!(value["session"]["supersededBy"], "keeper-session");
+        assert_eq!(value["session"]["trashed"], true);
+        assert_eq!(value["turns"]["contextualUser"][0]["text"], docs);
+        assert_eq!(value["turns"]["user"][0]["text"], "real request");
+        assert_eq!(
+            value["turns"]["agent"][0]["text"],
+            "analysis\nconsider the request"
+        );
+        assert_eq!(value["turns"]["system"][0]["text"], "system context");
+        assert_eq!(value["turns"]["toolCalls"][0]["tool"], "read");
+        assert_eq!(value["turns"]["toolResults"][0]["text"], "file contents");
+        assert_eq!(value["turns"]["exec"][0]["stdout"], "check stdout");
+        assert_eq!(value["turns"]["exec"][0]["stderr"], "check stderr");
+        assert_eq!(
+            value["turns"]["patches"][0]["files"][0]["content"],
+            "updated file"
+        );
+        assert!(rendered.ends_with('\n'));
+        assert!(!rendered.contains(super::TRUNCATED_SUFFIX));
     }
 
     #[test]

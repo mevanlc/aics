@@ -13,7 +13,7 @@ In the tables below, `^` means Ctrl.
 | `↑` / `↓` or `^J` / `^K` | Move the selected session |
 | `PgUp` / `PgDn` | Scroll the preview, or page through the list when preview is hidden |
 | `Home` / `End` | Jump within the preview, or to the first/last result when preview is hidden |
-| `⏎` | Open the selected session's actions menu, including complete and active-filtered `.txt` exports |
+| `⏎` | Open the selected session's actions menu, including complete and active-filtered `.txt` exports and a `rules.js`-shaped JSON export |
 | `^F` | Open filters and display options; `^S` in the modal applies them and saves them as startup defaults |
 | `^G` | Toggle between global and current-directory scope |
 | `^S` | Open settings |
