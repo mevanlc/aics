@@ -852,17 +852,6 @@ pub fn apply_rule_proposals(
 
     let store = TrashStore::new(paths);
     for proposal in proposals {
-        if proposal.agent == Agent::Antigravity {
-            skipped.push(SkippedRuleAction {
-                rule: proposal.rule.clone(),
-                session_id: proposal.session_id.clone(),
-                path: proposal.path.clone(),
-                agent: proposal.agent,
-                action: proposal.action.clone(),
-                skip_reason: "Antigravity bundle lifecycle actions are unsupported".to_owned(),
-            });
-            continue;
-        }
         match &proposal.action {
             RuleAction::Trash { .. } => {
                 if proposal.path.starts_with(store.paths().trash_dir.as_path()) {
@@ -876,7 +865,7 @@ pub fn apply_rule_proposals(
                     });
                     continue;
                 }
-                match store.trash_file(&proposal.path, proposal.agent) {
+                match store.trash_session(&proposal.path, proposal.agent) {
                     Ok(_) => applied.push(AppliedRuleAction {
                         rule: proposal.rule.clone(),
                         session_id: proposal.session_id.clone(),

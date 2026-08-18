@@ -15,6 +15,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Markdown rendering with syntax highlighting and search-term highlighting in the viewer
 - Multiple themes (lazygit, aics, sunset, late), configurable via settings modal
 - Configurable Claude, Codex, and Antigravity launch commands so `aics` can hand off to resume a session
+- AICS trash, restore, and permanent deletion for session files and complete Antigravity bundles
 - `--json` mode for scripting, and `--export DIR` to batch-export matching sessions as Markdown
 - JavaScript rules for previewing or applying batch session cleanup actions
 - Cross-platform: Windows, macOS, Linux, Android (Termux), FreeBSD, and NetBSD

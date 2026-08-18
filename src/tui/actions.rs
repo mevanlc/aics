@@ -70,7 +70,7 @@ const TRASHED_ACTIONS: [ActionItem; 15] = [
     ),
 ];
 
-const ANTIGRAVITY_ACTIONS: [ActionItem; 9] = [
+const ANTIGRAVITY_ACTIONS: [ActionItem; 11] = [
     ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
@@ -88,9 +88,15 @@ const ANTIGRAVITY_ACTIONS: [ActionItem; 9] = [
     ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
     ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
     ActionItem::new(SessionAction::CopyDir, 'o', "Copy session directory"),
+    ActionItem::new(SessionAction::Delete, 'd', "Move session to Trash"),
+    ActionItem::new(
+        SessionAction::DeleteImmediately,
+        'D',
+        "Delete session immediately",
+    ),
 ];
 
-const ANTIGRAVITY_ACTIONS_WITHOUT_RESUME: [ActionItem; 8] = [
+const ANTIGRAVITY_ACTIONS_WITHOUT_RESUME: [ActionItem; 10] = [
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
     ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
@@ -107,11 +113,47 @@ const ANTIGRAVITY_ACTIONS_WITHOUT_RESUME: [ActionItem; 8] = [
     ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
     ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
     ActionItem::new(SessionAction::CopyDir, 'o', "Copy session directory"),
+    ActionItem::new(SessionAction::Delete, 'd', "Move session to Trash"),
+    ActionItem::new(
+        SessionAction::DeleteImmediately,
+        'D',
+        "Delete session immediately",
+    ),
+];
+
+const TRASHED_ANTIGRAVITY_ACTIONS: [ActionItem; 11] = [
+    ActionItem::new(SessionAction::View, 'v', "View full conversation"),
+    ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
+    ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
+    ActionItem::new(
+        SessionAction::ExportFiltered,
+        'E',
+        "Export as filtered .txt",
+    ),
+    ActionItem::new(
+        SessionAction::ExportRulesJson,
+        'J',
+        "Export as rules.js JSON",
+    ),
+    ActionItem::new(SessionAction::CopyId, 'i', "Copy session id"),
+    ActionItem::new(SessionAction::CopyPath, 'p', "Copy session path"),
+    ActionItem::new(SessionAction::CopyDir, 'o', "Copy session directory"),
+    ActionItem::new(SessionAction::UndoTrash, 'u', "Undo trash"),
+    ActionItem::new(SessionAction::Delete, 'd', "Delete from Trash"),
+    ActionItem::new(
+        SessionAction::DeleteImmediately,
+        'D',
+        "Delete session immediately",
+    ),
 ];
 
 fn actions(agent: Agent, trashed: bool) -> &'static [ActionItem] {
     if agent == Agent::Antigravity {
-        return &ANTIGRAVITY_ACTIONS;
+        return if trashed {
+            &TRASHED_ANTIGRAVITY_ACTIONS
+        } else {
+            &ANTIGRAVITY_ACTIONS
+        };
     }
     if trashed {
         &TRASHED_ACTIONS
@@ -125,7 +167,9 @@ fn actions_with_resume(
     trashed: bool,
     antigravity_resume_supported: bool,
 ) -> &'static [ActionItem] {
-    if agent == Agent::Antigravity && !antigravity_resume_supported {
+    if agent == Agent::Antigravity && trashed {
+        &TRASHED_ANTIGRAVITY_ACTIONS
+    } else if agent == Agent::Antigravity && !antigravity_resume_supported {
         &ANTIGRAVITY_ACTIONS_WITHOUT_RESUME
     } else {
         actions(agent, trashed)
@@ -411,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_actions_exclude_unsafe_bundle_mutations() {
+    fn antigravity_actions_include_safe_bundle_lifecycle_operations() {
         let actions = actions(Agent::Antigravity, false)
             .iter()
             .map(|item| item.action)
@@ -429,11 +473,27 @@ mod tests {
                 SessionAction::CopyId,
                 SessionAction::CopyPath,
                 SessionAction::CopyDir,
+                SessionAction::Delete,
+                SessionAction::DeleteImmediately,
             ]
         );
         assert!(!actions.contains(&SessionAction::ResumeInCwd));
         assert!(!actions.contains(&SessionAction::Fork));
-        assert!(!actions.contains(&SessionAction::Delete));
+    }
+
+    #[test]
+    fn trashed_antigravity_actions_allow_restore_and_delete_but_not_resume() {
+        let actions = actions(Agent::Antigravity, true)
+            .iter()
+            .map(|item| item.action)
+            .collect::<Vec<_>>();
+
+        assert!(actions.contains(&SessionAction::UndoTrash));
+        assert!(actions.contains(&SessionAction::Delete));
+        assert!(actions.contains(&SessionAction::DeleteImmediately));
+        assert!(!actions.contains(&SessionAction::Resume));
+        assert!(!actions.contains(&SessionAction::ResumeInCwd));
+        assert!(!actions.contains(&SessionAction::Fork));
     }
 
     #[test]

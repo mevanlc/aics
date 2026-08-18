@@ -38,8 +38,8 @@ rule("trash short commit helper sessions", ({ turns }) => {
 A rule can return `nothing()`, `trash(reason)`, or `untrash(reason)`. To evaluate
 trashed sessions for `untrash`, use `--trashed yes` or `--trashed both`.
 Applying `untrash` to a normal session is skipped as already untrashed.
-Antigravity conversations are multi-file bundles, so AICS safely skips both
-`trash` and `untrash` proposals for them.
+For Antigravity, `trash` moves the complete conversation artifact directory and
+its local SQLite database companions; `untrash` restores the same bundle.
 
 Rules receive session metadata such as `session.model`,
 `session.modelProvider`, `session.reasoningEffort`, `session.approvalPolicy`, and

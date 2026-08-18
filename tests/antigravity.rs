@@ -7,6 +7,7 @@ use aics::parse::{
     SessionCell,
 };
 use aics::scan::{scan_session_files, SessionRoots};
+use aics::trash::{TrashPaths, TrashStore};
 use anyhow::Result;
 use tempfile::TempDir;
 
@@ -133,6 +134,49 @@ fn antigravity_index_searches_full_content_and_reindexes_bundle_changes() -> Res
         hits[0].session.custom_title.as_deref(),
         Some("Updated Antigravity title")
     );
+    Ok(())
+}
+
+#[test]
+fn trashed_antigravity_bundle_remains_searchable_with_original_metadata() -> Result<()> {
+    let temp = TempDir::new()?;
+    let antigravity_home = temp.path().join("antigravity-home");
+    copy_tree(
+        &fixture_path("tests/fixtures/sessions/antigravity"),
+        &antigravity_home,
+    )?;
+    let conversations = antigravity_home.join("conversations");
+    fs::create_dir_all(&conversations)?;
+    fs::write(conversations.join(format!("{SESSION_ID}.db")), "database")?;
+    let trash_paths = TrashPaths::from_data_root(temp.path().join("aics-data"));
+    let transcript = antigravity_home
+        .join("brain")
+        .join(SESSION_ID)
+        .join(".system_generated/logs/transcript.jsonl");
+    let expected_original = transcript.canonicalize()?;
+
+    TrashStore::new(trash_paths.clone()).trash_session(&transcript, Agent::Antigravity)?;
+    let mut roots = roots_for(antigravity_home);
+    roots.trash = Some(trash_paths);
+    let files = scan_session_files(&roots)?;
+
+    assert_eq!(files.len(), 1);
+    assert!(files[0].trashed);
+    assert_eq!(
+        files[0].original_path.as_deref(),
+        Some(expected_original.as_path())
+    );
+    assert!(files[0]
+        .path
+        .to_string_lossy()
+        .contains(".antigravity/brain/"));
+    let session = parse_scanned_session_file(&files[0])?.expect("trashed session should parse");
+    assert_eq!(session.session_id, SESSION_ID);
+    assert_eq!(
+        session.custom_title.as_deref(),
+        Some("Antigravity fixture title")
+    );
+    assert_eq!(session.cwd.as_deref(), Some("/tmp/agy workspace"));
     Ok(())
 }
 

@@ -2788,11 +2788,28 @@ impl App {
         if !hit.session.trashed {
             return Ok(());
         }
-        let Some(target) = hit.session.original_path.clone() else {
+        let Some(original_path) = hit.session.original_path.clone() else {
             self.statusline = Some(statusline::Entry::failed(
                 "cannot restore trash item: original path is unknown",
             ));
             return Ok(());
+        };
+        let target = if hit.session.agent == Agent::Antigravity {
+            let Some(paths) = self.roots.trash.clone() else {
+                self.statusline = Some(statusline::Entry::failed(
+                    "cannot restore Antigravity bundle: trash store is unavailable",
+                ));
+                return Ok(());
+            };
+            match TrashStore::new(paths).restore_target(&hit.session.file_path) {
+                Ok(target) => target,
+                Err(error) => {
+                    self.statusline = Some(statusline::Entry::failed(format!("{error:#}")));
+                    return Ok(());
+                }
+            }
+        } else {
+            original_path
         };
         let Some(parent) = target.parent().map(Path::to_path_buf) else {
             self.statusline = Some(statusline::Entry::failed(
@@ -2845,23 +2862,33 @@ impl App {
             RestorePromptKind::OverwriteFile => {}
         }
 
-        if target.is_dir() {
-            bail!("cannot restore over directory {}", target.display());
-        }
-        if target.exists() && !target.is_file() {
-            bail!("cannot restore over non-file {}", target.display());
-        }
+        let restored_path = if prompt.hit.session.agent == Agent::Antigravity {
+            let paths = self
+                .roots
+                .trash
+                .clone()
+                .context("cannot restore Antigravity bundle: trash store is unavailable")?;
+            TrashStore::new(paths).restore_file(&source)?
+        } else {
+            if target.is_dir() {
+                bail!("cannot restore over directory {}", target.display());
+            }
+            if target.exists() && !target.is_file() {
+                bail!("cannot restore over non-file {}", target.display());
+            }
 
-        fs::copy(&source, &target).with_context(|| {
-            format!(
-                "failed to restore {} to {}",
-                source.display(),
-                target.display()
-            )
-        })?;
-        fs::remove_file(&source).with_context(|| {
-            format!("failed to remove restored trash item {}", source.display())
-        })?;
+            fs::copy(&source, &target).with_context(|| {
+                format!(
+                    "failed to restore {} to {}",
+                    source.display(),
+                    target.display()
+                )
+            })?;
+            fs::remove_file(&source).with_context(|| {
+                format!("failed to remove restored trash item {}", source.display())
+            })?;
+            target.clone()
+        };
 
         self.results
             .retain(|result| result.session.file_path != source);
@@ -2881,14 +2908,22 @@ impl App {
             SyncOutcome::Completed(_) => {
                 self.statusline = Some(statusline::Entry::completed(format!(
                     "restored {}",
-                    file_label(&target)
+                    if prompt.hit.session.agent == Agent::Antigravity {
+                        prompt.hit.session.session_id.clone()
+                    } else {
+                        file_label(&restored_path)
+                    }
                 )));
                 self.trigger_search_now()?;
             }
             SyncOutcome::Busy => {
                 self.statusline = Some(statusline::Entry::completed(format!(
                     "restored {} · index refresh deferred",
-                    file_label(&target)
+                    if prompt.hit.session.agent == Agent::Antigravity {
+                        prompt.hit.session.session_id.clone()
+                    } else {
+                        file_label(&restored_path)
+                    }
                 )));
             }
         }
@@ -2934,12 +2969,6 @@ impl App {
         let Some(hit) = self.selected_hit() else {
             return Ok(());
         };
-        if hit.session.agent == Agent::Antigravity {
-            self.statusline = Some(statusline::Entry::failed(
-                "Antigravity bundle deletion is unsupported",
-            ));
-            return Ok(());
-        }
         debug!(
             "delete_selected_session selected={} results_before={} mode={:?} path={}",
             self.selected,
@@ -2984,12 +3013,9 @@ impl App {
                     hit.session.file_path.display()
                 );
                 self.statusline = Some(statusline::Entry::completed(if file_already_missing {
-                    format!(
-                        "removed missing session {}",
-                        file_label(&hit.session.file_path)
-                    )
+                    format!("removed missing session {}", session_label(&hit))
                 } else {
-                    delete_status_label(mode, &hit.session.file_path, false, hit.session.trashed)
+                    delete_status_label(mode, &session_label(&hit), false, hit.session.trashed)
                 }));
             }
             SyncOutcome::Busy => {
@@ -3000,17 +3026,12 @@ impl App {
                 self.statusline = Some(statusline::Entry::completed(if file_already_missing {
                     format!(
                         "removed missing session {} · index refresh deferred",
-                        file_label(&hit.session.file_path)
+                        session_label(&hit)
                     )
                 } else {
                     format!(
                         "{} · index refresh deferred",
-                        delete_status_label(
-                            mode,
-                            &hit.session.file_path,
-                            false,
-                            hit.session.trashed
-                        )
+                        delete_status_label(mode, &session_label(&hit), false, hit.session.trashed)
                     )
                 }));
             }
@@ -3019,17 +3040,45 @@ impl App {
     }
 
     fn delete_file_for_mode(&self, hit: &SearchHit, mode: DeleteMode) -> io::Result<()> {
+        if hit.session.agent != Agent::Antigravity {
+            if matches!(mode, DeleteMode::Trash) && !hit.session.trashed {
+                let Some(paths) = self.roots.trash.clone() else {
+                    return fs::remove_file(&hit.session.file_path);
+                };
+                return TrashStore::new(paths)
+                    .trash_session(&hit.session.file_path, hit.session.agent)
+                    .map(|_| ())
+                    .map_err(io::Error::other);
+            }
+            return fs::remove_file(&hit.session.file_path);
+        }
+
         if matches!(mode, DeleteMode::Trash) && !hit.session.trashed {
             let Some(paths) = self.roots.trash.clone() else {
-                return fs::remove_file(&hit.session.file_path);
+                return crate::trash::delete_session_immediately(
+                    &hit.session.file_path,
+                    hit.session.agent,
+                )
+                .map_err(io::Error::other);
             };
             return TrashStore::new(paths)
-                .trash_file(&hit.session.file_path, hit.session.agent)
+                .trash_session(&hit.session.file_path, hit.session.agent)
                 .map(|_| ())
                 .map_err(io::Error::other);
         }
 
-        fs::remove_file(&hit.session.file_path)
+        if let Some(paths) = self.roots.trash.clone() {
+            TrashStore::new(paths)
+                .delete_session(
+                    &hit.session.file_path,
+                    hit.session.agent,
+                    hit.session.trashed,
+                )
+                .map_err(io::Error::other)
+        } else {
+            crate::trash::delete_session_immediately(&hit.session.file_path, hit.session.agent)
+                .map_err(io::Error::other)
+        }
     }
 
     fn copy_to_clipboard(&mut self, value: &str, label: &str) -> Result<()> {
@@ -3056,7 +3105,10 @@ impl App {
                 Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
-                confirm_delete_description(mode),
+                confirm_delete_description(
+                    mode,
+                    hit.is_some_and(|hit| hit.session.agent == Agent::Antigravity),
+                ),
                 Style::default().fg(theme.muted),
             )),
             Line::from(vec![
@@ -3641,14 +3693,22 @@ fn file_label(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn delete_status_label(mode: DeleteMode, path: &Path, missing: bool, trashed: bool) -> String {
+fn session_label(hit: &SearchHit) -> String {
+    if hit.session.agent == Agent::Antigravity {
+        hit.session.session_id.clone()
+    } else {
+        file_label(&hit.session.file_path)
+    }
+}
+
+fn delete_status_label(mode: DeleteMode, label: &str, missing: bool, trashed: bool) -> String {
     if missing {
-        return format!("removed missing session {}", file_label(path));
+        return format!("removed missing session {label}");
     }
     match mode {
-        DeleteMode::Trash if trashed => format!("deleted {} from Trash", file_label(path)),
-        DeleteMode::Trash => format!("moved {} to Trash", file_label(path)),
-        DeleteMode::Immediate => format!("deleted {}", file_label(path)),
+        DeleteMode::Trash if trashed => format!("deleted {label} from Trash"),
+        DeleteMode::Trash => format!("moved {label} to Trash"),
+        DeleteMode::Immediate => format!("deleted {label}"),
     }
 }
 
@@ -3659,12 +3719,20 @@ fn confirm_delete_title(mode: DeleteMode, title: &str) -> String {
     }
 }
 
-fn confirm_delete_description(mode: DeleteMode) -> &'static str {
-    match mode {
-        DeleteMode::Trash => {
+fn confirm_delete_description(mode: DeleteMode, antigravity: bool) -> &'static str {
+    match (mode, antigravity) {
+        (DeleteMode::Trash, true) => {
+            "This moves the complete Antigravity bundle and local database to AICS Trash."
+        }
+        (DeleteMode::Trash, false) => {
             "This copies the JSONL file to Trash, records metadata, then removes the original."
         }
-        DeleteMode::Immediate => "This permanently removes the JSONL file and refreshes the index.",
+        (DeleteMode::Immediate, true) => {
+            "This permanently removes the Antigravity bundle and local database."
+        }
+        (DeleteMode::Immediate, false) => {
+            "This permanently removes the JSONL file and refreshes the index."
+        }
     }
 }
 
@@ -4117,7 +4185,7 @@ mod tests {
         AicsSummaryPreview, ClaudeAutosummaryPreview, CodexAutosummaryPreview, Fingerprint,
         SummarizeBackend, SummarySidecar, SummarySources, SummaryWorker,
     };
-    use crate::trash::TrashPaths;
+    use crate::trash::{TrashPaths, TrashStore};
 
     #[test]
     fn main_hints_match_session_screen_shortcut_bar() {
@@ -4582,12 +4650,19 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_d_does_not_delete_antigravity_bundle_transcript() {
+    fn ctrl_d_moves_antigravity_bundle_and_database_to_trash() {
         let temp = TempDir::new().unwrap();
-        let source = temp.path().join("transcript.jsonl");
+        let source = temp
+            .path()
+            .join("antigravity/brain/session-123/.system_generated/logs/transcript.jsonl");
+        let database = temp.path().join("antigravity/conversations/session-123.db");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir_all(database.parent().unwrap()).unwrap();
         fs::write(&source, "{}\n").unwrap();
+        fs::write(&database, "sqlite data").unwrap();
+        let data_root = temp.path().join("data");
         let mut app = test_app();
-        app.roots.trash = Some(TrashPaths::from_data_root(temp.path().join("data")));
+        app.roots.trash = Some(TrashPaths::from_data_root(&data_root));
         app.results = vec![sample_hit_with_path(Agent::Antigravity, source.clone())];
 
         app.handle_key(crossterm_key_mods(
@@ -4596,12 +4671,17 @@ mod tests {
         ))
         .unwrap();
 
-        assert!(source.exists());
-        assert_eq!(app.results.len(), 1);
-        assert_eq!(
-            app.statusline.as_ref().map(|entry| entry.label.as_str()),
-            Some("Antigravity bundle deletion is unsupported")
-        );
+        assert!(!source.exists());
+        assert!(!database.exists());
+        assert!(data_root
+            .join("trash/session-123.antigravity/brain/session-123/.system_generated/logs/transcript.jsonl")
+            .exists());
+        assert!(data_root
+            .join("trash/session-123.antigravity/conversations/session-123.db")
+            .exists());
+        assert!(app.results.is_empty());
+        let metadata = fs::read_to_string(data_root.join("trash.jsonl")).unwrap();
+        assert!(metadata.contains("\"tn\":\"antigravity\""));
     }
 
     #[test]
@@ -5769,6 +5849,47 @@ mod tests {
         assert!(target.exists());
         assert!(!trash_source.exists());
         assert!(app.results.is_empty());
+    }
+
+    #[test]
+    fn undo_trash_restores_complete_antigravity_bundle() {
+        let temp = TempDir::new().unwrap();
+        let transcript = temp
+            .path()
+            .join("antigravity/brain/session-123/.system_generated/logs/transcript.jsonl");
+        let database = temp.path().join("antigravity/conversations/session-123.db");
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::create_dir_all(database.parent().unwrap()).unwrap();
+        fs::write(&transcript, "{}\n").unwrap();
+        fs::write(&database, "database").unwrap();
+        let original = transcript.canonicalize().unwrap();
+        let trash_paths = TrashPaths::from_data_root(temp.path().join("data"));
+        let entry = TrashStore::new(trash_paths.clone())
+            .trash_session(&transcript, Agent::Antigravity)
+            .unwrap();
+        let archive = entry.trash_path(&trash_paths);
+        let trash_source =
+            archive.join("brain/session-123/.system_generated/logs/transcript.jsonl");
+        let mut app = test_app();
+        app.roots.trash = Some(trash_paths);
+        app.results = vec![sample_trashed_hit_with_paths(
+            Agent::Antigravity,
+            trash_source,
+            original.clone(),
+        )];
+
+        app.run_session_action(super::SessionAction::UndoTrash)
+            .unwrap();
+
+        assert!(matches!(app.overlay, super::Overlay::None));
+        assert!(original.exists());
+        assert!(database.exists());
+        assert!(!archive.exists());
+        assert!(app.results.is_empty());
+        assert!(app
+            .statusline
+            .as_ref()
+            .is_some_and(|entry| entry.label == "restored session-123"));
     }
 
     #[test]

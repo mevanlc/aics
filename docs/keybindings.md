@@ -22,7 +22,7 @@ In the tables below, `^` means Ctrl.
 | `Shift+↑` / `Shift+↓` | Jump to the previous or next message/event in the preview |
 | `^Shift+↑` / `^Shift+↓` | Jump to the previous or next user message in the preview |
 | `^Y` | Cycle the session-card snippet between session text and available summaries |
-| `^D` | Move the selected Claude/Codex session to AICS trash; Antigravity bundles are left intact; in rules preview, process marked proposals |
+| `^D` | Move the selected session to AICS trash, including the complete local Antigravity bundle; in rules preview, process marked proposals |
 | `Shift+←` / `Shift+→` | Resize the list/preview split |
 | `^L` | Open contextual help |
 | `Esc` | Clear a non-empty query; quit when the query is empty |
@@ -43,7 +43,7 @@ In the tables below, `^` means Ctrl.
 | `^N` / `^P` | Jump to the next or previous highlighted match |
 | `^U` / `^E` | Use readline-style editing in the search box |
 | `^F` | Open filters and display options |
-| `^D` | Move the current Claude/Codex session to AICS trash; Antigravity bundles are left intact |
+| `^D` | Move the current session to AICS trash, including the complete local Antigravity bundle |
 | `⏎` | Open the current session's actions menu |
 | `^L` | Open contextual help on the Viewer tab |
 | `Esc` | Close the viewer |

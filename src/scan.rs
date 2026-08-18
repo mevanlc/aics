@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::parse::session::{system_time_or_epoch, Agent};
-use crate::trash::{TrashPaths, TrashStore};
+use crate::trash::{AntigravityBundlePaths, TrashPaths, TrashStore};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRoots {
@@ -612,6 +612,45 @@ fn scan_trash_root<P: ScanProgressObserver>(
         let Some(agent) = entry.agent() else {
             continue;
         };
+        if agent == Agent::Antigravity {
+            let Some(original_path) = entry.original_path() else {
+                warn!(
+                    "skipping trashed Antigravity bundle with unknown original path {}",
+                    entry.trash_path(store.paths()).display()
+                );
+                continue;
+            };
+            let original = match AntigravityBundlePaths::from_transcript(&original_path) {
+                Ok(original) => original,
+                Err(error) => {
+                    warn!(
+                        "skipping trashed Antigravity bundle with invalid original path {}: {error:#}",
+                        original_path.display()
+                    );
+                    continue;
+                }
+            };
+            let archive = entry.trash_path(store.paths());
+            let archived = AntigravityBundlePaths::in_archive(&archive, &original.session_id);
+            let mut metadata = load_antigravity_metadata(&original.home);
+            apply_antigravity_history(&original.home, &mut metadata);
+            let session_metadata = metadata.remove(&original.session_id).unwrap_or_default();
+            let Some(mut file) =
+                build_antigravity_session_file(archived.transcript, session_metadata)
+            else {
+                warn!(
+                    "skipping trashed Antigravity bundle without a readable transcript {}",
+                    archive.display()
+                );
+                continue;
+            };
+            file.trashed = true;
+            file.original_path = Some(original_path);
+            output.push(file);
+            progress.on_discovered(output.len());
+            continue;
+        }
+
         let path = entry.trash_path(store.paths());
         if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
             continue;

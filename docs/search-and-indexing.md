@@ -28,6 +28,13 @@ preview, and workspace metadata from the Antigravity cache and `history.jsonl`.
 When regular and full transcripts contain the same `step_index`, the full record
 wins; regular-only tail records remain visible.
 
+Moving an Antigravity session to AICS Trash preserves its complete
+`brain/<conversation-id>/` artifact directory and local
+`conversations/<conversation-id>.db` companions. Trashed bundles remain
+searchable in AICS with the trash filter, cannot be resumed while trashed, and
+can be restored to their original Antigravity home. Permanent deletion removes
+the same complete local bundle.
+
 ## Incremental indexing
 
 On startup, AICS scans the session roots and compares each logical session with

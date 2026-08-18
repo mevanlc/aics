@@ -599,6 +599,67 @@ fn apply_rules_skips_untrash_for_normal_session() -> Result<()> {
 }
 
 #[test]
+fn rule_proposals_trash_and_untrash_antigravity_bundles() -> Result<()> {
+    let temp = TempDir::new()?;
+    let antigravity_home = temp.path().join("antigravity");
+    let transcript =
+        antigravity_home.join("brain/conversation-123/.system_generated/logs/transcript.jsonl");
+    let database = antigravity_home.join("conversations/conversation-123.db");
+    fs::create_dir_all(transcript.parent().unwrap())?;
+    fs::create_dir_all(database.parent().unwrap())?;
+    fs::write(&transcript, "{}\n")?;
+    fs::write(&database, "database")?;
+    let trash_paths = TrashPaths::from_data_root(temp.path().join("data"));
+    let roots = SessionRoots {
+        claude_projects: temp.path().join("missing-claude"),
+        codex_sessions: temp.path().join("missing-codex"),
+        antigravity_home,
+        trash: Some(trash_paths.clone()),
+    };
+    let trash_proposal = RuleProposal {
+        rule: "trash antigravity".to_owned(),
+        session_id: "conversation-123".to_owned(),
+        path: transcript.clone(),
+        agent: Agent::Antigravity,
+        action: RuleAction::Trash {
+            reason: Some("cleanup".to_owned()),
+        },
+    };
+
+    let (applied, skipped) = apply_rule_proposals(&roots, &[trash_proposal]);
+
+    assert_eq!(applied.len(), 1);
+    assert!(skipped.is_empty());
+    assert!(!transcript.exists());
+    assert!(!database.exists());
+    let entry = TrashStore::new(trash_paths.clone())
+        .sync()?
+        .into_iter()
+        .next()
+        .expect("Antigravity trash entry");
+    let trashed_transcript = entry
+        .trash_path(&trash_paths)
+        .join("brain/conversation-123/.system_generated/logs/transcript.jsonl");
+    let untrash_proposal = RuleProposal {
+        rule: "untrash antigravity".to_owned(),
+        session_id: "conversation-123".to_owned(),
+        path: trashed_transcript,
+        agent: Agent::Antigravity,
+        action: RuleAction::Untrash {
+            reason: Some("restore".to_owned()),
+        },
+    };
+
+    let (applied, skipped) = apply_rule_proposals(&roots, &[untrash_proposal]);
+
+    assert_eq!(applied.len(), 1);
+    assert!(skipped.is_empty());
+    assert!(transcript.exists());
+    assert!(database.exists());
+    Ok(())
+}
+
+#[test]
 fn benchmark_rules_evaluates_without_output_or_applying_actions() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
@@ -642,7 +703,7 @@ fn benchmark_rules_evaluates_without_output_or_applying_actions() -> Result<()> 
 }
 
 #[test]
-fn applying_antigravity_lifecycle_action_is_safely_skipped() -> Result<()> {
+fn applying_antigravity_lifecycle_action_rejects_invalid_bundle_path() -> Result<()> {
     let temp = TempDir::new()?;
     let transcript = temp.path().join("transcript.jsonl");
     fs::write(&transcript, "bundle stays intact")?;
@@ -668,7 +729,7 @@ fn applying_antigravity_lifecycle_action_is_safely_skipped() -> Result<()> {
     assert_eq!(skipped.len(), 1);
     assert_eq!(
         skipped[0].skip_reason,
-        "Antigravity bundle lifecycle actions are unsupported"
+        "transcript.jsonl is not under a logs directory"
     );
     assert!(transcript.exists());
     Ok(())
