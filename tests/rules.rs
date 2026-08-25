@@ -60,6 +60,7 @@ fn write_rules_dts_creates_default_config_file() -> Result<()> {
     assert!(contents.contains("interface AicsRuleConfig"));
     assert!(contents.contains("applyAtStartup?: boolean;"));
     assert!(contents.contains("config: AicsRuleConfig,"));
+    assert!(contents.contains("declare function nothing(reason?: string): AicsNothingAction;"));
     assert!(contents.contains("declare function trash(reason?: string): AicsTrashAction;"));
     assert!(contents.contains("declare function untrash(reason?: string): AicsUntrashAction;"));
     Ok(())
@@ -786,6 +787,56 @@ fn rules_progress_reports_processing_count() -> Result<()> {
             .filter(|event| matches!(event, RulesProgress::ProcessingProgress { .. }))
             .count(),
         2
+    );
+    Ok(())
+}
+
+#[test]
+fn non_empty_nothing_decision_is_available_to_interactive_preview_only() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let rules = write_rules(
+        &temp,
+        r#"
+        rule("explain no-op", ({ session }) => {
+          return session.agent === "claude"
+            ? nothing("session has more than 3 user turns")
+            : nothing();
+        });
+        "#,
+    )?;
+    let session_roots = SessionRoots {
+        claude_projects: roots.claude_projects,
+        codex_sessions: roots.codex_sessions,
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
+        trash: None,
+    };
+
+    let report = run_rules_with_progress(
+        &session_roots,
+        &RulesOptions {
+            rules_path: rules,
+            cache_path: None,
+            mode: RulesMode::Preview,
+            selection: RuleSelection::All,
+            json: true,
+            scope: Scope::Global,
+            filters: SearchFilters::default(),
+            supersession: BTreeMap::new(),
+        },
+        |_| {},
+    )?;
+
+    assert!(report.proposals.is_empty());
+    assert_eq!(report.preview_matches.len(), 1);
+    let matched = &report.preview_matches[0];
+    assert!(matched.proposals.is_empty());
+    assert_eq!(matched.decisions.len(), 1);
+    assert_eq!(matched.decisions[0].rule, "explain no-op");
+    assert_eq!(matched.decisions[0].action, "nothing");
+    assert_eq!(
+        matched.decisions[0].text,
+        "session has more than 3 user turns"
     );
     Ok(())
 }

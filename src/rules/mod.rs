@@ -63,8 +63,11 @@ globalThis.rule = function(name, configOrCallback, callback) {
   __aicsRules.push({ name, config, callback });
 };
 
-globalThis.nothing = function() {
-  return { action: "nothing" };
+globalThis.nothing = function(reason) {
+  return {
+    action: "nothing",
+    reason: reason == null ? null : String(reason),
+  };
 };
 
 globalThis.trash = function(reason) {
@@ -135,13 +138,18 @@ globalThis.__aicsRunRules = function(contextJson, applyAtStartupOnly) {
       const raw = entry.callback(context);
       const actions = Array.isArray(raw) ? raw : [raw];
       for (const action of actions) {
-        if (action == null || action.action === "nothing") {
+        if (action == null) {
+          continue;
+        }
+        const actionName = String(action.action);
+        const reason = action.reason == null ? null : String(action.reason);
+        if (actionName === "nothing" && (reason == null || reason.trim() === "")) {
           continue;
         }
         outcomes.push({
           rule: entry.name,
-          action: String(action.action),
-          reason: action.reason == null ? null : String(action.reason),
+          action: actionName,
+          reason,
         });
       }
     } catch (error) {
@@ -198,8 +206,16 @@ pub struct RulesReport {
 
 #[derive(Debug, Clone)]
 pub struct RulePreviewMatch {
-    pub proposal: RuleProposal,
+    pub proposals: Vec<RuleProposal>,
+    pub decisions: Vec<RuleDecision>,
     pub hit: SearchHit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleDecision {
+    pub rule: String,
+    pub action: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -454,7 +470,7 @@ where
     report.proposals = report
         .preview_matches
         .iter()
-        .map(|matched| matched.proposal.clone())
+        .flat_map(|matched| matched.proposals.iter().cloned())
         .collect();
 
     if matches!(options.mode, RulesMode::Apply) {
@@ -702,6 +718,10 @@ fn collect_outcomes(
     file: &SessionFile,
     outcomes: &[RawRuleOutcome],
 ) {
+    let mut proposals = Vec::new();
+    let mut decisions = Vec::new();
+    let mut seen_actions = BTreeSet::new();
+
     for outcome in outcomes {
         if let Some(error) = outcome.error.as_ref() {
             report.errors.push(RuleEvaluationError {
@@ -723,10 +743,10 @@ fn collect_outcomes(
                         reason: outcome.reason.clone(),
                     },
                 };
-                report.preview_matches.push(RulePreviewMatch {
-                    proposal,
-                    hit: rule_search_hit(session.clone()),
-                });
+                if seen_actions.insert(proposal.action.label()) {
+                    proposals.push(proposal);
+                }
+                collect_rule_decision(&mut decisions, outcome, "trash");
             }
             Some("untrash") => {
                 let proposal = RuleProposal {
@@ -738,11 +758,12 @@ fn collect_outcomes(
                         reason: outcome.reason.clone(),
                     },
                 };
-                report.preview_matches.push(RulePreviewMatch {
-                    proposal,
-                    hit: rule_search_hit(session.clone()),
-                });
+                if seen_actions.insert(proposal.action.label()) {
+                    proposals.push(proposal);
+                }
+                collect_rule_decision(&mut decisions, outcome, "untrash");
             }
+            Some("nothing") => collect_rule_decision(&mut decisions, outcome, "nothing"),
             Some(action) => report.errors.push(RuleEvaluationError {
                 rule: Some(outcome.rule.clone()),
                 path: file.path.clone(),
@@ -751,6 +772,34 @@ fn collect_outcomes(
             None => {}
         }
     }
+
+    if !proposals.is_empty() || !decisions.is_empty() {
+        report.preview_matches.push(RulePreviewMatch {
+            proposals,
+            decisions,
+            hit: rule_search_hit(session.clone()),
+        });
+    }
+}
+
+fn collect_rule_decision(
+    decisions: &mut Vec<RuleDecision>,
+    outcome: &RawRuleOutcome,
+    action: &str,
+) {
+    let Some(text) = outcome
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    decisions.push(RuleDecision {
+        rule: outcome.rule.clone(),
+        action: action.to_owned(),
+        text: text.to_owned(),
+    });
 }
 
 fn stored_rule_session(
@@ -814,10 +863,7 @@ fn dedupe_preview_matches(matches: Vec<RulePreviewMatch>) -> Vec<RulePreviewMatc
     let mut seen = BTreeSet::new();
     let mut deduped = Vec::new();
     for matched in matches {
-        if seen.insert((
-            matched.proposal.path.clone(),
-            matched.proposal.action.label(),
-        )) {
+        if seen.insert(matched.hit.session.file_path.clone()) {
             deduped.push(matched);
         }
     }
@@ -1576,6 +1622,38 @@ mod tests {
             session_info: None,
             lineage: Default::default(),
         }
+    }
+
+    #[test]
+    fn js_rule_preserves_non_empty_nothing_decisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = dir.path().join("rules.js");
+        std::fs::write(
+            &rules,
+            r#"
+            rule("explained no-op", () => nothing("more than 3 user turns"));
+            rule("silent no-op", () => nothing());
+            rule("blank no-op", () => nothing("  "));
+            "#,
+        )
+        .unwrap();
+
+        let engine = JsRuleEngine::load(&rules).unwrap();
+        let outcomes = engine
+            .evaluate(
+                &input("claude", "preview"),
+                details("preview"),
+                RuleSelection::All,
+            )
+            .unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].rule, "explained no-op");
+        assert_eq!(outcomes[0].action.as_deref(), Some("nothing"));
+        assert_eq!(
+            outcomes[0].reason.as_deref(),
+            Some("more than 3 user turns")
+        );
     }
 
     #[test]

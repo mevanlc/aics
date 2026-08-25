@@ -242,6 +242,9 @@ interface AicsRuleConfig {
 interface AicsNothingAction {
   /** No-op action discriminator. */
   action: "nothing";
+
+  /** Optional informational decision shown in the interactive rules preview. */
+  reason: string | null;
 }
 
 /** Proposes moving the session into the AICS trash store. */
@@ -289,8 +292,12 @@ declare function rule(
   callback: (context: AicsRuleContext) => AicsRuleAction | AicsRuleAction[] | null | undefined,
 ): void;
 
-/** Returns an explicit no-op action. */
-declare function nothing(): AicsNothingAction;
+/**
+ * Returns an explicit no-op action.
+ *
+ * @param reason Optional informational decision shown in the interactive rules preview.
+ */
+declare function nothing(reason?: string): AicsNothingAction;
 
 /**
  * Returns an action that moves the session into the AICS trash store.

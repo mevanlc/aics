@@ -91,6 +91,7 @@ pub fn render(
                         separator
                     };
                     let snippet = app.list_snippet_line(hit, theme);
+                    let decision = app.list_rule_decision(hit);
                     let extra_line = app.list_rule_line(hit, theme);
                     let render_ctx = RenderItemContext {
                         theme,
@@ -99,7 +100,7 @@ pub fn render(
                         separator: item_separator,
                         snippet_line_count,
                     };
-                    render_item(hit, snippet, extra_line, &render_ctx)
+                    render_item(hit, snippet, decision.as_deref(), extra_line, &render_ctx)
                 })
                 .collect::<Vec<_>>()
         }
@@ -186,6 +187,7 @@ struct RenderItemContext<'a> {
 fn render_item(
     hit: &SearchHit,
     snippet: Line<'static>,
+    decision: Option<&str>,
     extra_line: Option<Line<'static>>,
     render_ctx: &RenderItemContext<'_>,
 ) -> ListItem<'static> {
@@ -214,10 +216,9 @@ fn render_item(
     let meta_width =
         UnicodeWidthStr::width(meta_prefix.as_str()) + UnicodeWidthStr::width(meta_suffix.as_str());
 
-    let title_budget = item_width.saturating_sub(meta_width.saturating_add(1));
-    let title_text = truncate_with_ellipsis(&list_title(hit), title_budget);
-    let title_width = UnicodeWidthStr::width(title_text.as_str());
-    let padding = " ".repeat(item_width.saturating_sub(meta_width + title_width).max(1));
+    let full_title = list_title(hit);
+    let (decision_text, padding_before, padding_after, title_text) =
+        layout_header_text(item_width, meta_width, decision, &full_title);
     let metadata_fg = if render_ctx.selected {
         render_ctx.theme.accent
     } else {
@@ -237,7 +238,14 @@ fn render_item(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(meta_suffix, Style::default().fg(metadata_fg)),
-        Span::raw(padding),
+        Span::raw(padding_before),
+        Span::styled(
+            decision_text,
+            Style::default()
+                .fg(render_ctx.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(padding_after),
         Span::styled(title_text, Style::default().fg(metadata_fg)),
     ])
     .patch_style(Style::default().bg(header_bg));
@@ -277,6 +285,69 @@ fn render_item(
         );
     }
     ListItem::new(lines)
+}
+
+/// Keep metadata left-justified and the project title right-justified while
+/// centering an optional rule decision in the gap between them.
+fn layout_header_text(
+    item_width: usize,
+    meta_width: usize,
+    decision: Option<&str>,
+    title: &str,
+) -> (String, String, String, String) {
+    let remaining = item_width.saturating_sub(meta_width);
+    let Some(decision) = decision.filter(|decision| !decision.is_empty()) else {
+        let title_budget = remaining.saturating_sub(1);
+        let title_text = truncate_with_ellipsis(title, title_budget);
+        let title_width = UnicodeWidthStr::width(title_text.as_str());
+        let padding = " ".repeat(remaining.saturating_sub(title_width).max(1));
+        return (String::new(), padding, String::new(), title_text);
+    };
+    if remaining < 3 {
+        let title_text = truncate_with_ellipsis(title, remaining.saturating_sub(1));
+        let title_width = UnicodeWidthStr::width(title_text.as_str());
+        let padding = " ".repeat(remaining.saturating_sub(title_width).max(1));
+        return (String::new(), padding, String::new(), title_text);
+    }
+
+    let content_budget = remaining - 2;
+    let decision_width = UnicodeWidthStr::width(decision);
+    let title_width = UnicodeWidthStr::width(title);
+    let (decision_budget, title_budget) =
+        balanced_header_budgets(decision_width, title_width, content_budget);
+    let decision_text = truncate_with_ellipsis(decision, decision_budget);
+    let title_text = truncate_with_ellipsis(title, title_budget);
+    let decision_width = UnicodeWidthStr::width(decision_text.as_str());
+    let title_width = UnicodeWidthStr::width(title_text.as_str());
+    let padding = remaining.saturating_sub(decision_width + title_width);
+    let padding_before = padding / 2;
+    let padding_after = padding - padding_before;
+
+    (
+        decision_text,
+        " ".repeat(padding_before),
+        " ".repeat(padding_after),
+        title_text,
+    )
+}
+
+fn balanced_header_budgets(
+    decision_width: usize,
+    title_width: usize,
+    available: usize,
+) -> (usize, usize) {
+    if decision_width + title_width <= available {
+        return (decision_width, title_width);
+    }
+    let decision_half = available / 2;
+    let title_half = available - decision_half;
+    if decision_width <= decision_half {
+        (decision_width, available - decision_width)
+    } else if title_width <= title_half {
+        (available - title_width, title_width)
+    } else {
+        (decision_half, title_half)
+    }
 }
 
 fn build_separator_line(separator: &str, width: usize, theme: &Theme) -> Line<'static> {
@@ -478,10 +549,11 @@ mod tests {
     use ratatui::text::Line;
     use ratatui::widgets::{List, ListState};
     use ratatui::Terminal;
+    use unicode_width::UnicodeWidthStr;
 
     use super::{
-        build_separator_line, format_line_count, render_item, slot_at_row, truncate_with_ellipsis,
-        visible_slots, wrap_line, RenderItemContext,
+        build_separator_line, format_line_count, layout_header_text, render_item, slot_at_row,
+        truncate_with_ellipsis, visible_slots, wrap_line, RenderItemContext,
     };
     use crate::index::{SearchHit, StoredSession};
     use crate::parse::{Agent, DerivationType};
@@ -502,6 +574,36 @@ mod tests {
             truncate_with_ellipsis("cozy-sleeping-quasar", 8),
             "cozy-sl…"
         );
+    }
+
+    #[test]
+    fn rule_decision_is_centered_between_left_metadata_and_right_title() {
+        let (decision, before, after, title) =
+            layout_header_text(60, 20, Some("more than 3 user turns"), "/tmp/demo");
+
+        assert_eq!(decision, "more than 3 user turns");
+        assert_eq!(title, "/tmp/demo");
+        assert!(before.len().abs_diff(after.len()) <= 1);
+        assert_eq!(
+            UnicodeWidthStr::width(decision.as_str())
+                + before.len()
+                + after.len()
+                + UnicodeWidthStr::width(title.as_str()),
+            40
+        );
+    }
+
+    #[test]
+    fn rule_decision_and_right_title_share_narrow_header_space() {
+        let (decision, _, _, title) = layout_header_text(
+            30,
+            12,
+            Some("a long informational decision"),
+            "/a/long/project/title",
+        );
+
+        assert!(decision.ends_with('…'));
+        assert!(title.ends_with('…'));
     }
 
     #[test]
@@ -662,7 +764,7 @@ mod tests {
             separator: "·",
             snippet_line_count: 0,
         };
-        let item = render_item(&hit, plain_snippet(""), None, &render_ctx);
+        let item = render_item(&hit, plain_snippet(""), None, None, &render_ctx);
         let backend = TestBackend::new(32, 2);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = ListState::default();
@@ -719,7 +821,7 @@ mod tests {
             separator: "·",
             snippet_line_count: 0,
         };
-        let item = render_item(&hit, plain_snippet(""), None, &render_ctx);
+        let item = render_item(&hit, plain_snippet(""), None, None, &render_ctx);
         let backend = TestBackend::new(32, 2);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = ListState::default();

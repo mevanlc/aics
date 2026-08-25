@@ -171,7 +171,8 @@ impl RulesPreviewState {
         let marked_paths = report
             .preview_matches
             .iter()
-            .map(|matched| matched.proposal.path.clone())
+            .flat_map(|matched| matched.proposals.iter())
+            .map(|proposal| proposal.path.clone())
             .collect();
         Self {
             matches: report.preview_matches,
@@ -194,7 +195,9 @@ impl RulesPreviewState {
 
     fn set_marked(&mut self, path: &Path, marked: bool) {
         if marked {
-            self.marked_paths.insert(path.to_path_buf());
+            if self.proposal_for_path(path).is_some() {
+                self.marked_paths.insert(path.to_path_buf());
+            }
         } else {
             self.marked_paths.remove(path);
         }
@@ -206,29 +209,33 @@ impl RulesPreviewState {
             self.marked_paths.extend(
                 self.matches
                     .iter()
-                    .map(|matched| matched.proposal.path.clone()),
+                    .flat_map(|matched| matched.proposals.iter())
+                    .map(|proposal| proposal.path.clone()),
             );
         }
     }
 
-    fn proposal_for_path(&self, path: &Path) -> Option<&RuleProposal> {
+    fn match_for_path(&self, path: &Path) -> Option<&RulePreviewMatch> {
         self.matches
             .iter()
-            .find(|matched| matched.proposal.path == path)
-            .map(|matched| &matched.proposal)
+            .find(|matched| matched.hit.session.file_path == path)
+    }
+
+    fn proposal_for_path(&self, path: &Path) -> Option<&RuleProposal> {
+        self.match_for_path(path)?.proposals.first()
     }
 
     fn marked_proposals(&self) -> Vec<RuleProposal> {
         self.matches
             .iter()
-            .filter(|matched| self.marked_paths.contains(&matched.proposal.path))
-            .map(|matched| matched.proposal.clone())
+            .filter(|matched| self.marked_paths.contains(&matched.hit.session.file_path))
+            .flat_map(|matched| matched.proposals.iter().cloned())
             .collect()
     }
 
     fn remove_paths(&mut self, paths: &HashSet<PathBuf>) {
         self.matches
-            .retain(|matched| !paths.contains(&matched.proposal.path));
+            .retain(|matched| !paths.contains(&matched.hit.session.file_path));
         self.marked_paths.retain(|path| !paths.contains(path));
     }
 }
@@ -875,38 +882,58 @@ impl App {
         usize::from(self.rules_preview.is_some())
     }
 
+    pub fn list_rule_decision(&self, hit: &SearchHit) -> Option<String> {
+        let matched = self
+            .rules_preview
+            .as_ref()?
+            .match_for_path(&hit.session.file_path)?;
+        let text = matched
+            .decisions
+            .iter()
+            .map(|decision| decision.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let cleaned = strip_terminal_escapes(&text);
+        let single_line = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!single_line.is_empty()).then_some(single_line)
+    }
+
     pub fn list_rule_line(&self, hit: &SearchHit, theme: &Theme) -> Option<Line<'static>> {
         let state = self.rules_preview.as_ref()?;
-        let proposal = state.proposal_for_path(&hit.session.file_path)?;
-        let marked = if state.is_marked(&proposal.path) {
-            "[x]"
+        let matched = state.match_for_path(&hit.session.file_path)?;
+        let proposal = matched.proposals.first();
+        let (path, rule, action) = if let Some(proposal) = proposal {
+            (
+                Some(proposal.path.as_path()),
+                proposal.rule.as_str(),
+                proposal.action.label(),
+            )
         } else {
-            "[ ]"
+            let decision = matched.decisions.first()?;
+            (None, decision.rule.as_str(), decision.action.as_str())
         };
-        let mut spans = vec![
+        let marked = if path.is_some_and(|path| state.is_marked(path)) {
+            "[x]"
+        } else if path.is_some() {
+            "[ ]"
+        } else {
+            "[-]"
+        };
+        let spans = vec![
             Span::styled(marked, Style::default().fg(theme.accent)),
             Span::styled(" rule ", Style::default().fg(theme.muted)),
             Span::styled(
-                proposal.rule.clone(),
+                rule.to_owned(),
                 Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" => ", Style::default().fg(theme.muted)),
             Span::styled(
-                proposal.action.label(),
+                action.to_owned(),
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
         ];
-        if let Some(reason) = proposal.action.reason() {
-            if !reason.trim().is_empty() {
-                spans.push(Span::styled(" · ", Style::default().fg(theme.muted)));
-                spans.push(Span::styled(
-                    reason.trim().to_owned(),
-                    Style::default().fg(theme.muted),
-                ));
-            }
-        }
         Some(Line::from(spans))
     }
 
@@ -3594,8 +3621,7 @@ fn preview_paths_equal(a: &str, b: &str) -> bool {
 
 fn rules_preview_search_text(matched: &RulePreviewMatch) -> String {
     let session = &matched.hit.session;
-    let proposal = &matched.proposal;
-    [
+    let mut parts = vec![
         session.session_id.as_str(),
         session.project.as_str(),
         session.cwd.as_deref().unwrap_or_default(),
@@ -3605,11 +3631,18 @@ fn rules_preview_search_text(matched: &RulePreviewMatch) -> String {
         session.first_msg_content.as_str(),
         session.last_msg_content.as_str(),
         matched.hit.snippet_html.as_str(),
-        proposal.rule.as_str(),
-        proposal.action.label(),
-        proposal.action.reason().unwrap_or_default(),
-    ]
-    .join("\n")
+    ];
+    for proposal in &matched.proposals {
+        parts.push(proposal.rule.as_str());
+        parts.push(proposal.action.label());
+        parts.push(proposal.action.reason().unwrap_or_default());
+    }
+    for decision in &matched.decisions {
+        parts.push(decision.rule.as_str());
+        parts.push(decision.action.as_str());
+        parts.push(decision.text.as_str());
+    }
+    parts.join("\n")
 }
 
 fn sort_rules_preview_results(results: &mut [SearchHit], sort: SortMode) {
@@ -5304,6 +5337,41 @@ mod tests {
     }
 
     #[test]
+    fn informational_rule_decision_is_titled_but_cannot_be_marked() {
+        let mut app = test_app();
+        let path = PathBuf::from("/tmp/demo/rule-decision.jsonl");
+        let matched = sample_rule_decision(path.clone());
+        app.results = vec![matched.hit.clone()];
+        app.rules_preview = Some(RulesPreviewState::from_report(crate::rules::RulesReport {
+            preview_matches: vec![matched],
+            ..crate::rules::RulesReport::default()
+        }));
+
+        assert_eq!(
+            app.list_rule_decision(&app.results[0]).as_deref(),
+            Some("session has more than 3 user turns")
+        );
+        let rule_line = app
+            .list_rule_line(&app.results[0], &crate::tui::theme::Theme::default())
+            .unwrap();
+        let rendered = rule_line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(rendered, "[-] rule commit helper => nothing");
+
+        app.rules_preview.as_mut().unwrap().set_marked(&path, true);
+        assert_eq!(app.rules_preview.as_ref().unwrap().marked_count(), 0);
+        assert!(app
+            .rules_preview
+            .as_ref()
+            .unwrap()
+            .marked_proposals()
+            .is_empty());
+    }
+
+    #[test]
     fn rules_process_summary_counts_hidden_and_offscreen_marked_sessions() {
         let mut app = test_app();
         let matches = vec![
@@ -5313,7 +5381,8 @@ mod tests {
         ];
         let marked_paths = matches
             .iter()
-            .map(|matched| matched.proposal.path.clone())
+            .flat_map(|matched| matched.proposals.iter())
+            .map(|proposal| proposal.path.clone())
             .collect();
         app.rules_preview = Some(RulesPreviewState {
             marked_paths,
@@ -6129,7 +6198,7 @@ mod tests {
             .unwrap_or("rule-session")
             .to_owned();
         RulePreviewMatch {
-            proposal: RuleProposal {
+            proposals: vec![RuleProposal {
                 rule: "trash demo".to_owned(),
                 session_id: hit.session.session_id.clone(),
                 path: file_path,
@@ -6137,7 +6206,25 @@ mod tests {
                 action: RuleAction::Trash {
                     reason: Some("matched fixture".to_owned()),
                 },
-            },
+            }],
+            decisions: vec![crate::rules::RuleDecision {
+                rule: "trash demo".to_owned(),
+                action: "trash".to_owned(),
+                text: "matched fixture".to_owned(),
+            }],
+            hit,
+        }
+    }
+
+    fn sample_rule_decision(file_path: PathBuf) -> RulePreviewMatch {
+        let hit = sample_hit_with_path(Agent::Claude, file_path);
+        RulePreviewMatch {
+            proposals: Vec::new(),
+            decisions: vec![crate::rules::RuleDecision {
+                rule: "commit helper".to_owned(),
+                action: "nothing".to_owned(),
+                text: "session has more than 3 user turns".to_owned(),
+            }],
             hit,
         }
     }

@@ -35,8 +35,12 @@ rule("trash short commit helper sessions", ({ turns }) => {
 });
 ```
 
-A rule can return `nothing()`, `trash(reason)`, or `untrash(reason)`. To evaluate
-trashed sessions for `untrash`, use `--trashed yes` or `--trashed both`.
+A rule can return `nothing(reason)`, `trash(reason)`, or `untrash(reason)`. A
+non-empty reason passed to `nothing` is an informational decision: it appears in
+the center of that session card's title in the interactive rules preview, but it
+does not create a markable or JSON action proposal. Plain `nothing()` remains
+invisible. Non-empty `trash` and `untrash` reasons use the same title position.
+To evaluate trashed sessions for `untrash`, use `--trashed yes` or `--trashed both`.
 Applying `untrash` to a normal session is skipped as already untrashed.
 For Antigravity, `trash` moves the complete conversation artifact directory and
 its local SQLite database companions; `untrash` restores the same bundle.
