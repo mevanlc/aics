@@ -7,6 +7,13 @@ use tantivy::tokenizer::{LowerCaser, RawTokenizer, TextAnalyzer};
 use tantivy::Index;
 
 const CONTENT_FIELD: &str = "content";
+const USER_FIELD: &str = "user";
+const AGENT_FIELD: &str = "agent";
+const TOOL_CALL_FIELD: &str = "toolcall";
+const TOOL_RESULT_FIELD: &str = "toolresult";
+const DIRS_FIELD: &str = "dirs";
+const FILES_FIELD: &str = "files";
+const PATHS_FIELD: &str = "paths";
 const WORKING_DIR_FIELD: &str = "working_dir";
 const WORKING_DIR_TOKENIZER: &str = "working_dir";
 const FILE_PATH_FIELD: &str = "file_path";
@@ -17,6 +24,13 @@ const SESSION_JSON_FIELD: &str = "session_json";
 pub struct IndexSchema {
     pub schema: Schema,
     pub content: Field,
+    pub user: Field,
+    pub agent: Field,
+    pub tool_call: Field,
+    pub tool_result: Field,
+    pub dirs: Field,
+    pub files: Field,
+    pub paths: Field,
     pub working_dir: Field,
     pub file_path: Field,
     pub modified_ts: Field,
@@ -42,13 +56,21 @@ impl IndexSchema {
                 .set_tokenizer(WORKING_DIR_TOKENIZER)
                 .set_index_option(IndexRecordOption::Basic),
         );
+        let path_options = working_dir_options.clone().set_stored();
         let stored_text = TextOptions::default().set_stored();
         let numeric_options = NumericOptions::default()
             .set_fast()
             .set_stored()
             .set_indexed();
 
-        let content = builder.add_text_field(CONTENT_FIELD, content_options);
+        let content = builder.add_text_field(CONTENT_FIELD, content_options.clone());
+        let user = builder.add_text_field(USER_FIELD, content_options.clone());
+        let agent = builder.add_text_field(AGENT_FIELD, content_options.clone());
+        let tool_call = builder.add_text_field(TOOL_CALL_FIELD, content_options.clone());
+        let tool_result = builder.add_text_field(TOOL_RESULT_FIELD, content_options);
+        let dirs = builder.add_text_field(DIRS_FIELD, path_options.clone());
+        let files = builder.add_text_field(FILES_FIELD, path_options.clone());
+        let paths = builder.add_text_field(PATHS_FIELD, path_options);
         let working_dir = builder.add_text_field(WORKING_DIR_FIELD, working_dir_options);
         let file_path = builder.add_text_field(FILE_PATH_FIELD, STRING | STORED);
         let modified_ts = builder.add_u64_field(MODIFIED_TS_FIELD, numeric_options);
@@ -57,6 +79,13 @@ impl IndexSchema {
         Self {
             schema: builder.build(),
             content,
+            user,
+            agent,
+            tool_call,
+            tool_result,
+            dirs,
+            files,
+            paths,
             working_dir,
             file_path,
             modified_ts,
@@ -78,6 +107,23 @@ impl IndexSchema {
             content: schema
                 .get_field(CONTENT_FIELD)
                 .context("missing content field")?,
+            user: schema.get_field(USER_FIELD).context("missing user field")?,
+            agent: schema
+                .get_field(AGENT_FIELD)
+                .context("missing agent field")?,
+            tool_call: schema
+                .get_field(TOOL_CALL_FIELD)
+                .context("missing toolcall field")?,
+            tool_result: schema
+                .get_field(TOOL_RESULT_FIELD)
+                .context("missing toolresult field")?,
+            dirs: schema.get_field(DIRS_FIELD).context("missing dirs field")?,
+            files: schema
+                .get_field(FILES_FIELD)
+                .context("missing files field")?,
+            paths: schema
+                .get_field(PATHS_FIELD)
+                .context("missing paths field")?,
             working_dir: schema
                 .get_field(WORKING_DIR_FIELD)
                 .context("missing working_dir field")?,

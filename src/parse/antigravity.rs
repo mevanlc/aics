@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use log::warn;
 use serde_json::Value;
 
+use super::search_fields::{authored_user_text, SessionSearchFields};
 use super::session::{
     first_message_fields, first_user_message, last_message_fields, metadata_created,
     metadata_modified, modified_ts, parse_timestamp_str, DerivationType, ExecStatus, MessageRole,
@@ -37,6 +38,7 @@ struct SessionBuilder {
     cells: Vec<SessionCell>,
     searchable: Vec<String>,
     pending: Vec<PendingCall>,
+    search_fields: SessionSearchFields,
 }
 
 impl SessionBuilder {
@@ -64,6 +66,17 @@ impl SessionBuilder {
             content: content.clone(),
             timestamp,
         });
+        match role {
+            MessageRole::User => {
+                if let Some(text) = authored_user_text(&content) {
+                    self.search_fields.push_user(text);
+                }
+            }
+            MessageRole::Assistant | MessageRole::Summary => {
+                self.search_fields.push_agent(content.clone());
+            }
+            MessageRole::System | MessageRole::ToolCall | MessageRole::ToolResult => {}
+        }
         if searchable {
             self.searchable.push(content);
         }
@@ -79,10 +92,13 @@ impl SessionBuilder {
             body: content.to_owned(),
             timestamp,
         });
+        self.search_fields.push_agent(content);
         self.searchable.push(content.to_owned());
     }
 
     fn push_call(&mut self, call: ParsedToolCall, timestamp: Option<DateTime<Utc>>) {
+        self.search_fields.push_tool_call_text(&call.name);
+        self.search_fields.push_tool_call(&call.input);
         let raw_name = call.name;
         let normalized_name = normalize_tool_name(&raw_name);
         let summary = tool_summary(&raw_name, &call.input);
@@ -150,6 +166,8 @@ impl SessionBuilder {
         let pending_index = pending_index.unwrap_or(self.pending.len().saturating_sub(1));
         let pending = self.pending.remove(pending_index);
         let output = display_value(record.get("content").unwrap_or(&Value::Null));
+        self.search_fields
+            .push_tool_result(record.get("content").unwrap_or(&Value::Null));
         let exit_code = record
             .get("exit_code")
             .and_then(Value::as_i64)
@@ -256,6 +274,9 @@ pub fn parse_antigravity_session(file: &SessionFile) -> Result<Option<Session>> 
 
     for record in &records {
         let value = &record.value;
+        builder
+            .search_fields
+            .capture_paths(super::Agent::Antigravity, value);
         let timestamp = string_field(value, "created_at").and_then(parse_timestamp_str);
         if let Some(timestamp) = timestamp {
             created =
@@ -307,6 +328,12 @@ pub fn parse_antigravity_session(file: &SessionFile) -> Result<Option<Session>> 
     let session_id = antigravity_session_id(&file.path);
     let metadata = file.antigravity_metadata.clone().unwrap_or_default();
     let cwd = metadata.cwd;
+    if let Some(cwd) = cwd.as_deref() {
+        builder.search_fields.add_dir(cwd);
+    }
+    for path in &metadata.workspace_dirs {
+        builder.search_fields.add_dir(path);
+    }
     let project = cwd.clone().unwrap_or_else(|| session_id.clone());
     let created = created.or_else(|| metadata_created(&file.path));
     let modified = modified
@@ -358,6 +385,7 @@ pub fn parse_antigravity_session(file: &SessionFile) -> Result<Option<Session>> 
         custom_title: metadata.custom_title,
         messages: builder.messages,
         content: builder.searchable.join("\n"),
+        search_fields: builder.search_fields,
         cells: builder.cells,
         session_info: Some(session_info),
         lineage: SessionLineage::default(),

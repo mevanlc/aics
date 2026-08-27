@@ -153,6 +153,44 @@ fn parses_claude_rich_content_blocks() -> Result<()> {
         .contains("cargo test --lib auth 2>&1 | head -20"));
     assert!(session.content.contains("test_token_refresh"));
     assert_eq!(session.custom_title.as_deref(), Some("test-rich-content"));
+    assert!(session
+        .search_fields
+        .user
+        .iter()
+        .any(|text| text.contains("Refactor the authentication module to support token rotation")));
+    assert!(!session
+        .search_fields
+        .user
+        .iter()
+        .any(|text| text.contains("command-name")));
+    assert!(session
+        .search_fields
+        .agent
+        .iter()
+        .any(|text| text.contains("Let me analyze the authentication module")));
+    assert!(session
+        .search_fields
+        .tool_call
+        .iter()
+        .any(|text| text == "Read"));
+    assert!(session
+        .search_fields
+        .tool_call
+        .iter()
+        .any(|text| text.contains("cargo test --lib auth")));
+    assert!(session
+        .search_fields
+        .tool_result
+        .iter()
+        .any(|text| text.contains("test_token_refresh")));
+    assert!(session
+        .search_fields
+        .dirs
+        .contains("/Users/testuser/projects/webapp"));
+    assert!(session
+        .search_fields
+        .files
+        .contains("/Users/testuser/projects/webapp/src/auth.rs"));
     Ok(())
 }
 

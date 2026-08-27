@@ -1659,6 +1659,7 @@ mod tests {
                 },
             ],
             content: "alpha beta gamma delta alpha\nomega alpha".to_owned(),
+            search_fields: Default::default(),
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),
@@ -1689,6 +1690,7 @@ mod tests {
             custom_title: Some("demo docs".to_owned()),
             messages: Vec::new(),
             content: format!("{docs}\n{request}"),
+            search_fields: Default::default(),
             cells: vec![
                 SessionCell::Message {
                     role: MessageRole::User,
@@ -1733,6 +1735,7 @@ mod tests {
                 tool_name: None,
             }],
             content: "```rust\nfn alpha() {}\n```".to_owned(),
+            search_fields: Default::default(),
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),
@@ -1812,6 +1815,7 @@ mod tests {
             content:
                 "first user\nfirst assistant\nrun tool\ntool output\nsecond user\nsecond assistant"
                     .to_owned(),
+            search_fields: Default::default(),
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),
@@ -1853,6 +1857,7 @@ mod tests {
                 },
             ],
             content: "This line wraps hard in the preview and viewer.\nShort reply".to_owned(),
+            search_fields: Default::default(),
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),

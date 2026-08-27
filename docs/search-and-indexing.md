@@ -100,6 +100,30 @@ An empty query shows recent sessions. A non-empty query searches an indexed
 content field containing the custom thread title, first user or resume-preview
 text, and the full parsed transcript.
 
+Field prefixes narrow a query to semantic parts of the source session:
+
+- `user:TEXT` searches user-authored prompt text. Source-generated context and
+  meta messages are excluded.
+- `agent:TEXT` searches assistant prose, plaintext reasoning, and native
+  in-session summaries or checkpoints. It excludes system/developer context,
+  tool/MCP/skill traffic, and AICS-generated summary sidecars.
+- `toolcall:TEXT` searches readable tool names, inputs, and actions.
+- `toolresult:TEXT` searches readable tool output. Opaque call IDs, signatures,
+  binary/media payloads, and internal metadata are excluded.
+- `dirs:PATH` searches JSON properties known to hold directory paths, including
+  working directories, workspace roots, and writable roots.
+- `files:PATH` searches properties known to hold file paths, including tool file
+  arguments and path-keyed change or backup maps.
+- `paths:PATH` searches the union of `dirs:` and `files:` plus properties whose
+  values can be either files or directories, such as `SearchPath`,
+  `AbsolutePath`, generic sandbox paths, and similar ambiguous path properties.
+
+The three path fields use the same case-insensitive, path-component-prefix
+matching as `wd:`. They come from a semantic property allowlist; AICS does not
+guess from slashes in arbitrary text or whether a path currently exists. Bare
+queries retain the existing `content` behavior and therefore can still match
+tool text as part of the full parsed transcript.
+
 Queries use Tantivy's lenient query parser:
 
 - Bare words are token searches and multiple bare words are ANDed by default.
@@ -109,6 +133,8 @@ Queries use Tantivy's lenient query parser:
 - Use `working_dir:PATH` or its `wd:PATH` alias to match a case-insensitive
   working-directory prefix beginning at any path-component boundary. For example,
   `wd:my/ja` matches `/Users/me/p/my/javafx-ax` and `/Users/me/p/my/jave7`.
+- The same component-prefix behavior applies to `dirs:PATH`, `files:PATH`, and
+  `paths:PATH`.
 - Wrap a Tantivy term regex in `<` and `>`, optionally after a field name. Slashes
   are ordinary regex characters and need no query-language escaping, as in
   `wd:<.*codex/.*8ba3f7e.*>`. Regexes match whole indexed terms, so use `.*` for

@@ -1618,6 +1618,7 @@ mod tests {
             custom_title: None,
             messages: Vec::new(),
             content: String::new(),
+            search_fields: Default::default(),
             cells,
             session_info: None,
             lineage: Default::default(),

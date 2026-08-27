@@ -6,6 +6,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::search_fields::SessionSearchFields;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
@@ -376,6 +378,10 @@ pub struct Session {
     pub custom_title: Option<String>,
     pub messages: Vec<SessionMessage>,
     pub content: String,
+    /// Parser-produced content for field-scoped search. This is index-only and
+    /// intentionally absent from serialized session/export data.
+    #[serde(skip)]
+    pub search_fields: SessionSearchFields,
     /// Typed transcript cells. Populated by parsers (Phase 0+); renderers
     /// dispatch on these and fall back to `messages` when empty.
     #[serde(default)]

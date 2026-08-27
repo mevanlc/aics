@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use log::warn;
 use serde_json::Value;
 
+use super::search_fields::{authored_user_text, SessionSearchFields};
 use super::session::{
     cells_from_messages, earliest_timestamp, fallback_session_id, first_message_fields,
     first_user_message, infer_derivation_type, last_message_fields, latest_timestamp,
@@ -44,6 +45,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
     let mut reasoning_effort = None::<String>;
     let mut messages = Vec::new();
     let mut content_chunks = Vec::new();
+    let mut search_fields = SessionSearchFields::default();
     let mut summary_chunks = Vec::new();
     let mut exit_command_uuids = HashSet::new();
     let mut forked_from_session_id = None::<String>;
@@ -78,6 +80,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
                 continue;
             }
         };
+        search_fields.capture_paths(Agent::Claude, &value);
 
         let Some(entry_type) = value.get("type").and_then(Value::as_str) else {
             continue;
@@ -133,6 +136,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             "system" if is_away_summary(&value) => {
                 if let Some(summary) = extract_claude_summary_text(&value) {
                     contributed = true;
+                    search_fields.push_agent(summary.clone());
                     push_unique_chunk(&mut summary_chunks, summary.clone());
                     push_unique_chunk(&mut content_chunks, summary);
                 }
@@ -161,6 +165,14 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 let tool_use_result = value.get("toolUseResult");
+
+                capture_message_search_fields(
+                    &mut search_fields,
+                    role,
+                    message.get("content"),
+                    tool_use_result,
+                    is_meta,
+                );
 
                 let blocks =
                     extract_message_blocks(message.get("content"), tool_use_result, is_meta);
@@ -200,6 +212,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             "summary" => {
                 if let Some(summary) = extract_claude_summary_text(&value) {
                     contributed = true;
+                    search_fields.push_agent(summary.clone());
                     push_unique_chunk(&mut summary_chunks, summary.clone());
                     push_unique_chunk(&mut content_chunks, summary);
                 }
@@ -283,6 +296,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
         is_sidechain,
         custom_title,
         content: content_chunks.join("\n\n"),
+        search_fields,
         messages,
         cells,
         session_info,
@@ -294,6 +308,81 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             ..SessionLineage::default()
         },
     }))
+}
+
+fn capture_message_search_fields(
+    search_fields: &mut SessionSearchFields,
+    role: MessageRole,
+    content: Option<&Value>,
+    tool_use_result: Option<&Value>,
+    is_meta: bool,
+) {
+    let mut saw_tool_result = false;
+    match content {
+        Some(Value::String(text)) => capture_role_text(search_fields, role, text, is_meta),
+        Some(Value::Array(items)) => {
+            for item in items {
+                match item.get("type").and_then(Value::as_str) {
+                    Some("text") => {
+                        if let Some(text) = item.get("text").and_then(Value::as_str) {
+                            capture_role_text(search_fields, role, text, is_meta);
+                        }
+                    }
+                    Some("thinking") => {
+                        if let Some(text) = item.get("thinking").and_then(Value::as_str) {
+                            search_fields.push_agent(text);
+                        }
+                    }
+                    Some("tool_use") => {
+                        if let Some(name) = item.get("name").and_then(Value::as_str) {
+                            search_fields.push_tool_call_text(name);
+                        }
+                        search_fields.push_tool_call(item.get("input").unwrap_or(&Value::Null));
+                    }
+                    Some("tool_result") => {
+                        saw_tool_result = true;
+                        search_fields.push_tool_result(item.get("content").unwrap_or(&Value::Null));
+                        if let Some(result) = tool_use_result {
+                            search_fields.push_tool_result(result);
+                        }
+                    }
+                    _ => {
+                        if let Some(text) = item.get("text").and_then(Value::as_str) {
+                            capture_role_text(search_fields, role, text, is_meta);
+                        }
+                    }
+                }
+            }
+        }
+        Some(other) => capture_role_text(search_fields, role, &stringify_json(other), is_meta),
+        None => {}
+    }
+    if !saw_tool_result {
+        if let Some(result) = tool_use_result {
+            search_fields.push_tool_result(result);
+        }
+    }
+}
+
+fn capture_role_text(
+    search_fields: &mut SessionSearchFields,
+    role: MessageRole,
+    text: &str,
+    is_meta: bool,
+) {
+    match role {
+        MessageRole::User if !is_meta => {
+            if let Some(text) = authored_user_text(text) {
+                search_fields.push_user(text);
+            }
+        }
+        MessageRole::Assistant => search_fields.push_agent(normalize_claude_text(text)),
+        MessageRole::System
+        | MessageRole::Summary
+        | MessageRole::ToolCall
+        | MessageRole::ToolResult
+        | MessageRole::User => {}
+    }
 }
 
 pub fn read_claude_autosummaries(path: impl AsRef<Path>) -> Result<Vec<ClaudeAutosummary>> {

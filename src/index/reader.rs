@@ -264,10 +264,12 @@ impl SearchEngine {
         }
 
         let query_parser = self.default_query_parser();
-        let (base_query, has_non_bare_syntax) = parse_query_with_aliases(&query_parser, query_text);
+        let (base_query, has_non_bare_syntax, snippet_fields) =
+            parse_query_with_aliases(&query_parser, query_text);
         let final_query =
             build_phrase_boosted_query(&query_parser, query_text, base_query, has_non_bare_syntax);
-        let snippet_generator = self.make_snippet_generator(&searcher, &*final_query);
+        let snippet_generators =
+            self.make_snippet_generators(&searcher, &*final_query, &snippet_fields);
 
         let mut candidates = Vec::new();
         let mut offset = 0usize;
@@ -291,7 +293,7 @@ impl SearchEngine {
                 &searcher,
                 docs,
                 request,
-                snippet_generator.as_ref(),
+                &snippet_generators,
                 &live_ids,
                 &mut session_cache,
                 &mut candidates,
@@ -376,10 +378,12 @@ impl SearchEngine {
         session_cache: &mut HashMap<DocAddress, StoredSession>,
     ) -> Result<Vec<SearchHit>> {
         let query_parser = self.default_query_parser();
-        let (base_query, has_non_bare_syntax) = parse_query_with_aliases(&query_parser, query_text);
+        let (base_query, has_non_bare_syntax, snippet_fields) =
+            parse_query_with_aliases(&query_parser, query_text);
         let final_query =
             build_phrase_boosted_query(&query_parser, query_text, base_query, has_non_bare_syntax);
-        let snippet_generator = self.make_snippet_generator(searcher, &*final_query);
+        let snippet_generators =
+            self.make_snippet_generators(searcher, &*final_query, &snippet_fields);
         let modified_ts_field = self.fields.schema.get_field_name(self.fields.modified_ts);
         let candidate_limit = candidate_limit(request, false);
 
@@ -408,7 +412,7 @@ impl SearchEngine {
                 }
 
                 let snippet_html =
-                    build_snippet_html(snippet_generator.as_ref(), &document, &session, query_text);
+                    build_snippet_html(&snippet_generators, &document, &session, query_text);
                 hits.push(SearchHit {
                     snippet_html,
                     score: session.modified_ts as f32,
@@ -432,6 +436,9 @@ impl SearchEngine {
         let mut query_parser = QueryParser::for_index(&self.index, vec![self.fields.content]);
         query_parser.set_conjunction_by_default();
         query_parser.set_field_fuzzy(self.fields.working_dir, true, 0, false);
+        for field in [self.fields.dirs, self.fields.files, self.fields.paths] {
+            query_parser.set_field_fuzzy(field, true, 0, false);
+        }
         query_parser.allow_regexes();
         query_parser
     }
@@ -442,7 +449,7 @@ impl SearchEngine {
         searcher: &tantivy::Searcher,
         docs: Vec<(f32, DocAddress)>,
         request: &SearchRequest,
-        snippet_generator: Option<&SnippetGenerator>,
+        snippet_generators: &[SnippetGenerator],
         live_ids: &HashSet<String>,
         session_cache: &mut HashMap<DocAddress, StoredSession>,
         hits: &mut Vec<SearchCandidate>,
@@ -455,8 +462,12 @@ impl SearchEngine {
                 continue;
             }
 
-            let snippet_html =
-                build_snippet_html(snippet_generator, &document, &session, request.query.trim());
+            let snippet_html = build_snippet_html(
+                snippet_generators,
+                &document,
+                &session,
+                request.query.trim(),
+            );
             hits.push(SearchCandidate {
                 score: score * recency_boost(session.modified_ts),
                 session,
@@ -510,20 +521,41 @@ impl SearchEngine {
         Ok(session)
     }
 
-    fn make_snippet_generator(
+    fn make_snippet_generators(
         &self,
         searcher: &tantivy::Searcher,
         query: &dyn Query,
-    ) -> Option<SnippetGenerator> {
-        match SnippetGenerator::create(searcher, query, self.fields.content) {
-            Ok(mut generator) => {
-                generator.set_max_num_chars(SNIPPET_MAX_CHARS);
-                Some(generator)
+        field_names: &[String],
+    ) -> Vec<SnippetGenerator> {
+        let mut generators = Vec::new();
+        for field_name in field_names {
+            let Some(field) = self.snippet_field(field_name) else {
+                continue;
+            };
+            match SnippetGenerator::create(searcher, query, field) {
+                Ok(mut generator) => {
+                    generator.set_max_num_chars(SNIPPET_MAX_CHARS);
+                    generators.push(generator);
+                }
+                Err(error) => {
+                    warn!("failed to build snippet generator for field {field_name}: {error:#}")
+                }
             }
-            Err(error) => {
-                warn!("failed to build snippet generator: {error:#}");
-                None
-            }
+        }
+        generators
+    }
+
+    fn snippet_field(&self, name: &str) -> Option<tantivy::schema::Field> {
+        match name {
+            "content" => Some(self.fields.content),
+            "user" => Some(self.fields.user),
+            "agent" => Some(self.fields.agent),
+            "toolcall" => Some(self.fields.tool_call),
+            "toolresult" => Some(self.fields.tool_result),
+            "dirs" => Some(self.fields.dirs),
+            "files" => Some(self.fields.files),
+            "paths" => Some(self.fields.paths),
+            _ => None,
         }
     }
 }
@@ -573,30 +605,36 @@ fn build_phrase_boosted_query(
 fn parse_query_with_aliases(
     query_parser: &QueryParser,
     query_text: &str,
-) -> (Box<dyn Query>, bool) {
+) -> (Box<dyn Query>, bool, Vec<String>) {
     let translated = translate_angle_regexes(query_text).unwrap_or_else(|_| query_text.to_owned());
     let (mut ast, _) = tantivy::query_grammar::parse_query_lenient(&translated);
-    let has_non_bare_syntax = prepare_query_ast(&mut ast);
+    let mut snippet_fields = Vec::new();
+    let has_non_bare_syntax = prepare_query_ast(&mut ast, &mut snippet_fields);
     let (query, _) = query_parser.build_query_from_user_input_ast_lenient(ast);
-    (query, has_non_bare_syntax)
+    (query, has_non_bare_syntax, snippet_fields)
 }
 
-fn prepare_query_ast(ast: &mut UserInputAst) -> bool {
+fn prepare_query_ast(ast: &mut UserInputAst, snippet_fields: &mut Vec<String>) -> bool {
     match ast {
         UserInputAst::Clause(clauses) => {
             let mut has_non_bare_syntax = false;
             for (_, child) in clauses {
-                if prepare_query_ast(child) {
+                if prepare_query_ast(child, snippet_fields) {
                     has_non_bare_syntax = true;
                 }
             }
             has_non_bare_syntax
         }
-        UserInputAst::Boost(child, _) => prepare_query_ast(child),
+        UserInputAst::Boost(child, _) => prepare_query_ast(child, snippet_fields),
         UserInputAst::Leaf(leaf) => match leaf.as_mut() {
-            UserInputLeaf::Literal(literal) => rewrite_optional_field(&mut literal.field_name),
+            UserInputLeaf::Literal(literal) => {
+                let explicit = rewrite_optional_field(&mut literal.field_name);
+                record_snippet_field(snippet_fields, literal.field_name.as_deref());
+                explicit
+            }
             UserInputLeaf::Range { field, .. } | UserInputLeaf::Set { field, .. } => {
                 rewrite_optional_field(field);
+                record_snippet_field(snippet_fields, field.as_deref());
                 true
             }
             UserInputLeaf::Regex { field, .. } => {
@@ -605,14 +643,23 @@ fn prepare_query_ast(ast: &mut UserInputAst) -> bool {
                 } else {
                     rewrite_optional_field(field);
                 }
+                record_snippet_field(snippet_fields, field.as_deref());
                 true
             }
             UserInputLeaf::Exists { field } => {
                 rewrite_field(field);
+                record_snippet_field(snippet_fields, Some(field));
                 true
             }
             UserInputLeaf::All => true,
         },
+    }
+}
+
+fn record_snippet_field(fields: &mut Vec<String>, field: Option<&str>) {
+    let field = field.unwrap_or("content");
+    if !fields.iter().any(|existing| existing == field) {
+        fields.push(field.to_owned());
     }
 }
 
@@ -855,12 +902,12 @@ fn recency_boost(modified_ts: u64) -> f32 {
 }
 
 fn build_snippet_html(
-    snippet_generator: Option<&SnippetGenerator>,
+    snippet_generators: &[SnippetGenerator],
     document: &TantivyDocument,
     session: &StoredSession,
     query: &str,
 ) -> String {
-    if let Some(generator) = snippet_generator {
+    for generator in snippet_generators {
         let snippet = generator.snippet_from_doc(document);
         if !snippet.fragment().is_empty() {
             return render_snippet_html(&snippet, query);

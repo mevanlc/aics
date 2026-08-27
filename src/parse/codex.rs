@@ -12,6 +12,7 @@ use log::warn;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
+use super::search_fields::{authored_user_text, SessionSearchFields};
 use super::session::{
     earliest_timestamp, fallback_session_id, first_message_fields, infer_derivation_type,
     is_contextual_user_message_content, last_message_fields, latest_timestamp, metadata_created,
@@ -69,6 +70,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
     let mut modified = None::<DateTime<Utc>>;
     let mut messages = Vec::new();
     let mut content_chunks = Vec::new();
+    let mut search_fields = SessionSearchFields::default();
     let mut resume_preview_first_user = None::<String>;
     let mut fallback_preview_first_user = None::<String>;
     let mut session_info = SessionInfo::default();
@@ -104,6 +106,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
                 continue;
             }
         };
+        search_fields.capture_paths(Agent::Codex, &value);
 
         if value
             .get("record_type")
@@ -146,6 +149,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
                         &mut content_chunks,
                         &mut cwd,
                         &mut fallback_preview_first_user,
+                        &mut search_fields,
                     );
                     cell_builder.handle_response_item(payload, top_level_timestamp);
                 }
@@ -158,6 +162,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
                         &mut messages,
                         &mut content_chunks,
                         &mut resume_preview_first_user,
+                        &mut search_fields,
                     );
                     cell_builder.handle_event_msg(payload, top_level_timestamp);
                 }
@@ -176,6 +181,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
                     &mut content_chunks,
                     &mut cwd,
                     &mut fallback_preview_first_user,
+                    &mut search_fields,
                 );
                 cell_builder.handle_response_item(&value, top_level_timestamp);
             }
@@ -240,6 +246,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
         is_sidechain: false,
         custom_title,
         content: content_chunks.join("\n\n"),
+        search_fields,
         messages,
         cells,
         session_info,
@@ -504,6 +511,7 @@ fn handle_response_item(
     content_chunks: &mut Vec<String>,
     cwd: &mut Option<String>,
     fallback_preview_first_user: &mut Option<String>,
+    search_fields: &mut SessionSearchFields,
 ) {
     let Some(item_type) = payload.get("type").and_then(Value::as_str) else {
         return;
@@ -519,6 +527,15 @@ fn handle_response_item(
 
             if let Some(text) = text {
                 maybe_capture_response_item_preview(role, &text, fallback_preview_first_user);
+                match role {
+                    "user" => {
+                        if let Some(text) = authored_user_text(&text) {
+                            search_fields.push_user(text);
+                        }
+                    }
+                    "assistant" => search_fields.push_agent(text.clone()),
+                    _ => {}
+                }
                 if !should_skip_display_message(role, &text) {
                     if let Some(display_role) = map_display_role(role) {
                         push_unique_message(messages, display_role, text.clone(), timestamp);
@@ -536,6 +553,7 @@ fn handle_response_item(
         }
         "reasoning" => {
             if let Some(summary) = extract_reasoning_summary(payload.get("summary")) {
+                search_fields.push_agent(summary.clone());
                 push_unique_chunk(content_chunks, summary);
             }
         }
@@ -544,12 +562,13 @@ fn handle_response_item(
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or("function_call");
-            let args_value: Value = payload
+            let args_value = payload
                 .get("arguments")
-                .and_then(Value::as_str)
-                .and_then(|s| serde_json::from_str(s).ok())
+                .map(parse_embedded_json)
                 .unwrap_or(Value::Null);
             let formatted = tool_format::format_tool_call(name, &args_value);
+            search_fields.push_tool_call_text(name);
+            search_fields.push_tool_call(&args_value);
             let label = tool_format::tool_label(name).to_owned();
             push_tool_message(
                 messages,
@@ -561,9 +580,21 @@ fn handle_response_item(
             push_unique_chunk(content_chunks, formatted);
         }
         "function_call_output" => {
-            if let Some(output) = payload.get("output").and_then(Value::as_str) {
-                push_tool_message(messages, MessageRole::ToolResult, None, output, timestamp);
-                push_unique_chunk(content_chunks, output);
+            if let Some(output) = payload.get("output") {
+                let result = parse_embedded_json(output);
+                search_fields.push_tool_result(&result);
+                let output_text = output
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| stringify_json(output));
+                push_tool_message(
+                    messages,
+                    MessageRole::ToolResult,
+                    None,
+                    output_text.clone(),
+                    timestamp,
+                );
+                push_unique_chunk(content_chunks, output_text);
             }
         }
         "custom_tool_call" => {
@@ -572,6 +603,8 @@ fn handle_response_item(
                 .and_then(Value::as_str)
                 .unwrap_or("custom_tool_call");
             let input = payload.get("input").unwrap_or(&Value::Null);
+            search_fields.push_tool_call_text(name);
+            search_fields.push_tool_call(input);
             let formatted = tool_format::format_tool_call(name, input);
             let label = tool_format::tool_label(name).to_owned();
             push_tool_message(
@@ -584,9 +617,9 @@ fn handle_response_item(
             push_unique_chunk(content_chunks, formatted);
         }
         "custom_tool_call_output" => {
-            if let Some(output) = payload.get("output").and_then(Value::as_str) {
-                let result_value: Value = serde_json::from_str(output)
-                    .unwrap_or_else(|_| Value::String(output.to_owned()));
+            if let Some(output) = payload.get("output") {
+                let result_value = parse_embedded_json(output);
+                search_fields.push_tool_result(&result_value);
                 let formatted = tool_format::format_tool_result(&result_value);
                 if !formatted.is_empty() {
                     push_tool_message(
@@ -600,8 +633,21 @@ fn handle_response_item(
                 }
             }
         }
+        "web_search_call" => {
+            search_fields.push_tool_call_text("web_search");
+            if let Some(action) = payload.get("action") {
+                search_fields.push_tool_call(action);
+            }
+        }
         _ => {}
     }
+}
+
+fn parse_embedded_json(value: &Value) -> Value {
+    value
+        .as_str()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or_else(|| value.clone())
 }
 
 fn handle_event_msg(
@@ -610,6 +656,7 @@ fn handle_event_msg(
     messages: &mut Vec<super::session::SessionMessage>,
     content_chunks: &mut Vec<String>,
     resume_preview_first_user: &mut Option<String>,
+    search_fields: &mut SessionSearchFields,
 ) {
     let Some(event_type) = payload.get("type").and_then(Value::as_str) else {
         return;
@@ -622,6 +669,9 @@ fn handle_event_msg(
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             maybe_capture_event_preview(message, resume_preview_first_user);
+            if let Some(text) = authored_user_text(message) {
+                search_fields.push_user(text);
+            }
             if should_skip_display_message("user", message) {
                 return;
             }
@@ -634,12 +684,33 @@ fn handle_event_msg(
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            search_fields.push_agent(message);
             push_unique_message(messages, MessageRole::Assistant, message, timestamp);
             push_unique_chunk(content_chunks, message);
         }
         "agent_reasoning" => {
             if let Some(text) = payload.get("text").and_then(Value::as_str) {
+                search_fields.push_agent(text);
                 push_unique_chunk(content_chunks, text);
+            }
+        }
+        "exec_command_end" | "patch_apply_end" => {
+            if let Some(command) = payload.get("command") {
+                search_fields.push_tool_call(command);
+            }
+            for key in ["stdout", "stderr", "aggregated_output", "error"] {
+                if let Some(value) = payload.get(key) {
+                    search_fields.push_tool_result(value);
+                }
+            }
+        }
+        "web_search_end" => {
+            search_fields.push_tool_call_text("web_search");
+            if let Some(action) = payload.get("action") {
+                search_fields.push_tool_call(action);
+            }
+            if let Some(query) = payload.get("query") {
+                search_fields.push_tool_call(query);
             }
         }
         _ => {}

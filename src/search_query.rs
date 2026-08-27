@@ -86,9 +86,35 @@ fn push_term(terms: &mut Vec<String>, token: &mut String, quoted: bool) {
     }
 
     if !is_boolean_operator(token, quoted) {
-        terms.push(token.to_ascii_lowercase());
+        let term = strip_search_field(token);
+        if !term.is_empty() {
+            terms.push(term.to_ascii_lowercase());
+        }
     }
     token.clear();
+}
+
+fn strip_search_field(token: &str) -> &str {
+    let Some((field, value)) = token.split_once(':') else {
+        return token;
+    };
+    if matches!(
+        field,
+        "content"
+            | "working_dir"
+            | "wd"
+            | "user"
+            | "agent"
+            | "toolcall"
+            | "toolresult"
+            | "dirs"
+            | "files"
+            | "paths"
+    ) {
+        value
+    } else {
+        token
+    }
 }
 
 fn is_boolean_operator(token: &str, quoted: bool) -> bool {
@@ -141,5 +167,17 @@ mod tests {
         assert!(has_explicit_boolean_operators("(alpha OR beta)"));
         assert!(!has_explicit_boolean_operators("\"alpha OR beta\""));
         assert!(!has_explicit_boolean_operators("alpha and beta"));
+    }
+
+    #[test]
+    fn strips_search_field_prefixes_for_highlighting() {
+        assert_eq!(
+            extract_highlight_terms("toolcall:needle paths:src/main"),
+            ["needle", "src/main"]
+        );
+        assert_eq!(
+            extract_highlight_terms("toolresult:\"error text\""),
+            ["error", "text"]
+        );
     }
 }

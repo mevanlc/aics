@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aics::index::{IndexManager, IndexPaths, Scope, SearchFilters, SearchRequest, SortMode};
+use aics::index::{
+    IndexManager, IndexPaths, Scope, SearchEngine, SearchFilters, SearchHit, SearchRequest,
+    SortMode,
+};
 use aics::scan::SessionRoots;
 use anyhow::Result;
 use tempfile::TempDir;
@@ -323,6 +326,75 @@ fn working_dir_field_and_wd_alias_match_component_prefixes() -> Result<()> {
 }
 
 #[test]
+fn semantic_text_and_path_fields_are_isolated_and_searchable() -> Result<()> {
+    let temp = TempDir::new()?;
+    write_semantic_field_codex_session(&temp)?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
+        trash: None,
+    };
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+
+    for query in [
+        "user:UserFacetNeedle",
+        "agent:AgentFacetNeedle",
+        "agent:ReasoningFacetNeedle",
+        "toolcall:ToolCallFacetNeedle",
+        "toolcall:exec_command",
+        "toolresult:ToolResultFacetNeedle",
+        "dirs:fixture/extradirneedle",
+        "dirs:FIXTURE/WRITABLEDIRNEEDLE",
+        "files:src/filefacetneedle",
+        "files:src/changedfacetneedle",
+        "paths:fixture/dirneedleroot",
+        "paths:src/filefacetneedle",
+        "paths:mixed/ambiguousneedle",
+        "user:UserFacetNeedle AND agent:AgentFacetNeedle",
+    ] {
+        assert_eq!(search_hits(&engine, query)?.len(), 1, "query {query:?}");
+    }
+
+    for query in [
+        "agent:UserFacetNeedle",
+        "user:AgentFacetNeedle",
+        "agent:ToolCallFacetNeedle",
+        "toolcall:ToolResultFacetNeedle",
+        "toolresult:OpaqueMetadataNeedle",
+        "toolcall:OpaqueArgumentMetadataNeedle",
+        "dirs:mixed/ambiguousneedle",
+        "files:mixed/ambiguousneedle",
+        "paths:internal/agenttaskneedle",
+    ] {
+        assert!(search_hits(&engine, query)?.is_empty(), "query {query:?}");
+    }
+
+    let result = search_hits(&engine, "toolresult:ToolResultFacetNeedle")?
+        .pop()
+        .expect("tool result query should match");
+    assert!(result.snippet_html.contains("<b>ToolResultFacetNeedle</b>"));
+
+    let mixed_field_result =
+        search_hits(&engine, "user:NoSuchUserNeedle OR agent:AgentFacetNeedle")?
+            .pop()
+            .expect("agent side of mixed-field query should match");
+    assert!(mixed_field_result
+        .snippet_html
+        .contains("<b>AgentFacetNeedle</b>"));
+
+    assert_eq!(
+        search_hits(&engine, "ToolCallFacetNeedle")?.len(),
+        1,
+        "bare content searches retain their existing full-transcript behavior"
+    );
+    assert!(search_hits(&engine, "user:GeneratedSkillNeedle")?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn snippet_is_drawn_from_body_when_first_user_msg_does_not_match() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
@@ -463,6 +535,118 @@ fn write_codex_session(temp: &TempDir, id: &str, cwd: &str, content: &str) -> Re
         .join("\n");
     fs::write(&destination, format!("{body}\n"))?;
     Ok(destination)
+}
+
+fn write_semantic_field_codex_session(temp: &TempDir) -> Result<PathBuf> {
+    let destination = temp
+        .path()
+        .join(".codex/sessions/2026/08/27/rollout-semantic-fields.jsonl");
+    fs::create_dir_all(destination.parent().expect("session path has a parent"))?;
+    let lines = [
+        serde_json::json!({
+            "timestamp": "2026-08-27T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "semantic-fields",
+                "timestamp": "2026-08-27T12:00:00Z",
+                "cwd": "/Volumes/Fixture/DirNeedleRoot",
+                "agent_path": "/Internal/AgentTaskNeedle"
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-08-27T12:00:01Z",
+            "type": "turn_context",
+            "payload": {
+                "workspace_roots": ["/Volumes/Fixture/ExtraDirNeedle"],
+                "file_system_sandbox_policy": {
+                    "writable_roots": ["/Volumes/Fixture/WritableDirNeedle"],
+                    "path": {"path": "/Volumes/Mixed/AmbiguousNeedle"}
+                }
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-08-27T12:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "<skill>GeneratedSkillNeedle</skill>\nUserFacetNeedle"
+                }]
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-08-27T12:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "AgentFacetNeedle"}]
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-08-27T12:00:04Z",
+            "type": "response_item",
+            "payload": {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "ReasoningFacetNeedle"}]
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-08-27T12:00:05Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "opaque-call-id",
+                "arguments": serde_json::json!({
+                    "cmd": "printf ToolCallFacetNeedle",
+                    "file_path": "/Volumes/Fixture/src/FileFacetNeedle.rs",
+                    "metadata": "OpaqueArgumentMetadataNeedle"
+                }).to_string()
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-08-27T12:00:06Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "opaque-call-id",
+                "output": serde_json::json!({
+                    "stdout": "ToolResultFacetNeedle",
+                    "metadata": {"internal": "OpaqueMetadataNeedle"}
+                }).to_string()
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-08-27T12:00:07Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "patch_apply_end",
+                "changes": {
+                    "/Volumes/Fixture/src/ChangedFacetNeedle.rs": {"kind": "update"}
+                }
+            }
+        }),
+    ];
+    let body = lines
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&destination, format!("{body}\n"))?;
+    Ok(destination)
+}
+
+fn search_hits(engine: &SearchEngine, query: &str) -> Result<Vec<SearchHit>> {
+    engine.search(&SearchRequest {
+        query: query.to_owned(),
+        scope: Scope::Global,
+        limit: 10,
+        sort: SortMode::Relevance,
+        filters: SearchFilters::default(),
+    })
 }
 
 fn fixture_path(relative: &str) -> PathBuf {

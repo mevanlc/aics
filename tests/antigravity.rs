@@ -62,6 +62,37 @@ fn scans_and_parses_antigravity_bundle_with_metadata_and_full_merge() -> Result<
     assert!(!session.content.contains("regular-only-command"));
     assert!(!session.content.contains("internal conversation history"));
     assert!(!session.content.contains("USER_SETTINGS_CHANGE"));
+    assert!(session
+        .search_fields
+        .user
+        .iter()
+        .any(|text| text.contains("ORBITAL_ANCHOR")));
+    assert!(session
+        .search_fields
+        .agent
+        .iter()
+        .any(|text| text.contains("FULL_TRANSCRIPT_DETAIL")));
+    assert!(session
+        .search_fields
+        .agent
+        .iter()
+        .any(|text| text.contains("CHECKPOINT_BEACON")));
+    assert!(session
+        .search_fields
+        .tool_call
+        .iter()
+        .any(|text| text == "run_command"));
+    assert!(session
+        .search_fields
+        .tool_call
+        .iter()
+        .any(|text| text.contains("full-only-command")));
+    assert!(session
+        .search_fields
+        .tool_result
+        .iter()
+        .any(|text| text.contains("complete command output")));
+    assert!(session.search_fields.dirs.contains("/tmp/agy workspace"));
 
     let exec = session.cells.iter().find_map(|cell| match cell {
         SessionCell::Exec {

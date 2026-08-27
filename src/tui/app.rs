@@ -6290,6 +6290,7 @@ mod tests {
             content:
                 "first user\nfirst assistant\nrun tool\ntool output\nsecond user\nsecond assistant"
                     .to_owned(),
+            search_fields: Default::default(),
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),

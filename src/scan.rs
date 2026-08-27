@@ -156,6 +156,7 @@ impl SessionFile {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AntigravitySessionMetadata {
     pub cwd: Option<String>,
+    pub workspace_dirs: Vec<String>,
     pub custom_title: Option<String>,
     pub preview: Option<String>,
 }
@@ -472,18 +473,22 @@ fn load_antigravity_metadata(root: &Path) -> HashMap<String, AntigravitySessionM
         .iter()
         .map(|(session_id, entry)| {
             let summary = entry.get("summary").unwrap_or(&Value::Null);
-            let cwd = summary
+            let workspace_dirs = summary
                 .get("WorkspaceURIs")
                 .and_then(Value::as_array)
-                .and_then(|uris| {
+                .map(|uris| {
                     uris.iter()
                         .filter_map(Value::as_str)
-                        .find_map(workspace_uri_path)
-                });
+                        .filter_map(workspace_uri_path)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let cwd = workspace_dirs.first().cloned();
             (
                 session_id.clone(),
                 AntigravitySessionMetadata {
                     cwd,
+                    workspace_dirs,
                     custom_title: nonempty_string(summary.get("Title")),
                     preview: nonempty_string(summary.get("Preview")),
                 },
@@ -530,7 +535,10 @@ fn apply_antigravity_history(
     for (session_id, cwd) in latest_workspaces {
         let entry = metadata.entry(session_id).or_default();
         if entry.cwd.is_none() {
-            entry.cwd = Some(cwd);
+            entry.cwd = Some(cwd.clone());
+        }
+        if !entry.workspace_dirs.contains(&cwd) {
+            entry.workspace_dirs.push(cwd);
         }
     }
 }
@@ -577,6 +585,10 @@ fn antigravity_source_signature(
         metadata.preview.as_deref(),
     ] {
         hasher.update(value.unwrap_or_default().as_bytes());
+        hasher.update([0]);
+    }
+    for directory in &metadata.workspace_dirs {
+        hasher.update(directory.as_bytes());
         hasher.update([0]);
     }
     let digest = hasher.finalize();

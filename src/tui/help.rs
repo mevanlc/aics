@@ -854,6 +854,9 @@ fn search_query_help_text() -> &'static str {
 - An empty query shows recent sessions instead of running a text query.\n\
 - Non-empty queries run through Tantivy's lenient QueryParser against AICS's default content field.\n\
 - That content field contains the custom thread title, the first user/resume-preview text, and the full parsed transcript.\n\
+- Use user:TEXT for user-authored prompts and agent:TEXT for assistant prose, plaintext reasoning, and native session summaries/checkpoints. Agent search excludes system/developer and tool/MCP/skill traffic.\n\
+- Use toolcall:TEXT for readable tool names and inputs, and toolresult:TEXT for readable tool output. Opaque IDs, signatures, media, and internal metadata are excluded.\n\
+- Use dirs:PATH for directory-valued properties, files:PATH for file-valued properties, and paths:PATH for their union plus ambiguous file-or-directory properties. Path fields use a semantic allowlist, not filesystem existence or slash guessing.\n\
 \n\
 ## Query syntax\n\
 - Bare words are token searches. Tantivy's default tokenizer handles case and punctuation normalization.\n\
@@ -862,6 +865,7 @@ fn search_query_help_text() -> &'static str {
 - Use parentheses to group boolean clauses, for example (rust OR go) parser.\n\
 - Use quotes for an exact phrase, for example \"vector db\".\n\
 - Use working_dir:PATH or wd:PATH to match a case-insensitive working-directory prefix from any path-component boundary; for example wd:my/ja.\n\
+- dirs:PATH, files:PATH, and paths:PATH use the same case-insensitive component-prefix matching.\n\
 - Wrap a Tantivy term regex in < and >, optionally after a field name; for example wd:<.*codex/.*8ba3f7e.*>. Slashes need no escaping. Regexes match whole indexed terms, and \\> puts a literal > in the regex.\n\
 - AICS parses leniently, so malformed input should not open an error screen; Tantivy returns the usable parts it can parse.\n\
 \n\
@@ -1031,6 +1035,13 @@ mod tests {
         assert!(text.contains("first user/resume-preview text"));
         assert!(text.contains("full parsed transcript"));
         assert!(text.contains("wd:my/ja"));
+        assert!(text.contains("user:TEXT"));
+        assert!(text.contains("agent:TEXT"));
+        assert!(text.contains("toolcall:TEXT"));
+        assert!(text.contains("toolresult:TEXT"));
+        assert!(text.contains("dirs:PATH"));
+        assert!(text.contains("files:PATH"));
+        assert!(text.contains("paths:PATH"));
         assert!(text.contains("wd:<.*codex/.*8ba3f7e.*>"));
         assert!(text.contains("boosted 5x"));
         assert!(text.contains("recency boost"));

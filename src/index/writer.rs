@@ -583,6 +583,21 @@ fn add_session_document(
 
     document.add_text(fields.file_path, normalize_path_key(&session.file_path));
     document.add_text(fields.content, searchable_content(session));
+    add_joined_text(&mut document, fields.user, &session.search_fields.user);
+    add_joined_text(&mut document, fields.agent, &session.search_fields.agent);
+    add_joined_text(
+        &mut document,
+        fields.tool_call,
+        &session.search_fields.tool_call,
+    );
+    add_joined_text(
+        &mut document,
+        fields.tool_result,
+        &session.search_fields.tool_result,
+    );
+    add_path_values(&mut document, fields.dirs, &session.search_fields.dirs);
+    add_path_values(&mut document, fields.files, &session.search_fields.files);
+    add_path_values(&mut document, fields.paths, &session.search_fields.paths);
     if let Some(cwd) = session.cwd.as_deref() {
         for term in working_dir_search_terms(cwd) {
             document.add_text(fields.working_dir, term);
@@ -593,6 +608,28 @@ fn add_session_document(
 
     writer.add_document(document)?;
     Ok(())
+}
+
+fn add_joined_text(
+    document: &mut TantivyDocument,
+    field: tantivy::schema::Field,
+    chunks: &[String],
+) {
+    if !chunks.is_empty() {
+        document.add_text(field, chunks.join("\n\n"));
+    }
+}
+
+fn add_path_values(
+    document: &mut TantivyDocument,
+    field: tantivy::schema::Field,
+    values: &std::collections::BTreeSet<String>,
+) {
+    for value in values {
+        for term in path_search_terms(value) {
+            document.add_text(field, term);
+        }
+    }
 }
 
 fn searchable_content(session: &Session) -> String {
@@ -611,7 +648,7 @@ fn searchable_content(session: &Session) -> String {
     chunks.join("\n\n")
 }
 
-fn working_dir_search_terms(cwd: &str) -> Vec<String> {
+fn path_search_terms(cwd: &str) -> Vec<String> {
     let normalized = cwd.replace('\\', "/");
     let normalized = normalized.trim_end_matches('/');
     if normalized.is_empty() {
@@ -629,9 +666,13 @@ fn working_dir_search_terms(cwd: &str) -> Vec<String> {
     terms
 }
 
+fn working_dir_search_terms(cwd: &str) -> Vec<String> {
+    path_search_terms(cwd)
+}
+
 /// Bump when indexed/stored fields or searchable-content semantics change so old
 /// state files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 12;
+const INDEX_FORMAT_VERSION: u32 = 13;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {
