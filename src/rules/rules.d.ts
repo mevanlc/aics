@@ -270,6 +270,8 @@ interface AicsUntrashAction {
  *
  * A callback may return one action, an array of actions, `null`, or `undefined`.
  * Rule names must be non-empty and unique within the rules file.
+ * Callbacks for different sessions may run concurrently and out of session order;
+ * they must not depend on mutable global state shared across invocations.
  *
  * @param name Human-readable unique rule name.
  * @param callback Function that evaluates one session.

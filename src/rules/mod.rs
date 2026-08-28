@@ -2,6 +2,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Condvar, Mutex};
+use std::thread;
 
 use anyhow::{anyhow, bail, Context, Result};
 use boa_engine::{
@@ -191,8 +194,14 @@ pub struct RulesOptions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RulesProgress {
-    ProcessingStarted { total: usize },
-    ProcessingProgress { processed: usize, total: usize },
+    ProcessingStarted {
+        total: usize,
+    },
+    /// `processed` is the number of completed sessions, not a traversal position.
+    ProcessingProgress {
+        processed: usize,
+        total: usize,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -338,125 +347,134 @@ where
             }
         }
     });
-    let mut engine = if cache.as_ref().is_some_and(RulesCache::was_reused) {
-        None
-    } else {
-        Some(JsRuleEngine::load(&options.rules_path)?)
-    };
+    let rules_must_be_validated = cache.as_ref().is_none_or(|cache| !cache.was_reused());
     let files = scan_session_files(roots)?;
     let total = files.len();
     on_progress(RulesProgress::ProcessingStarted { total });
-    let mut report = RulesReport::default();
-    let mut mark_processed = |processed| {
-        on_progress(RulesProgress::ProcessingProgress { processed, total });
+    let mut completed = 0;
+    let mut mark_completed = || {
+        completed += 1;
+        on_progress(RulesProgress::ProcessingProgress {
+            processed: completed,
+            total,
+        });
     };
+    let mut results = (0..total).map(|_| None).collect::<Vec<_>>();
+    let mut jobs = Vec::new();
 
-    for (index, file) in files.iter().enumerate() {
-        let processed = index + 1;
+    for (file_index, file) in files.iter().enumerate() {
         if !file_matches_filters(file, &options.filters) {
-            mark_processed(processed);
+            mark_completed();
             continue;
         }
         let superseded_by = options.supersession.get(&file.path).map(String::as_str);
-
-        let mut content_fingerprint = None;
-        let cached = cache
-            .as_mut()
-            .and_then(|cache| match cache.lookup(file, superseded_by) {
-                Ok(CacheLookup::Hit {
+        let lookup = cache
+            .as_ref()
+            .map(|cache| cache.lookup(file, superseded_by));
+        match lookup {
+            Some(CacheLookup::Hit {
+                determination,
+                fingerprint,
+            }) if cached_determination_needs_evaluation(
+                &determination,
+                file,
+                &options.scope,
+                &options.filters,
+            ) =>
+            {
+                jobs.push(RuleJob {
+                    file_index,
+                    superseded_by: superseded_by.map(str::to_owned),
+                    kind: RuleJobKind::Evaluate {
+                        fingerprint: Some(fingerprint),
+                    },
+                })
+            }
+            Some(CacheLookup::Hit { determination, .. }) => {
+                results[file_index] = Some(CompletedRuleFile {
+                    determination,
+                    cache_fingerprint: None,
+                });
+                mark_completed();
+            }
+            Some(CacheLookup::Validate {
+                determination,
+                fingerprint,
+            }) => jobs.push(RuleJob {
+                file_index,
+                superseded_by: superseded_by.map(str::to_owned),
+                kind: RuleJobKind::Validate {
+                    evaluate_if_unchanged: cached_determination_needs_evaluation(
+                        &determination,
+                        file,
+                        &options.scope,
+                        &options.filters,
+                    ),
                     determination,
                     fingerprint,
-                }) => {
-                    content_fingerprint = Some(fingerprint);
-                    Some(determination)
-                }
-                Ok(CacheLookup::Miss(fingerprint)) => {
-                    content_fingerprint = fingerprint;
-                    None
-                }
-                Err(error) => {
-                    warn!(
-                        "could not validate {} against the rules cache: {error:#}",
-                        file.path.display()
-                    );
-                    None
-                }
-            });
-        if let Some(determination) = cached.as_ref() {
-            if matches!(
-                determination,
-                CachedDetermination::Unevaluated { session }
-                    if session_matches_scope(&options.scope, session)
-                        && session_matches_filters(session, file, &options.filters)
-            ) {
-                // This session was outside the scope or filters when first cached,
-                // but the current invocation needs its actual rule determination.
-            } else {
-                collect_determination(
-                    &mut report,
-                    file,
-                    determination,
+                },
+            }),
+            Some(CacheLookup::Miss(fingerprint)) => jobs.push(RuleJob {
+                file_index,
+                superseded_by: superseded_by.map(str::to_owned),
+                kind: RuleJobKind::Evaluate { fingerprint },
+            }),
+            None => jobs.push(RuleJob {
+                file_index,
+                superseded_by: superseded_by.map(str::to_owned),
+                kind: RuleJobKind::Evaluate { fingerprint: None },
+            }),
+        }
+    }
+
+    if jobs.is_empty() {
+        if rules_must_be_validated {
+            JsRuleEngine::load(&options.rules_path)?;
+        }
+    } else {
+        let rules_source = fs::read_to_string(&options.rules_path)
+            .with_context(|| format!("failed to read {}", options.rules_path.display()))?;
+        let worker_count = rules_worker_count(jobs.len());
+        let cache_enabled = cache.is_some();
+        run_parallel_jobs(
+            &jobs,
+            worker_count,
+            || JsRuleEngine::from_source(&options.rules_path, &rules_source),
+            |engine, job| {
+                process_rule_job(
+                    engine,
+                    &files[job.file_index],
+                    job,
+                    options.selection,
                     &options.scope,
                     &options.filters,
-                );
-                mark_processed(processed);
-                continue;
-            }
-        }
-
-        let determination = match parse_scanned_session_file(file) {
-            Ok(Some(session)) => {
-                let stored = stored_rule_session(&session, file, superseded_by);
-                if !session_matches_scope(&options.scope, &stored)
-                    || !session_matches_filters(&stored, file, &options.filters)
-                {
-                    CachedDetermination::Unevaluated {
-                        session: Box::new(stored),
-                    }
-                } else {
-                    let input = RuleInput::from_session(&session, file, superseded_by);
-                    let details = RuleDetails::from_session(&session);
-                    let engine = match engine.as_ref() {
-                        Some(engine) => engine,
-                        None => {
-                            engine = Some(JsRuleEngine::load(&options.rules_path)?);
-                            engine.as_ref().expect("rules engine was just initialized")
-                        }
-                    };
-                    match engine.evaluate(&input, details, options.selection) {
-                        Ok(outcomes) if outcomes.is_empty() => CachedDetermination::NoMatch,
-                        Ok(outcomes) => CachedDetermination::Evaluated {
-                            session: Box::new(stored),
-                            outcomes,
-                        },
-                        Err(error) => CachedDetermination::EvaluationError {
-                            session: Box::new(stored),
-                            error: format!("{error:#}"),
-                        },
-                    }
-                }
-            }
-            Ok(None) => CachedDetermination::Ignored,
-            Err(error) => CachedDetermination::ParseError {
-                error: format!("{error:#}"),
+                    cache_enabled,
+                )
             },
+            |job_index, result| {
+                results[jobs[job_index].file_index] = Some(result);
+                mark_completed();
+            },
+        )?;
+    }
+
+    let mut report = RulesReport::default();
+    for (file_index, result) in results.into_iter().enumerate() {
+        let Some(result) = result else {
+            continue;
         };
+        let file = &files[file_index];
         collect_determination(
             &mut report,
             file,
-            &determination,
+            &result.determination,
             &options.scope,
             &options.filters,
         );
-        if let Some(cache) = cache.as_mut() {
-            if content_fingerprint.is_none() {
-                content_fingerprint = fingerprint_session_for_cache(file);
-            }
-            if let Some(fingerprint) = content_fingerprint {
-                cache.insert(&file.path, fingerprint, superseded_by, determination);
-            }
+        if let (Some(cache), Some(fingerprint)) = (cache.as_mut(), result.cache_fingerprint) {
+            let superseded_by = options.supersession.get(&file.path).map(String::as_str);
+            cache.insert(&file.path, fingerprint, superseded_by, result.determination);
         }
-        mark_processed(processed);
     }
 
     if let Some(cache) = cache.as_mut() {
@@ -478,6 +496,298 @@ where
     }
 
     Ok(report)
+}
+
+#[derive(Debug)]
+struct RuleJob {
+    file_index: usize,
+    superseded_by: Option<String>,
+    kind: RuleJobKind,
+}
+
+#[derive(Debug)]
+enum RuleJobKind {
+    Evaluate {
+        fingerprint: Option<ContentFingerprint>,
+    },
+    Validate {
+        determination: CachedDetermination,
+        fingerprint: ContentFingerprint,
+        evaluate_if_unchanged: bool,
+    },
+}
+
+#[derive(Debug)]
+struct CompletedRuleFile {
+    determination: CachedDetermination,
+    cache_fingerprint: Option<ContentFingerprint>,
+}
+
+fn cached_determination_needs_evaluation(
+    determination: &CachedDetermination,
+    file: &SessionFile,
+    scope: &Scope,
+    filters: &SearchFilters,
+) -> bool {
+    matches!(
+        determination,
+        CachedDetermination::Unevaluated { session }
+            if session_matches_scope(scope, session)
+                && session_matches_filters(session, file, filters)
+    )
+}
+
+fn rules_worker_count(job_count: usize) -> usize {
+    thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(job_count)
+        .max(1)
+}
+
+fn process_rule_job(
+    engine: &JsRuleEngine,
+    file: &SessionFile,
+    job: &RuleJob,
+    selection: RuleSelection,
+    scope: &Scope,
+    filters: &SearchFilters,
+    cache_enabled: bool,
+) -> CompletedRuleFile {
+    match &job.kind {
+        RuleJobKind::Evaluate { fingerprint } => evaluate_rule_file(
+            engine,
+            file,
+            job.superseded_by.as_deref(),
+            selection,
+            scope,
+            filters,
+            cache_enabled,
+            *fingerprint,
+        ),
+        RuleJobKind::Validate {
+            determination,
+            fingerprint,
+            evaluate_if_unchanged,
+        } => match fingerprint_session(file) {
+            Ok(current) if fingerprint.has_same_content(current) && !evaluate_if_unchanged => {
+                CompletedRuleFile {
+                    determination: determination.clone(),
+                    cache_fingerprint: Some(current),
+                }
+            }
+            Ok(current) => evaluate_rule_file(
+                engine,
+                file,
+                job.superseded_by.as_deref(),
+                selection,
+                scope,
+                filters,
+                cache_enabled,
+                Some(current),
+            ),
+            Err(error) => {
+                warn!(
+                    "could not validate {} against the rules cache: {error:#}",
+                    file.path.display()
+                );
+                evaluate_rule_file(
+                    engine,
+                    file,
+                    job.superseded_by.as_deref(),
+                    selection,
+                    scope,
+                    filters,
+                    cache_enabled,
+                    None,
+                )
+            }
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_rule_file(
+    engine: &JsRuleEngine,
+    file: &SessionFile,
+    superseded_by: Option<&str>,
+    selection: RuleSelection,
+    scope: &Scope,
+    filters: &SearchFilters,
+    cache_enabled: bool,
+    mut cache_fingerprint: Option<ContentFingerprint>,
+) -> CompletedRuleFile {
+    let determination = match parse_scanned_session_file(file) {
+        Ok(Some(session)) => {
+            let stored = stored_rule_session(&session, file, superseded_by);
+            if !session_matches_scope(scope, &stored)
+                || !session_matches_filters(&stored, file, filters)
+            {
+                CachedDetermination::Unevaluated {
+                    session: Box::new(stored),
+                }
+            } else {
+                let input = RuleInput::from_session(&session, file, superseded_by);
+                let details = RuleDetails::from_session(&session);
+                match engine.evaluate(&input, details, selection) {
+                    Ok(outcomes) if outcomes.is_empty() => CachedDetermination::NoMatch,
+                    Ok(outcomes) => CachedDetermination::Evaluated {
+                        session: Box::new(stored),
+                        outcomes,
+                    },
+                    Err(error) => CachedDetermination::EvaluationError {
+                        session: Box::new(stored),
+                        error: format!("{error:#}"),
+                    },
+                }
+            }
+        }
+        Ok(None) => CachedDetermination::Ignored,
+        Err(error) => CachedDetermination::ParseError {
+            error: format!("{error:#}"),
+        },
+    };
+
+    if cache_enabled && cache_fingerprint.is_none() {
+        cache_fingerprint = fingerprint_session_for_cache(file);
+    }
+    CompletedRuleFile {
+        determination,
+        cache_fingerprint,
+    }
+}
+
+fn run_parallel_jobs<J, S, R, Init, Work, Consume>(
+    jobs: &[J],
+    worker_count: usize,
+    init: Init,
+    work: Work,
+    mut consume: Consume,
+) -> Result<()>
+where
+    J: Sync,
+    R: Send,
+    Init: Fn() -> Result<S> + Sync,
+    Work: Fn(&mut S, &J) -> R + Sync,
+    Consume: FnMut(usize, R),
+{
+    debug_assert!(!jobs.is_empty());
+    debug_assert!((1..=jobs.len()).contains(&worker_count));
+
+    let next_job = AtomicUsize::new(0);
+    let start = (Mutex::new(WorkerStart::Waiting), Condvar::new());
+
+    thread::scope(|scope| -> Result<()> {
+        let (init_tx, init_rx) = mpsc::channel::<std::result::Result<(), String>>();
+        let (result_tx, result_rx) = mpsc::sync_channel::<(usize, R)>(worker_count);
+
+        for worker_index in 0..worker_count {
+            let init_tx = init_tx.clone();
+            let result_tx = result_tx.clone();
+            let start = &start;
+            let next_job = &next_job;
+            let init = &init;
+            let work = &work;
+            if let Err(error) = thread::Builder::new()
+                .name(format!("aics-rules-{worker_index}"))
+                .spawn_scoped(scope, move || {
+                    let mut state = match init() {
+                        Ok(state) => {
+                            if init_tx.send(Ok(())).is_err() {
+                                return;
+                            }
+                            Some(state)
+                        }
+                        Err(error) => {
+                            let _ = init_tx.send(Err(format!("{error:#}")));
+                            None
+                        }
+                    };
+
+                    if wait_for_worker_start(start) == WorkerStart::Cancel {
+                        return;
+                    }
+                    let Some(state) = state.as_mut() else {
+                        return;
+                    };
+
+                    loop {
+                        let job_index = next_job.fetch_add(1, Ordering::Relaxed);
+                        let Some(job) = jobs.get(job_index) else {
+                            break;
+                        };
+                        if result_tx.send((job_index, work(state, job))).is_err() {
+                            break;
+                        }
+                    }
+                })
+            {
+                release_workers(start, WorkerStart::Cancel);
+                return Err(error).context("failed to spawn rules worker");
+            }
+        }
+        drop(init_tx);
+        drop(result_tx);
+
+        let mut init_error = None;
+        for _ in 0..worker_count {
+            let status = match init_rx.recv() {
+                Ok(status) => status,
+                Err(error) => {
+                    release_workers(&start, WorkerStart::Cancel);
+                    return Err(error).context("rules worker stopped during initialization");
+                }
+            };
+            match status {
+                Ok(()) => {}
+                Err(error) if init_error.is_none() => init_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        release_workers(
+            &start,
+            if init_error.is_some() {
+                WorkerStart::Cancel
+            } else {
+                WorkerStart::Run
+            },
+        );
+        if let Some(error) = init_error {
+            bail!("failed to initialize rules worker: {error}");
+        }
+
+        for _ in 0..jobs.len() {
+            let (job_index, result) = result_rx
+                .recv()
+                .context("rules worker stopped before completing its job")?;
+            consume(job_index, result);
+        }
+        Ok(())
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerStart {
+    Waiting,
+    Run,
+    Cancel,
+}
+
+fn wait_for_worker_start(start: &(Mutex<WorkerStart>, Condvar)) -> WorkerStart {
+    let (command, ready) = start;
+    let mut command = command.lock().unwrap_or_else(|error| error.into_inner());
+    while *command == WorkerStart::Waiting {
+        command = ready
+            .wait(command)
+            .unwrap_or_else(|error| error.into_inner());
+    }
+    *command
+}
+
+fn release_workers(start: &(Mutex<WorkerStart>, Condvar), command: WorkerStart) {
+    let (current, ready) = start;
+    *current.lock().unwrap_or_else(|error| error.into_inner()) = command;
+    ready.notify_all();
 }
 
 fn fingerprint_session_for_cache(file: &SessionFile) -> Option<ContentFingerprint> {
@@ -584,6 +894,10 @@ impl JsRuleEngine {
     fn load(path: &Path) -> Result<Self> {
         let source = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
+        Self::from_source(path, &source)
+    }
+
+    fn from_source(path: &Path, source: &str) -> Result<Self> {
         let mut context = BoaContext::default();
         context
             .runtime_limits_mut()
@@ -608,7 +922,7 @@ impl JsRuleEngine {
         };
         engine
             .eval_ignore_result(RULES_HARNESS)
-            .and_then(|_| engine.eval_ignore_result(&source))
+            .and_then(|_| engine.eval_ignore_result(source))
             .with_context(|| format!("failed to load rules from {}", path.display()))?;
         engine.rule_names()?;
         Ok(engine)
@@ -1541,14 +1855,18 @@ struct RulePatchFile {
 #[cfg(test)]
 mod tests {
     use super::{
-        session_to_rule_context_json, JsRuleEngine, RuleDetails, RuleInput, RuleSelection,
-        RuleSession, RuleTurns,
+        run_parallel_jobs, session_to_rule_context_json, JsRuleEngine, RuleDetails, RuleInput,
+        RuleSelection, RuleSession, RuleTurns,
     };
     use crate::parse::{
         Agent, DerivationType, ExecStatus, MessageRole, PatchFile, PatchOp, Session, SessionCell,
         ToolStatus,
     };
+    use std::collections::HashSet;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
 
     fn input(agent: &'static str, _user_text: &str) -> RuleInput {
         RuleInput {
@@ -1623,6 +1941,68 @@ mod tests {
             session_info: None,
             lineage: Default::default(),
         }
+    }
+
+    #[test]
+    fn parallel_jobs_initialize_workers_and_consume_results_on_caller() {
+        let jobs = (0..64).collect::<Vec<_>>();
+        let worker_threads = Arc::new(Mutex::new(HashSet::new()));
+        let caller = thread::current().id();
+        let mut seen = vec![false; jobs.len()];
+
+        run_parallel_jobs(
+            &jobs,
+            4,
+            || {
+                worker_threads
+                    .lock()
+                    .unwrap()
+                    .insert(thread::current().id());
+                Ok(())
+            },
+            |_, job| (*job, thread::current().id()),
+            |job_index, (value, worker)| {
+                assert_eq!(thread::current().id(), caller);
+                assert_ne!(worker, caller);
+                assert_eq!(value, jobs[job_index]);
+                assert!(!seen[job_index]);
+                seen[job_index] = true;
+            },
+        )
+        .unwrap();
+
+        assert_eq!(worker_threads.lock().unwrap().len(), 4);
+        assert!(seen.into_iter().all(|value| value));
+    }
+
+    #[test]
+    fn parallel_jobs_do_not_start_when_a_worker_fails_to_initialize() {
+        let jobs = [1, 2, 3, 4];
+        let initializations = AtomicUsize::new(0);
+        let evaluations = AtomicUsize::new(0);
+
+        let error = run_parallel_jobs(
+            &jobs,
+            2,
+            || -> anyhow::Result<()> {
+                if initializations.fetch_add(1, Ordering::Relaxed) == 0 {
+                    anyhow::bail!("test initialization failure");
+                }
+                Ok(())
+            },
+            |_, job| {
+                evaluations.fetch_add(1, Ordering::Relaxed);
+                *job
+            },
+            |_, _| panic!("no result should be consumed"),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("failed to initialize rules worker"));
+        assert_eq!(initializations.load(Ordering::Relaxed), 2);
+        assert_eq!(evaluations.load(Ordering::Relaxed), 0);
     }
 
     #[test]

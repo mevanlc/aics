@@ -35,6 +35,18 @@ rule("trash short commit helper sessions", ({ turns }) => {
 });
 ```
 
+Callbacks for different sessions may run concurrently and out of session order.
+Write each callback as an independent per-session calculation: do not use mutable
+global state to carry information from one callback invocation to another.
+Immutable constants and pure helper functions are safe. Regular expressions with
+the `g` or `y` flag mutate `lastIndex`, so create them inside the callback or reset
+`lastIndex` before each use.
+
+For sessions that require evaluation, AICS automatically uses up to one worker
+per available logical CPU, capped by the number of sessions. Each worker keeps
+one JavaScript runtime for the duration of the run. Exact cache hits do not start
+or pass through a JavaScript worker.
+
 A rule can return `nothing(reason)`, `trash(reason)`, or `untrash(reason)`. A
 non-empty reason passed to `nothing` is an informational decision: it appears in
 the center of that session card's title in the interactive rules preview, but it

@@ -737,6 +737,76 @@ fn applying_antigravity_lifecycle_action_rejects_invalid_bundle_path() -> Result
 }
 
 #[test]
+fn parallel_rules_keep_lazy_text_isolated_and_results_path_ordered() -> Result<()> {
+    let temp = TempDir::new()?;
+    let claude_projects = temp.path().join(".claude/projects/-tmp-project");
+    fs::create_dir_all(&claude_projects)?;
+    let mut expected_paths = Vec::new();
+    for index in 0..32 {
+        let session_id = format!("parallel-{index:02}");
+        let path = claude_projects.join(format!("session-{index:02}.jsonl"));
+        let line = serde_json::json!({
+            "type": "user",
+            "sessionId": session_id,
+            "message": {
+                "role": "user",
+                "content": format!("text-{session_id}"),
+            },
+        });
+        fs::write(&path, format!("{line}\n"))?;
+        expected_paths.push(path);
+    }
+    let rules = write_rules(
+        &temp,
+        r#"
+        rule("match session text", ({ session, turns }) => {
+          return turns.user[0].text(4096) === `text-${session.id}`
+            ? trash(session.id)
+            : nothing("wrong session text");
+        });
+        "#,
+    )?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
+        trash: None,
+    };
+
+    let report = aics::rules::run_rules(
+        &roots,
+        &RulesOptions {
+            rules_path: rules,
+            cache_path: None,
+            mode: RulesMode::Preview,
+            selection: RuleSelection::All,
+            json: true,
+            scope: Scope::Global,
+            filters: SearchFilters::default(),
+            supersession: BTreeMap::new(),
+        },
+    )?;
+
+    assert!(report.errors.is_empty());
+    assert_eq!(report.proposals.len(), expected_paths.len());
+    assert_eq!(
+        report
+            .proposals
+            .iter()
+            .map(|proposal| proposal.path.clone())
+            .collect::<Vec<_>>(),
+        expected_paths
+    );
+    for (index, proposal) in report.proposals.iter().enumerate() {
+        assert_eq!(
+            proposal.action.reason(),
+            Some(format!("parallel-{index:02}").as_str())
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn rules_progress_reports_processing_count() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;

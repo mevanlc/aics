@@ -33,7 +33,7 @@ impl ContentFingerprint {
         }
     }
 
-    fn has_same_content(self, other: Self) -> bool {
+    pub(super) fn has_same_content(self, other: Self) -> bool {
         self.byte_len == other.byte_len
             && self.crc32 == other.crc32
             && self.source_signature == other.source_signature
@@ -80,6 +80,10 @@ pub(super) enum CachedDetermination {
 
 pub(super) enum CacheLookup {
     Hit {
+        determination: CachedDetermination,
+        fingerprint: ContentFingerprint,
+    },
+    Validate {
         determination: CachedDetermination,
         fingerprint: ContentFingerprint,
     },
@@ -184,38 +188,27 @@ impl RulesCache {
         self.reused
     }
 
-    pub(super) fn lookup(
-        &mut self,
-        file: &SessionFile,
-        superseded_by: Option<&str>,
-    ) -> Result<CacheLookup> {
-        let Some(cached) = self.state.sessions.get_mut(&normalize_path_key(&file.path)) else {
-            return Ok(CacheLookup::Miss(None));
+    pub(super) fn lookup(&self, file: &SessionFile, superseded_by: Option<&str>) -> CacheLookup {
+        let Some(cached) = self.state.sessions.get(&normalize_path_key(&file.path)) else {
+            return CacheLookup::Miss(None);
         };
         if cached.superseded_by.as_deref() != superseded_by {
-            return Ok(CacheLookup::Miss(None));
+            return CacheLookup::Miss(None);
         }
         let current_metadata = FileMetadataFingerprint::from_session(file);
         if cached.content.metadata() == current_metadata {
-            return Ok(CacheLookup::Hit {
+            return CacheLookup::Hit {
                 determination: cached.determination.clone(),
                 fingerprint: cached.content,
-            });
+            };
         }
         if cached.content.byte_len != current_metadata.byte_len {
-            return Ok(CacheLookup::Miss(None));
+            return CacheLookup::Miss(None);
         }
 
-        let current = fingerprint_session(file)?;
-        if cached.content.has_same_content(current) {
-            cached.content = current;
-            self.dirty = true;
-            Ok(CacheLookup::Hit {
-                determination: cached.determination.clone(),
-                fingerprint: current,
-            })
-        } else {
-            Ok(CacheLookup::Miss(Some(current)))
+        CacheLookup::Validate {
+            determination: cached.determination.clone(),
+            fingerprint: cached.content,
         }
     }
 
@@ -443,7 +436,7 @@ mod tests {
 
         let mut cache = RulesCache::open_with_binary(cache_path, &rules, &binary)?;
         assert!(matches!(
-            cache.lookup(&scanned_session(&session)?, None)?,
+            cache.lookup(&scanned_session(&session)?, None),
             CacheLookup::Hit {
                 determination: CachedDetermination::Ignored,
                 ..
@@ -458,10 +451,15 @@ mod tests {
             .content
             .modified_ns = 0;
         fs::write(&session, b"bravo")?;
-        assert!(matches!(
-            cache.lookup(&scanned_session(&session)?, None)?,
-            CacheLookup::Miss(Some(_))
-        ));
+        let scanned = scanned_session(&session)?;
+        let CacheLookup::Validate {
+            fingerprint,
+            determination: CachedDetermination::Ignored,
+        } = cache.lookup(&scanned, None)
+        else {
+            panic!("same-length rewrite should require worker validation");
+        };
+        assert!(!fingerprint.has_same_content(fingerprint_session(&scanned)?));
         Ok(())
     }
 
@@ -492,7 +490,7 @@ mod tests {
             .crc32 ^= u32::MAX;
 
         assert!(matches!(
-            cache.lookup(&scanned_session(&session)?, None)?,
+            cache.lookup(&scanned_session(&session)?, None),
             CacheLookup::Hit {
                 determination: CachedDetermination::Ignored,
                 ..
@@ -520,7 +518,7 @@ mod tests {
             CachedDetermination::NoMatch,
         );
         assert!(matches!(
-            cache.lookup(&scanned_session(&session)?, Some("keeper"))?,
+            cache.lookup(&scanned_session(&session)?, Some("keeper")),
             CacheLookup::Miss(None)
         ));
         Ok(())
@@ -551,7 +549,7 @@ mod tests {
         fs::write(&binary, b"bin-two")?;
         let mut cache = RulesCache::open_with_binary(cache_path.clone(), &rules, &binary)?;
         assert!(matches!(
-            cache.lookup(&scanned_session(&session)?, None)?,
+            cache.lookup(&scanned_session(&session)?, None),
             CacheLookup::Miss(None)
         ));
         cache.insert(
@@ -564,9 +562,9 @@ mod tests {
         cache.save()?;
 
         fs::write(&rules, b"rules-b")?;
-        let mut cache = RulesCache::open_with_binary(cache_path, &rules, &binary)?;
+        let cache = RulesCache::open_with_binary(cache_path, &rules, &binary)?;
         assert!(matches!(
-            cache.lookup(&scanned_session(&session)?, None)?,
+            cache.lookup(&scanned_session(&session)?, None),
             CacheLookup::Miss(None)
         ));
         Ok(())
@@ -713,8 +711,24 @@ mod tests {
         let first = run_rules(&roots, &options)?;
         assert_eq!(first.proposals.len(), 1);
 
+        let mut cache = RulesCache::open(cache_path.clone(), &rules)?;
+        cache
+            .state
+            .sessions
+            .get_mut(&normalize_path_key(&session))
+            .unwrap()
+            .content
+            .modified_ns = 0;
+        cache.dirty = true;
+        cache.save()?;
+
         let cached = run_rules(&roots, &options)?;
         assert_eq!(cached.proposals, first.proposals);
+        let cache = RulesCache::open(cache_path.clone(), &rules)?;
+        assert!(matches!(
+            cache.lookup(&scanned_session(&session)?, None),
+            CacheLookup::Hit { .. }
+        ));
 
         let mut cache = RulesCache::open(cache_path, &rules)?;
         cache.insert(
