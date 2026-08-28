@@ -421,7 +421,6 @@ fn is_file_key(key: &str) -> bool {
             | "outpath"
             | "outputfile"
             | "persistedoutputpath"
-            | "originalfile"
             | "backupfilename"
             | "movepath"
             | "scopefiles"
@@ -551,5 +550,24 @@ mod tests {
         assert!(fields.paths.contains("/repo/maybe"));
         assert!(!fields.files.contains("/repo/maybe"));
         assert!(!fields.dirs.contains("/repo/maybe"));
+    }
+
+    #[test]
+    fn claude_original_file_contents_are_not_classified_as_paths() {
+        let mut fields = SessionSearchFields::default();
+        fields.capture_paths(
+            Agent::Claude,
+            &json!({
+                "toolUseResult": {
+                    "filePath": "/repo/src/lib.rs",
+                    "originalFile": "fn render() { include_str!(\"assets/icons/ui.svg\"); }"
+                }
+            }),
+        );
+
+        assert!(fields.files.contains("/repo/src/lib.rs"));
+        assert!(!fields
+            .paths
+            .contains("fn render() { include_str!(\"assets/icons/ui.svg\"); }"));
     }
 }
