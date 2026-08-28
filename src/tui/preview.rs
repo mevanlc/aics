@@ -1229,15 +1229,21 @@ fn render_tool_call_into(
     );
 
     let base = Style::default().fg(theme.text);
-    if is_generic_tool(raw_name)
-        && matches!(
-            input,
-            serde_json::Value::Object(_) | serde_json::Value::Array(_)
-        )
-    {
-        // Unknown / generic tool — pretty-print the raw arguments via syntect
-        // instead of the compacted `summary` blurb.
-        push_json_value_lines(lines, input, base, theme, highlight_query);
+    if is_generic_tool(raw_name) {
+        match input {
+            // Unknown / generic tool — render the full raw arguments instead of
+            // the compacted `summary` blurb.
+            serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                push_json_value_lines(lines, input, base, theme, highlight_query);
+            }
+            serde_json::Value::String(text) => {
+                push_plain_text_lines(lines, text, base, theme, highlight_query);
+            }
+            _ if !summary.is_empty() => {
+                push_summary_or_json_lines(lines, summary, base, theme, highlight_query);
+            }
+            _ => {}
+        }
     } else if !summary.is_empty() {
         push_summary_or_json_lines(lines, summary, base, theme, highlight_query);
     }
@@ -1347,6 +1353,16 @@ fn push_summary_or_json_lines(
         }
         return;
     }
+    push_plain_text_lines(lines, text, base, theme, highlight_query);
+}
+
+fn push_plain_text_lines(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    base: Style,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) {
     for line in text.lines() {
         let mut spans = vec![Span::styled("  ", Style::default())];
         spans.extend(highlight_into_spans(line, highlight_query, base, theme));
@@ -2283,6 +2299,37 @@ mod tests {
             any_colored,
             "expected syntect to assign at least one Rgb foreground color"
         );
+    }
+
+    #[test]
+    fn render_tool_call_with_string_input_uses_complete_raw_text() {
+        use crate::parse::ToolStatus;
+
+        let theme = Theme::default();
+        let input = format!(
+            "const r = await tools.exec_command({{\"cmd\":\"{}\"}});\ntext(r.output);\nTAIL_MARKER();",
+            "x".repeat(240)
+        );
+        let input_value = serde_json::json!(input);
+        let summary = crate::parse::tool_format::format_tool_call("exec", &input_value);
+        assert!(!summary.contains("TAIL_MARKER"));
+        let cells = vec![SessionCell::ToolCall {
+            tool: "exec".to_owned(),
+            raw_name: "exec".to_owned(),
+            summary,
+            input: input_value,
+            status: ToolStatus::Completed,
+            timestamp: None,
+        }];
+        let session = empty_session(Agent::Codex, cells);
+        let doc = render_session_document(&session, &theme, None);
+        let joined = rendered_lines(&doc.text).join("\n");
+
+        for line in input.lines() {
+            assert!(joined.contains(line), "missing input line: {line}");
+        }
+        assert!(joined.contains("  text(r.output);\n  TAIL_MARKER();"));
+        assert!(!joined.contains(r#"\"cmd\""#));
     }
 
     #[test]

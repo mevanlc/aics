@@ -1272,12 +1272,11 @@ impl CodexCellBuilder {
         payload: &Value,
         timestamp: Option<DateTime<Utc>>,
     ) {
-        let Some(output) = payload.get("output").and_then(Value::as_str) else {
+        let Some(output) = payload.get("output") else {
             return;
         };
         let call_id = string_field(payload, "call_id");
-        let result_value: Value =
-            serde_json::from_str(output).unwrap_or_else(|_| Value::String(output.to_owned()));
+        let result_value = parse_embedded_json(output);
 
         // Patch path: look up the pending Patch cell.
         if let Some(id) = call_id.as_ref() {
@@ -1322,13 +1321,10 @@ impl CodexCellBuilder {
         } else {
             human
         };
-        if formatted.trim().is_empty() {
-            return;
-        }
         let mut paired_tool: Option<String> = None;
         let mut call_summary: Option<String> = None;
         if let Some(id) = call_id.as_ref() {
-            if let Some(&index) = self.pending_tool.get(id) {
+            if let Some(index) = self.pending_tool.remove(id) {
                 if let Some(SessionCell::ToolCall {
                     tool,
                     summary,
@@ -1342,8 +1338,10 @@ impl CodexCellBuilder {
                     }
                     *status = ToolStatus::Completed;
                 }
-                self.pending_tool.remove(id);
             }
+        }
+        if formatted.trim().is_empty() {
+            return;
         }
         self.cells.push(SessionCell::ToolResult {
             tool: paired_tool,
@@ -1994,7 +1992,8 @@ fn read_thread_names(index_path: &Path) -> Result<HashMap<String, String>> {
 #[cfg(test)]
 mod cell_tests {
     use super::{parse_codex_session_file, user_message_line_multiset_sha256};
-    use crate::parse::{PatchOp, SessionCell};
+    use crate::parse::{PatchOp, SessionCell, ToolStatus};
+    use serde_json::json;
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
@@ -2240,6 +2239,156 @@ mod cell_tests {
             summary.contains("endpoint") && summary.contains("/v1/x"),
             "call_summary should echo the call args: {summary}"
         );
+    }
+
+    #[test]
+    fn parser_pairs_array_output_with_custom_tool_call() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let input = format!(
+            "const r = await tools.exec_command({{\"cmd\":\"{}\"}});\ntext(r.output);",
+            "x".repeat(240)
+        );
+        let records = [
+            json!({
+                "timestamp": "2026-08-28T16:04:10Z",
+                "type": "session_meta",
+                "payload": {"id": "s1", "cwd": "/tmp"}
+            }),
+            json!({
+                "timestamp": "2026-08-28T16:04:11Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "c1",
+                    "name": "exec",
+                    "input": input,
+                }
+            }),
+            json!({
+                "timestamp": "2026-08-28T16:04:12Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "c1",
+                    "output": [
+                        {"type": "input_text", "text": "Script completed"},
+                        {"type": "input_text", "text": "tail marker"},
+                    ],
+                }
+            }),
+        ];
+        let body = records
+            .into_iter()
+            .map(|record| record.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, format!("{body}\n")).expect("write fixture");
+
+        let session = parse_codex_session_file(&path)
+            .expect("parse")
+            .expect("session");
+        let call = session
+            .cells
+            .iter()
+            .find_map(|cell| match cell {
+                SessionCell::ToolCall {
+                    tool,
+                    input,
+                    status,
+                    ..
+                } => Some((tool, input, status)),
+                _ => None,
+            })
+            .expect("ToolCall cell missing");
+        assert_eq!(call.0, "exec");
+        assert_eq!(call.1.as_str(), Some(input.as_str()));
+        assert_eq!(*call.2, ToolStatus::Completed);
+
+        let result = session
+            .cells
+            .iter()
+            .find_map(|cell| match cell {
+                SessionCell::ToolResult { tool, output, .. } => Some((tool, output)),
+                _ => None,
+            })
+            .expect("ToolResult cell missing");
+        assert_eq!(result.0.as_deref(), Some("exec"));
+        assert_eq!(result.1, "Script completed\n\ntail marker");
+    }
+
+    #[test]
+    fn custom_tool_output_completes_call_even_without_displayable_body() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let records = [
+            json!({
+                "timestamp": "2026-08-28T16:04:10Z",
+                "type": "session_meta",
+                "payload": {"id": "s1", "cwd": "/tmp"}
+            }),
+            json!({
+                "timestamp": "2026-08-28T16:04:11Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "completed",
+                    "name": "exec",
+                    "input": "completed_call();",
+                }
+            }),
+            json!({
+                "timestamp": "2026-08-28T16:04:12Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "completed",
+                    "output": null,
+                }
+            }),
+            json!({
+                "timestamp": "2026-08-28T16:04:13Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "pending",
+                    "name": "exec",
+                    "input": "pending_call();",
+                }
+            }),
+        ];
+        let body = records
+            .into_iter()
+            .map(|record| record.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, format!("{body}\n")).expect("write fixture");
+
+        let session = parse_codex_session_file(&path)
+            .expect("parse")
+            .expect("session");
+        let calls = session
+            .cells
+            .iter()
+            .filter_map(|cell| match cell {
+                SessionCell::ToolCall { input, status, .. } => {
+                    Some((input.as_str().unwrap_or_default(), *status))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            calls,
+            [
+                ("completed_call();", ToolStatus::Completed),
+                ("pending_call();", ToolStatus::Pending),
+            ]
+        );
+        assert!(!session
+            .cells
+            .iter()
+            .any(|cell| matches!(cell, SessionCell::ToolResult { .. })));
     }
 
     #[test]
