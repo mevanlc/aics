@@ -1,5 +1,9 @@
 # ULTRAPLAN: aics
 
+> Archived on 2026-08-31 after the substantial implementation of the original
+> project plan. Remaining follow-ups are tracked in
+> [TODO-ULTRAPLAN.md](../TODO-ULTRAPLAN.md).
+
 ## Goal
 
 `aics` is a single-purpose, cross-platform Rust TUI for searching Claude Code and Codex CLI chat session histories. It replaces the search functionality of `aichat search` from `claude-code-tools` with a standalone binary that handles indexing, searching, and display in-process — no shelling out to Python or to itself. The command surface is `aics [OPTIONS] [QUERY]`, aesthetically inspired by lazygit, built on ratatui + crossterm + tantivy.

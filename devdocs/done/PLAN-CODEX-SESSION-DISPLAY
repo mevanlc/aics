@@ -1,5 +1,10 @@
 # Plan: Codex Session Presentation Enhancements
 
+> Archived on 2026-08-31 after the core typed-cell, structured rendering, and
+> runtime-metrics work was completed. Remaining and explicitly deferred items
+> are tracked in
+> [TODO-PLAN-CODEX-SESSION-PRESENTATION-ENHANCEMENTS.md](../TODO-PLAN-CODEX-SESSION-PRESENTATION-ENHANCEMENTS.md).
+
 ## Goal
 
 Adopt the most useful "rendering ideas" from upstream Codex (`~/p/my/codex/codex-rs/tui`) so that AICS shows a Codex rollout the way a human would actually want to read one — distinct, well-shaped cells for tool calls, diffs, reasoning, plans, approvals, etc. — instead of the current flat role-based transcript.

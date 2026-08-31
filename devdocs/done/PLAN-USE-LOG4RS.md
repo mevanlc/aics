@@ -38,7 +38,7 @@ as part of this migration.
 
 ### Main logger initialization
 
-[src/main.rs](../src/main.rs) currently:
+[src/main.rs](../../src/main.rs) currently:
 
 - builds `env_logger` after `Cli::parse()`;
 - defaults to `warn` and reads `RUST_LOG` through `env_logger::Env`;
@@ -54,7 +54,7 @@ go to `aics.log`.
 
 ### Summary error log
 
-[src/summary/worker.rs](../src/summary/worker.rs) has a second logging path:
+[src/summary/worker.rs](../../src/summary/worker.rs) has a second logging path:
 
 1. A failed summary job emits `warn!` through the normal logger.
 2. `append_error_log()` independently opens
@@ -93,8 +93,8 @@ and makes the migration narrow.
 
 ### 2. Add one logging and retention module
 
-Add [src/logging.rs](../src/logging.rs) and export it from
-[src/lib.rs](../src/lib.rs). It should own:
+Add [src/logging.rs](../../src/logging.rs) and export it from
+[src/lib.rs](../../src/lib.rs). It should own:
 
 - the `log4rs::config::Config` construction;
 - optional `log4rs.yaml` discovery and loading;
@@ -334,7 +334,7 @@ reuse is the intended conservative behavior.
 
 ### 9. Support an optional user log4rs configuration
 
-Add a checked-in [examples/log4rs.yaml](../examples/log4rs.yaml) reference file.
+Add a checked-in [examples/log4rs.yaml](../../examples/log4rs.yaml) reference file.
 Users can enable it with:
 
 ```bash
@@ -468,7 +468,7 @@ yet. This is the narrow exception to "all logging through log4rs."
 
 ## Dependency Changes
 
-Update [Cargo.toml](../Cargo.toml) and [Cargo.lock](../Cargo.lock):
+Update [Cargo.toml](../../Cargo.toml) and [Cargo.lock](../../Cargo.lock):
 
 ```toml
 env_filter = "2"
@@ -561,7 +561,7 @@ test that calls the real config resolver must use
    programmatically.
 2. Add optional `{config_dir}/log4rs.yaml` discovery with the documented
    precedence and fallback behavior.
-3. Add [examples/log4rs.yaml](../examples/log4rs.yaml) with comments explaining
+3. Add [examples/log4rs.yaml](../../examples/log4rs.yaml) with comments explaining
    template variables, `RUST_LOG` precedence, rotation, managed filenames, and
    stdout/JSON safety. Also state that the copied template routes every mode to
    per-instance files; unlike the built-in configuration, it does not switch
@@ -607,16 +607,16 @@ migration is stable.
 
 Update:
 
-- [README.md](../README.md) with process-instance log locations, rotation and
+- [README.md](../../README.md) with process-instance log locations, rotation and
   reaping policy, `AICS_CONFIG_ROOT`, default level, `RUST_LOG` and optional-file
   precedence, the template copy command, and the fact that logs can contain
   local paths/commands;
-- [CLAUDE.md](../CLAUDE.md) (also reached through the `AGENTS.md` symlink) to
+- [CLAUDE.md](../../CLAUDE.md) (also reached through the `AGENTS.md` symlink) to
   name log4rs instead of env_logger;
-- [.github/ISSUE_TEMPLATE/bug_report.yml](../.github/ISSUE_TEMPLATE/bug_report.yml)
+- [.github/ISSUE_TEMPLATE/bug_report.yml](../../.github/ISSUE_TEMPLATE/bug_report.yml)
   so TUI bug reports explain how to find the current process-instance log, while
   built-in command/JSON invocations capture stderr;
-- [devdocs/ULTRAPLAN.md](ULTRAPLAN.md) only if historical dependency lists are
+- [ULTRAPLAN.md](ULTRAPLAN.md) only if historical dependency lists are
   intended to describe the current implementation. Otherwise leave the
   original scaffold record historical and add a short superseding note.
 
@@ -656,7 +656,7 @@ processes.
 
 ### Integration tests
 
-Add [tests/logging.rs](../tests/logging.rs) using `CARGO_BIN_EXE_aics` and temp
+Add [tests/logging.rs](../../tests/logging.rs) using `CARGO_BIN_EXE_aics` and temp
 roots:
 
 1. A JSON invocation leaves stdout as valid JSONL and writes an induced warning
