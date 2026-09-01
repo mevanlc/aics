@@ -124,6 +124,21 @@ guess from slashes in arbitrary text or whether a path currently exists. Bare
 queries retain the existing `content` behavior and therefore can still match
 tool text as part of the full parsed transcript.
 
+Three position-independent modifiers control how bare query terms interact with
+the current ^F Visibility toggles:
+
+- `visible:` searches only transcript content that the toggles currently show.
+- `hidden:` searches only transcript content that the toggles currently hide.
+- `all:` searches all indexed transcript content regardless of the toggles. This
+  is also the behavior when no visibility modifier is present.
+
+The modifiers are mutually exclusive and may appear at the beginning, middle,
+or end of a query. Explicit field clauses are not constrained by them, so
+`visible: rust toolcall:cargo` still searches `toolcall:cargo` when tool calls
+are hidden. For structured exec and patch cells, output counts as hidden when
+either Tool Calls or Tool Results hides it, matching what the transcript viewer
+can display.
+
 Queries use Tantivy's lenient query parser:
 
 - Bare words are token searches and multiple bare words are ANDed by default.

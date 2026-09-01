@@ -517,7 +517,8 @@ fn main() -> Result<()> {
     )?;
 
     if cli.json {
-        for hit in search_engine.search(&request)? {
+        let display_options = hidden_from(DisplayOptions::SHOW_ALL, &cli.hide);
+        for hit in search_engine.search_with_display_options(&request, display_options)? {
             println!("{}", serde_json::to_string(&hit)?);
         }
         return Ok(());
@@ -528,10 +529,11 @@ fn main() -> Result<()> {
     // likewise start from an all-visible baseline rather than saved display
     // options, so only an explicit `--hide` removes anything.
     if let Some(export_dir) = cli.export.as_deref() {
+        let display_options = hidden_from(DisplayOptions::SHOW_ALL, &cli.hide);
         return export_sessions(
-            search_engine.search(&request)?,
+            search_engine.search_with_display_options(&request, display_options)?,
             export_dir,
-            hidden_from(DisplayOptions::SHOW_ALL, &cli.hide),
+            display_options,
         );
     }
 

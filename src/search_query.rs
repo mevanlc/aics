@@ -1,5 +1,89 @@
 const BOOLEAN_OPERATORS: &[&str] = &["AND", "OR", "NOT"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VisibilitySearch {
+    #[default]
+    All,
+    Visible,
+    Hidden,
+}
+
+impl VisibilitySearch {
+    fn from_modifier(token: &str) -> Option<Self> {
+        if token.eq_ignore_ascii_case("all:") {
+            Some(Self::All)
+        } else if token.eq_ignore_ascii_case("visible:") {
+            Some(Self::Visible)
+        } else if token.eq_ignore_ascii_case("hidden:") {
+            Some(Self::Hidden)
+        } else {
+            None
+        }
+    }
+}
+
+/// Remove a position-independent visibility modifier from a query.
+///
+/// Modifiers are recognized only as complete, unquoted tokens. Repeating the
+/// same modifier is harmless, while combining different modifiers is rejected
+/// because their transcript scopes are mutually exclusive.
+pub fn extract_visibility_search(query: &str) -> Result<(String, VisibilitySearch), &'static str> {
+    let mut output = String::with_capacity(query.len());
+    let mut modifier = None;
+    let mut token_start = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+
+    for (index, ch) in query.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if ch == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+            continue;
+        }
+        if ch.is_whitespace() || matches!(ch, '(' | ')') {
+            append_query_token(query, token_start, index, &mut output, &mut modifier)?;
+            output.push(ch);
+            token_start = index + ch.len_utf8();
+        }
+    }
+    append_query_token(query, token_start, query.len(), &mut output, &mut modifier)?;
+
+    Ok((output.trim().to_owned(), modifier.unwrap_or_default()))
+}
+
+fn append_query_token(
+    query: &str,
+    start: usize,
+    end: usize,
+    output: &mut String,
+    modifier: &mut Option<VisibilitySearch>,
+) -> Result<(), &'static str> {
+    let token = &query[start..end];
+    let Some(found) = VisibilitySearch::from_modifier(token) else {
+        output.push_str(token);
+        return Ok(());
+    };
+
+    if modifier.is_some_and(|existing| existing != found) {
+        return Err("visible:, hidden:, and all: are mutually exclusive");
+    }
+    *modifier = Some(found);
+    Ok(())
+}
+
 pub fn extract_highlight_terms(query: &str) -> Vec<String> {
     let mut terms = Vec::new();
     let mut token = String::new();
@@ -86,7 +170,11 @@ fn push_term(terms: &mut Vec<String>, token: &mut String, quoted: bool) {
     }
 
     if !is_boolean_operator(token, quoted) {
-        let term = strip_search_field(token);
+        let term = if !quoted && VisibilitySearch::from_modifier(token).is_some() {
+            ""
+        } else {
+            strip_search_field(token)
+        };
         if !term.is_empty() {
             terms.push(term.to_ascii_lowercase());
         }
@@ -123,7 +211,56 @@ fn is_boolean_operator(token: &str, quoted: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_highlight_terms, has_explicit_boolean_operators};
+    use super::{
+        extract_highlight_terms, extract_visibility_search, has_explicit_boolean_operators,
+        VisibilitySearch,
+    };
+
+    #[test]
+    fn extracts_position_independent_visibility_modifiers() {
+        for (query, expected_query, expected_mode) in [
+            (
+                "visible: alpha beta",
+                "alpha beta",
+                VisibilitySearch::Visible,
+            ),
+            (
+                "alpha hidden: beta",
+                "alpha  beta",
+                VisibilitySearch::Hidden,
+            ),
+            ("alpha beta all:", "alpha beta", VisibilitySearch::All),
+            (
+                "(visible: alpha OR beta)",
+                "( alpha OR beta)",
+                VisibilitySearch::Visible,
+            ),
+        ] {
+            let (query, mode) = extract_visibility_search(query).unwrap();
+            assert_eq!(query, expected_query);
+            assert_eq!(mode, expected_mode);
+        }
+    }
+
+    #[test]
+    fn leaves_quoted_and_prefixed_modifier_text_alone() {
+        assert_eq!(
+            extract_visibility_search(r#""visible:" content:hidden:"#).unwrap(),
+            (
+                r#""visible:" content:hidden:"#.to_owned(),
+                VisibilitySearch::All
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_visibility_modifiers() {
+        assert!(extract_visibility_search("visible: needle hidden:").is_err());
+        assert_eq!(
+            extract_visibility_search("hidden: needle hidden:").unwrap(),
+            ("needle".to_owned(), VisibilitySearch::Hidden)
+        );
+    }
 
     #[test]
     fn splits_bare_multi_word_queries_for_highlighting() {
@@ -179,5 +316,10 @@ mod tests {
             extract_highlight_terms("toolresult:\"error text\""),
             ["error", "text"]
         );
+        assert_eq!(
+            extract_highlight_terms("visible: needle hidden:"),
+            ["needle"]
+        );
+        assert_eq!(extract_highlight_terms(r#""visible:""#), ["visible:"]);
     }
 }

@@ -857,6 +857,7 @@ fn search_query_help_text() -> &'static str {
 - Use user:TEXT for user-authored prompts and agent:TEXT for assistant prose, plaintext reasoning, and native session summaries/checkpoints. Agent search excludes system/developer and tool/MCP/skill traffic.\n\
 - Use toolcall:TEXT for readable tool names and inputs, and toolresult:TEXT for readable tool output. Opaque IDs, signatures, media, and internal metadata are excluded.\n\
 - Use dirs:PATH for directory-valued properties, files:PATH for file-valued properties, and paths:PATH for their union plus ambiguous file-or-directory properties. Path fields use a semantic allowlist, not filesystem existence or slash guessing.\n\
+- Use visible: to search only content shown by the current ^F Visibility toggles, hidden: for content they hide, or all: to ignore them. These mutually exclusive modifiers can appear anywhere; explicit fields such as toolcall:TEXT always search their field.\n\
 \n\
 ## Query syntax\n\
 - Bare words are token searches. Tantivy's default tokenizer handles case and punctuation normalization.\n\
@@ -1039,6 +1040,9 @@ mod tests {
         assert!(text.contains("agent:TEXT"));
         assert!(text.contains("toolcall:TEXT"));
         assert!(text.contains("toolresult:TEXT"));
+        assert!(text.contains("visible:"));
+        assert!(text.contains("hidden:"));
+        assert!(text.contains("all:"));
         assert!(text.contains("dirs:PATH"));
         assert!(text.contains("files:PATH"));
         assert!(text.contains("paths:PATH"));

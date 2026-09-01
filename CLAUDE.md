@@ -37,5 +37,6 @@ Binary name: `aics`
 
 ## Task Tracking
 
-The original plan is in devdocs/ULTRAPLAN.md
+The original plan is archived in devdocs/done/ULTRAPLAN.md. Remaining follow-ups
+are tracked in devdocs/todo/TODO-ULTRAPLAN.md.
 .md files for/by AI Agents should be read/written to devdocs/

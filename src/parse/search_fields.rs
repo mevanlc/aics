@@ -182,7 +182,7 @@ fn push_text(chunks: &mut Vec<String>, text: impl Into<String>) {
     chunks.push(trimmed.to_owned());
 }
 
-fn readable_tool_text(value: &Value) -> String {
+pub(crate) fn readable_tool_text(value: &Value) -> String {
     let mut chunks = Vec::new();
     collect_readable(value, None, &mut chunks);
     chunks.join("\n")

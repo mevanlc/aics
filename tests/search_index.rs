@@ -6,6 +6,7 @@ use aics::index::{
     SortMode,
 };
 use aics::scan::SessionRoots;
+use aics::settings::DisplayOptions;
 use anyhow::Result;
 use tempfile::TempDir;
 
@@ -395,6 +396,154 @@ fn semantic_text_and_path_fields_are_isolated_and_searchable() -> Result<()> {
 }
 
 #[test]
+fn visibility_modifiers_follow_display_toggles_and_explicit_fields_override_them() -> Result<()> {
+    let temp = TempDir::new()?;
+    write_semantic_field_codex_session(&temp)?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
+        trash: None,
+    };
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+
+    assert_eq!(
+        search_hits_with_options(
+            &engine,
+            "visible: AgentFacetNeedle",
+            DisplayOptions::SHOW_ALL,
+        )?
+        .len(),
+        1
+    );
+    assert!(search_hits_with_options(
+        &engine,
+        "AgentFacetNeedle hidden:",
+        DisplayOptions::SHOW_ALL,
+    )?
+    .is_empty());
+
+    let agent_hidden = DisplayOptions {
+        hide_agent_replies: true,
+        ..DisplayOptions::SHOW_ALL
+    };
+    assert!(
+        search_hits_with_options(&engine, "visible: AgentFacetNeedle", agent_hidden,)?.is_empty()
+    );
+    assert_eq!(
+        search_hits_with_options(&engine, "AgentFacetNeedle hidden:", agent_hidden)?.len(),
+        1
+    );
+    assert_eq!(
+        search_hits_with_options(&engine, "all: AgentFacetNeedle", agent_hidden)?.len(),
+        1
+    );
+    assert!(
+        search_hits_with_options(&engine, "visible: <agentfacet.*>", agent_hidden,)?.is_empty()
+    );
+    assert_eq!(
+        search_hits_with_options(&engine, "hidden: <agentfacet.*>", agent_hidden)?.len(),
+        1
+    );
+
+    for query in [
+        "visible: agent:AgentFacetNeedle",
+        "hidden: agent:AgentFacetNeedle",
+    ] {
+        assert_eq!(
+            search_hits_with_options(&engine, query, agent_hidden)?.len(),
+            1,
+            "explicit fields ignore visibility for {query:?}"
+        );
+    }
+    assert_eq!(
+        search_hits_with_options(
+            &engine,
+            "hidden: agent:AgentFacetNeedle",
+            DisplayOptions::SHOW_ALL,
+        )?
+        .len(),
+        1,
+        "an explicit field is searched even when no content is hidden"
+    );
+
+    let tool_results_hidden = DisplayOptions {
+        hide_tool_results: true,
+        ..DisplayOptions::SHOW_ALL
+    };
+    assert_eq!(
+        search_hits_with_options(&engine, "visible: ToolCallFacetNeedle", tool_results_hidden,)?
+            .len(),
+        1
+    );
+    assert!(search_hits_with_options(
+        &engine,
+        "visible: ToolResultFacetNeedle",
+        tool_results_hidden,
+    )?
+    .is_empty());
+    assert_eq!(
+        search_hits_with_options(
+            &engine,
+            "hidden: ToolResultFacetNeedle",
+            tool_results_hidden,
+        )?
+        .len(),
+        1
+    );
+    let tool_calls_hidden = DisplayOptions {
+        hide_tool_calls: true,
+        ..DisplayOptions::SHOW_ALL
+    };
+    assert!(search_hits_with_options(
+        &engine,
+        "visible: ToolResultFacetNeedle",
+        tool_calls_hidden,
+    )?
+    .is_empty());
+    assert_eq!(
+        search_hits_with_options(&engine, "hidden: ToolResultFacetNeedle", tool_calls_hidden,)?
+            .len(),
+        1,
+        "exec output is hidden along with its containing tool-call cell"
+    );
+
+    let generated_context_hidden = DisplayOptions {
+        hide_skill_text_injection: true,
+        hide_project_docs_autodump: true,
+        ..DisplayOptions::SHOW_ALL
+    };
+    for needle in ["GeneratedSkillNeedle", "ProjectDocsNeedle"] {
+        assert!(search_hits_with_options(
+            &engine,
+            &format!("visible: {needle}"),
+            generated_context_hidden,
+        )?
+        .is_empty());
+        assert_eq!(
+            search_hits_with_options(
+                &engine,
+                &format!("hidden: {needle}"),
+                generated_context_hidden,
+            )?
+            .len(),
+            1
+        );
+    }
+
+    let error = search_hits_with_options(
+        &engine,
+        "visible: AgentFacetNeedle hidden:",
+        DisplayOptions::SHOW_ALL,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("mutually exclusive"));
+    Ok(())
+}
+
+#[test]
 fn snippet_is_drawn_from_body_when_first_user_msg_does_not_match() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
@@ -581,12 +730,24 @@ fn write_semantic_field_codex_session(temp: &TempDir) -> Result<PathBuf> {
             "type": "response_item",
             "payload": {
                 "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "# AGENTS.md instructions for /fixture\n<INSTRUCTIONS>ProjectDocsNeedle</INSTRUCTIONS>"
+                }]
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-08-27T12:00:04Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": "AgentFacetNeedle"}]
             }
         }),
         serde_json::json!({
-            "timestamp": "2026-08-27T12:00:04Z",
+            "timestamp": "2026-08-27T12:00:05Z",
             "type": "response_item",
             "payload": {
                 "type": "reasoning",
@@ -594,7 +755,7 @@ fn write_semantic_field_codex_session(temp: &TempDir) -> Result<PathBuf> {
             }
         }),
         serde_json::json!({
-            "timestamp": "2026-08-27T12:00:05Z",
+            "timestamp": "2026-08-27T12:00:06Z",
             "type": "response_item",
             "payload": {
                 "type": "function_call",
@@ -608,7 +769,7 @@ fn write_semantic_field_codex_session(temp: &TempDir) -> Result<PathBuf> {
             }
         }),
         serde_json::json!({
-            "timestamp": "2026-08-27T12:00:06Z",
+            "timestamp": "2026-08-27T12:00:07Z",
             "type": "response_item",
             "payload": {
                 "type": "function_call_output",
@@ -620,7 +781,7 @@ fn write_semantic_field_codex_session(temp: &TempDir) -> Result<PathBuf> {
             }
         }),
         serde_json::json!({
-            "timestamp": "2026-08-27T12:00:07Z",
+            "timestamp": "2026-08-27T12:00:08Z",
             "type": "event_msg",
             "payload": {
                 "type": "patch_apply_end",
@@ -647,6 +808,23 @@ fn search_hits(engine: &SearchEngine, query: &str) -> Result<Vec<SearchHit>> {
         sort: SortMode::Relevance,
         filters: SearchFilters::default(),
     })
+}
+
+fn search_hits_with_options(
+    engine: &SearchEngine,
+    query: &str,
+    display_options: DisplayOptions,
+) -> Result<Vec<SearchHit>> {
+    engine.search_with_display_options(
+        &SearchRequest {
+            query: query.to_owned(),
+            scope: Scope::Global,
+            limit: 10,
+            sort: SortMode::Relevance,
+            filters: SearchFilters::default(),
+        },
+        display_options,
+    )
 }
 
 fn fixture_path(relative: &str) -> PathBuf {

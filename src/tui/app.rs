@@ -370,6 +370,7 @@ struct SearchWorker {
 struct SearchCommand {
     request_id: u64,
     request: SearchRequest,
+    display_options: DisplayOptions,
 }
 
 #[derive(Debug)]
@@ -1710,6 +1711,7 @@ impl App {
                     sort: self.sort,
                     filters: self.filters.clone(),
                 },
+                display_options: self.display_options,
             })
             .map_err(|_| anyhow::anyhow!("search worker exited unexpectedly"))?;
 
@@ -3488,7 +3490,9 @@ fn search_worker_loop(
             command.request.sort,
             command.request.limit
         );
-        let result = match search_engine.search(&command.request) {
+        let result = match search_engine
+            .search_with_display_options(&command.request, command.display_options)
+        {
             Ok(results) => {
                 debug!(
                     "search_worker_loop completed request id={} results={} first_result={}",

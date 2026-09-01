@@ -16,9 +16,11 @@ use tantivy::{Index, TantivyDocument, TantivyError, Term};
 use crate::index::reader::SearchEngine;
 use crate::index::schema::IndexSchema;
 use crate::live::LiveSessionTracker;
+use crate::parse::search_fields::readable_tool_text;
 use crate::parse::{
-    parse_codex_session_meta_lineage_file, parse_scanned_session_file, Agent, DerivationType,
-    MessageRole, Session, SessionInfo, SessionLineage,
+    is_project_docs_autodump, is_skill_text_injection, parse_codex_session_meta_lineage_file,
+    parse_scanned_session_file, Agent, DerivationType, MessageRole, Session, SessionCell,
+    SessionInfo, SessionLineage,
 };
 use crate::scan::{
     default_session_roots, scan_session_files_with_progress, ResolvedPaths, SessionFile,
@@ -598,6 +600,32 @@ fn add_session_document(
     add_path_values(&mut document, fields.dirs, &session.search_fields.dirs);
     add_path_values(&mut document, fields.files, &session.search_fields.files);
     add_path_values(&mut document, fields.paths, &session.search_fields.paths);
+    let visibility = visibility_content(session);
+    add_joined_text(&mut document, fields.vis_always, &visibility.always);
+    add_joined_text(&mut document, fields.vis_user, &visibility.user);
+    add_joined_text(&mut document, fields.vis_agent, &visibility.agent);
+    add_joined_text(&mut document, fields.vis_tool_call, &visibility.tool_call);
+    add_joined_text(
+        &mut document,
+        fields.vis_tool_result,
+        &visibility.tool_result,
+    );
+    add_joined_text(
+        &mut document,
+        fields.vis_tool_call_result,
+        &visibility.tool_call_result,
+    );
+    add_joined_text(
+        &mut document,
+        fields.vis_project_docs,
+        &visibility.project_docs,
+    );
+    add_joined_text(
+        &mut document,
+        fields.vis_user_project_docs,
+        &visibility.user_project_docs,
+    );
+    add_joined_text(&mut document, fields.vis_user_skill, &visibility.user_skill);
     if let Some(cwd) = session.cwd.as_deref() {
         for term in working_dir_search_terms(cwd) {
             document.add_text(fields.working_dir, term);
@@ -648,6 +676,159 @@ fn searchable_content(session: &Session) -> String {
     chunks.join("\n\n")
 }
 
+#[derive(Debug, Default)]
+struct VisibilityContent {
+    always: Vec<String>,
+    user: Vec<String>,
+    agent: Vec<String>,
+    tool_call: Vec<String>,
+    tool_result: Vec<String>,
+    /// Output embedded in an exec or patch cell is visible only when both tool
+    /// calls and tool results are visible.
+    tool_call_result: Vec<String>,
+    project_docs: Vec<String>,
+    user_project_docs: Vec<String>,
+    user_skill: Vec<String>,
+}
+
+impl VisibilityContent {
+    fn push_message(&mut self, role: MessageRole, content: &str) {
+        if is_project_docs_autodump(role, content) {
+            if role == MessageRole::User {
+                push_visibility_text(&mut self.user_project_docs, content);
+            } else {
+                push_visibility_text(&mut self.project_docs, content);
+            }
+            return;
+        }
+        if is_skill_text_injection(role, content) {
+            push_visibility_text(&mut self.user_skill, content);
+            return;
+        }
+
+        match role {
+            MessageRole::User => push_visibility_text(&mut self.user, content),
+            MessageRole::Assistant => push_visibility_text(&mut self.agent, content),
+            MessageRole::ToolCall => push_visibility_text(&mut self.tool_call, content),
+            MessageRole::ToolResult => push_visibility_text(&mut self.tool_result, content),
+            MessageRole::System | MessageRole::Summary => {
+                push_visibility_text(&mut self.always, content)
+            }
+        }
+    }
+}
+
+fn visibility_content(session: &Session) -> VisibilityContent {
+    let mut content = VisibilityContent::default();
+    if let Some(title) = session.custom_title.as_deref() {
+        push_visibility_text(&mut content.always, title);
+    }
+
+    if session.cells.is_empty() {
+        for message in &session.messages {
+            content.push_message(message.role, &message.content);
+        }
+        return content;
+    }
+
+    for cell in &session.cells {
+        match cell {
+            SessionCell::Message {
+                role,
+                content: message,
+                ..
+            } => content.push_message(*role, message),
+            SessionCell::Reasoning { header, body, .. } => {
+                if let Some(header) = header.as_deref() {
+                    push_visibility_text(&mut content.agent, header);
+                }
+                push_visibility_text(&mut content.agent, body);
+            }
+            SessionCell::ToolCall {
+                tool,
+                raw_name,
+                summary,
+                input,
+                ..
+            } => {
+                push_visibility_text(&mut content.tool_call, tool);
+                push_visibility_text(&mut content.tool_call, raw_name);
+                push_visibility_text(&mut content.tool_call, summary);
+                if !input.is_null() {
+                    push_visibility_text(&mut content.tool_call, &readable_tool_text(input));
+                }
+            }
+            SessionCell::ToolResult {
+                tool,
+                output,
+                call_summary,
+                ..
+            } => {
+                if let Some(tool) = tool.as_deref() {
+                    push_visibility_text(&mut content.tool_result, tool);
+                }
+                if let Some(summary) = call_summary.as_deref() {
+                    push_visibility_text(&mut content.tool_result, summary);
+                }
+                push_visibility_text(&mut content.tool_result, output);
+            }
+            SessionCell::Exec {
+                command,
+                cwd,
+                parsed_summary,
+                stdout,
+                stderr,
+                ..
+            } => {
+                push_visibility_text(&mut content.tool_call, &command.join(" "));
+                if let Some(cwd) = cwd.as_deref() {
+                    push_visibility_text(&mut content.tool_call, cwd);
+                }
+                if let Some(summary) = parsed_summary.as_deref() {
+                    push_visibility_text(&mut content.tool_call, summary);
+                }
+                push_visibility_text(&mut content.tool_call_result, stdout);
+                push_visibility_text(&mut content.tool_call_result, stderr);
+            }
+            SessionCell::Patch {
+                files,
+                stdout,
+                stderr,
+                ..
+            } => {
+                for file in files {
+                    push_visibility_text(&mut content.tool_call, &file.path);
+                    if let Some(body) = file.content.as_deref() {
+                        push_visibility_text(&mut content.tool_call, body);
+                    }
+                }
+                push_visibility_text(&mut content.tool_call_result, stdout);
+                push_visibility_text(&mut content.tool_call_result, stderr);
+            }
+            SessionCell::WebSearch { query, queries, .. } => {
+                push_visibility_text(&mut content.tool_call, query);
+                for query in queries {
+                    push_visibility_text(&mut content.tool_call, query);
+                }
+            }
+            SessionCell::Plan { items, .. } => {
+                for item in items {
+                    push_visibility_text(&mut content.always, &item.step);
+                }
+            }
+            SessionCell::SessionInfo(_) | SessionCell::Metrics(_) => {}
+        }
+    }
+    content
+}
+
+fn push_visibility_text(chunks: &mut Vec<String>, text: &str) {
+    let text = text.trim();
+    if !text.is_empty() && chunks.last().is_none_or(|last| last != text) {
+        chunks.push(text.to_owned());
+    }
+}
+
 fn path_search_terms(cwd: &str) -> Vec<String> {
     let normalized = cwd.replace('\\', "/");
     let normalized = normalized.trim_end_matches('/');
@@ -672,7 +853,7 @@ fn working_dir_search_terms(cwd: &str) -> Vec<String> {
 
 /// Bump when indexed/stored fields or searchable-content semantics change so old
 /// state files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 14;
+const INDEX_FORMAT_VERSION: u32 = 15;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {

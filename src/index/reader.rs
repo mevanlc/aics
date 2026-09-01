@@ -16,7 +16,11 @@ use crate::index::schema::IndexSchema;
 use crate::index::writer::{IndexPaths, StoredSession};
 use crate::live::LiveSessionTracker;
 use crate::parse::{strip_project_docs_autodump_preamble, Agent, DerivationType};
-use crate::search_query::{extract_highlight_terms, has_explicit_boolean_operators};
+use crate::search_query::{
+    extract_highlight_terms, extract_visibility_search, has_explicit_boolean_operators,
+    VisibilitySearch,
+};
+use crate::settings::DisplayOptions;
 
 #[derive(Debug, Clone)]
 pub enum Scope {
@@ -234,17 +238,27 @@ impl SearchEngine {
     }
 
     pub fn search(&self, request: &SearchRequest) -> Result<Vec<SearchHit>> {
+        self.search_with_display_options(request, DisplayOptions::SHOW_ALL)
+    }
+
+    pub fn search_with_display_options(
+        &self,
+        request: &SearchRequest,
+        display_options: DisplayOptions,
+    ) -> Result<Vec<SearchHit>> {
         // Keep long-lived readers in sync with in-process index mutations such as delete actions.
         self.reader
             .reload()
             .context("failed to reload tantivy reader")?;
+        let (query_text, visibility_search) =
+            extract_visibility_search(request.query.trim()).map_err(|message| anyhow!(message))?;
         let searcher = self.reader.searcher();
         if searcher.num_docs() == 0 {
             return Ok(Vec::new());
         }
 
         let limit = request.limit.max(1);
-        let query_text = request.query.trim();
+        let query_text = query_text.trim();
         let live_ids = self.live_sessions.live_session_ids();
         let mut session_cache = HashMap::new();
 
@@ -258,14 +272,17 @@ impl SearchEngine {
                 request,
                 limit,
                 query_text,
+                visibility_search,
+                display_options,
                 &live_ids,
                 &mut session_cache,
             );
         }
 
-        let query_parser = self.default_query_parser();
+        let (query_parser, default_snippet_fields) =
+            self.query_parser(visibility_search, display_options);
         let (base_query, has_non_bare_syntax, snippet_fields) =
-            parse_query_with_aliases(&query_parser, query_text);
+            parse_query_with_aliases(&query_parser, query_text, &default_snippet_fields);
         let final_query =
             build_phrase_boosted_query(&query_parser, query_text, base_query, has_non_bare_syntax);
         let snippet_generators =
@@ -368,18 +385,22 @@ impl SearchEngine {
         Ok(hits)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn search_by_time(
         &self,
         searcher: &tantivy::Searcher,
         request: &SearchRequest,
         limit: usize,
         query_text: &str,
+        visibility_search: VisibilitySearch,
+        display_options: DisplayOptions,
         live_ids: &HashSet<String>,
         session_cache: &mut HashMap<DocAddress, StoredSession>,
     ) -> Result<Vec<SearchHit>> {
-        let query_parser = self.default_query_parser();
+        let (query_parser, default_snippet_fields) =
+            self.query_parser(visibility_search, display_options);
         let (base_query, has_non_bare_syntax, snippet_fields) =
-            parse_query_with_aliases(&query_parser, query_text);
+            parse_query_with_aliases(&query_parser, query_text, &default_snippet_fields);
         let final_query =
             build_phrase_boosted_query(&query_parser, query_text, base_query, has_non_bare_syntax);
         let snippet_generators =
@@ -432,15 +453,80 @@ impl SearchEngine {
         Ok(hits)
     }
 
-    fn default_query_parser(&self) -> QueryParser {
-        let mut query_parser = QueryParser::for_index(&self.index, vec![self.fields.content]);
+    fn query_parser(
+        &self,
+        visibility_search: VisibilitySearch,
+        display_options: DisplayOptions,
+    ) -> (QueryParser, Vec<String>) {
+        let fields = self.default_search_fields(visibility_search, display_options);
+        let default_fields = fields.iter().map(|(field, _)| *field).collect();
+        let snippet_fields = fields.iter().map(|(_, name)| (*name).to_owned()).collect();
+        let mut query_parser = QueryParser::for_index(&self.index, default_fields);
         query_parser.set_conjunction_by_default();
         query_parser.set_field_fuzzy(self.fields.working_dir, true, 0, false);
         for field in [self.fields.dirs, self.fields.files, self.fields.paths] {
             query_parser.set_field_fuzzy(field, true, 0, false);
         }
         query_parser.allow_regexes();
-        query_parser
+        (query_parser, snippet_fields)
+    }
+
+    fn default_search_fields(
+        &self,
+        visibility_search: VisibilitySearch,
+        display_options: DisplayOptions,
+    ) -> Vec<(tantivy::schema::Field, &'static str)> {
+        if visibility_search == VisibilitySearch::All {
+            return vec![(self.fields.content, "content")];
+        }
+
+        const USER: u8 = 1 << 0;
+        const AGENT: u8 = 1 << 1;
+        const TOOL_CALL: u8 = 1 << 2;
+        const TOOL_RESULT: u8 = 1 << 3;
+        const PROJECT_DOCS: u8 = 1 << 4;
+        const SKILL: u8 = 1 << 5;
+
+        let hidden_bit = |hidden: bool, bit| if hidden { bit } else { 0 };
+        let hidden = hidden_bit(display_options.hide_user_messages, USER)
+            | hidden_bit(display_options.hide_agent_replies, AGENT)
+            | hidden_bit(display_options.hide_tool_calls, TOOL_CALL)
+            | hidden_bit(display_options.hide_tool_results, TOOL_RESULT)
+            | hidden_bit(display_options.hide_project_docs_autodump, PROJECT_DOCS)
+            | hidden_bit(display_options.hide_skill_text_injection, SKILL);
+        let candidates = [
+            (self.fields.vis_always, "_vis_always", 0),
+            (self.fields.vis_user, "_vis_user", USER),
+            (self.fields.vis_agent, "_vis_agent", AGENT),
+            (self.fields.vis_tool_call, "_vis_toolcall", TOOL_CALL),
+            (self.fields.vis_tool_result, "_vis_toolresult", TOOL_RESULT),
+            (
+                self.fields.vis_tool_call_result,
+                "_vis_toolcall_result",
+                TOOL_CALL | TOOL_RESULT,
+            ),
+            (
+                self.fields.vis_project_docs,
+                "_vis_projectdocs",
+                PROJECT_DOCS,
+            ),
+            (
+                self.fields.vis_user_project_docs,
+                "_vis_user_projectdocs",
+                USER | PROJECT_DOCS,
+            ),
+            (self.fields.vis_user_skill, "_vis_user_skill", USER | SKILL),
+        ];
+
+        candidates
+            .into_iter()
+            .filter(|(_, _, required_visible)| match visibility_search {
+                VisibilitySearch::Visible => required_visible & hidden == 0,
+                VisibilitySearch::Hidden => required_visible & hidden != 0,
+                VisibilitySearch::All => unreachable!(),
+            })
+            .map(|(field, name, _)| (field, name))
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -555,6 +641,15 @@ impl SearchEngine {
             "dirs" => Some(self.fields.dirs),
             "files" => Some(self.fields.files),
             "paths" => Some(self.fields.paths),
+            "_vis_always" => Some(self.fields.vis_always),
+            "_vis_user" => Some(self.fields.vis_user),
+            "_vis_agent" => Some(self.fields.vis_agent),
+            "_vis_toolcall" => Some(self.fields.vis_tool_call),
+            "_vis_toolresult" => Some(self.fields.vis_tool_result),
+            "_vis_toolcall_result" => Some(self.fields.vis_tool_call_result),
+            "_vis_projectdocs" => Some(self.fields.vis_project_docs),
+            "_vis_user_projectdocs" => Some(self.fields.vis_user_project_docs),
+            "_vis_user_skill" => Some(self.fields.vis_user_skill),
             _ => None,
         }
     }
@@ -605,50 +700,87 @@ fn build_phrase_boosted_query(
 fn parse_query_with_aliases(
     query_parser: &QueryParser,
     query_text: &str,
+    default_snippet_fields: &[String],
 ) -> (Box<dyn Query>, bool, Vec<String>) {
     let translated = translate_angle_regexes(query_text).unwrap_or_else(|_| query_text.to_owned());
     let (mut ast, _) = tantivy::query_grammar::parse_query_lenient(&translated);
     let mut snippet_fields = Vec::new();
-    let has_non_bare_syntax = prepare_query_ast(&mut ast, &mut snippet_fields);
+    let has_non_bare_syntax =
+        prepare_query_ast(&mut ast, &mut snippet_fields, default_snippet_fields);
     let (query, _) = query_parser.build_query_from_user_input_ast_lenient(ast);
     (query, has_non_bare_syntax, snippet_fields)
 }
 
-fn prepare_query_ast(ast: &mut UserInputAst, snippet_fields: &mut Vec<String>) -> bool {
+fn prepare_query_ast(
+    ast: &mut UserInputAst,
+    snippet_fields: &mut Vec<String>,
+    default_snippet_fields: &[String],
+) -> bool {
+    if let UserInputAst::Leaf(leaf) = ast {
+        if let UserInputLeaf::Regex {
+            field: None,
+            pattern,
+        } = leaf.as_ref()
+        {
+            let pattern = pattern.clone();
+            *ast = if default_snippet_fields.is_empty() {
+                UserInputAst::empty_query()
+            } else {
+                UserInputAst::or(
+                    default_snippet_fields
+                        .iter()
+                        .map(|field| {
+                            UserInputAst::Leaf(Box::new(UserInputLeaf::Regex {
+                                field: Some(field.clone()),
+                                pattern: pattern.clone(),
+                            }))
+                        })
+                        .collect(),
+                )
+            };
+            record_snippet_field(snippet_fields, None, default_snippet_fields);
+            return true;
+        }
+    }
+
     match ast {
         UserInputAst::Clause(clauses) => {
             let mut has_non_bare_syntax = false;
             for (_, child) in clauses {
-                if prepare_query_ast(child, snippet_fields) {
+                if prepare_query_ast(child, snippet_fields, default_snippet_fields) {
                     has_non_bare_syntax = true;
                 }
             }
             has_non_bare_syntax
         }
-        UserInputAst::Boost(child, _) => prepare_query_ast(child, snippet_fields),
+        UserInputAst::Boost(child, _) => {
+            prepare_query_ast(child, snippet_fields, default_snippet_fields)
+        }
         UserInputAst::Leaf(leaf) => match leaf.as_mut() {
             UserInputLeaf::Literal(literal) => {
                 let explicit = rewrite_optional_field(&mut literal.field_name);
-                record_snippet_field(snippet_fields, literal.field_name.as_deref());
+                record_snippet_field(
+                    snippet_fields,
+                    literal.field_name.as_deref(),
+                    default_snippet_fields,
+                );
                 explicit
             }
             UserInputLeaf::Range { field, .. } | UserInputLeaf::Set { field, .. } => {
                 rewrite_optional_field(field);
-                record_snippet_field(snippet_fields, field.as_deref());
+                record_snippet_field(snippet_fields, field.as_deref(), default_snippet_fields);
                 true
             }
             UserInputLeaf::Regex { field, .. } => {
-                if field.is_none() {
-                    *field = Some("content".to_owned());
-                } else {
+                if field.is_some() {
                     rewrite_optional_field(field);
                 }
-                record_snippet_field(snippet_fields, field.as_deref());
+                record_snippet_field(snippet_fields, field.as_deref(), default_snippet_fields);
                 true
             }
             UserInputLeaf::Exists { field } => {
                 rewrite_field(field);
-                record_snippet_field(snippet_fields, Some(field));
+                record_snippet_field(snippet_fields, Some(field), default_snippet_fields);
                 true
             }
             UserInputLeaf::All => true,
@@ -656,10 +788,17 @@ fn prepare_query_ast(ast: &mut UserInputAst, snippet_fields: &mut Vec<String>) -
     }
 }
 
-fn record_snippet_field(fields: &mut Vec<String>, field: Option<&str>) {
-    let field = field.unwrap_or("content");
-    if !fields.iter().any(|existing| existing == field) {
-        fields.push(field.to_owned());
+fn record_snippet_field(fields: &mut Vec<String>, field: Option<&str>, default_fields: &[String]) {
+    if let Some(field) = field {
+        if !fields.iter().any(|existing| existing == field) {
+            fields.push(field.to_owned());
+        }
+    } else {
+        for field in default_fields {
+            if !fields.contains(field) {
+                fields.push(field.clone());
+            }
+        }
     }
 }
 

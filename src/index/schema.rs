@@ -14,6 +14,15 @@ const TOOL_RESULT_FIELD: &str = "toolresult";
 const DIRS_FIELD: &str = "dirs";
 const FILES_FIELD: &str = "files";
 const PATHS_FIELD: &str = "paths";
+const VIS_ALWAYS_FIELD: &str = "_vis_always";
+const VIS_USER_FIELD: &str = "_vis_user";
+const VIS_AGENT_FIELD: &str = "_vis_agent";
+const VIS_TOOL_CALL_FIELD: &str = "_vis_toolcall";
+const VIS_TOOL_RESULT_FIELD: &str = "_vis_toolresult";
+const VIS_TOOL_CALL_RESULT_FIELD: &str = "_vis_toolcall_result";
+const VIS_PROJECT_DOCS_FIELD: &str = "_vis_projectdocs";
+const VIS_USER_PROJECT_DOCS_FIELD: &str = "_vis_user_projectdocs";
+const VIS_USER_SKILL_FIELD: &str = "_vis_user_skill";
 const WORKING_DIR_FIELD: &str = "working_dir";
 const WORKING_DIR_TOKENIZER: &str = "working_dir";
 const FILE_PATH_FIELD: &str = "file_path";
@@ -31,6 +40,15 @@ pub struct IndexSchema {
     pub dirs: Field,
     pub files: Field,
     pub paths: Field,
+    pub vis_always: Field,
+    pub vis_user: Field,
+    pub vis_agent: Field,
+    pub vis_tool_call: Field,
+    pub vis_tool_result: Field,
+    pub vis_tool_call_result: Field,
+    pub vis_project_docs: Field,
+    pub vis_user_project_docs: Field,
+    pub vis_user_skill: Field,
     pub working_dir: Field,
     pub file_path: Field,
     pub modified_ts: Field,
@@ -67,10 +85,23 @@ impl IndexSchema {
         let user = builder.add_text_field(USER_FIELD, content_options.clone());
         let agent = builder.add_text_field(AGENT_FIELD, content_options.clone());
         let tool_call = builder.add_text_field(TOOL_CALL_FIELD, content_options.clone());
-        let tool_result = builder.add_text_field(TOOL_RESULT_FIELD, content_options);
+        let tool_result = builder.add_text_field(TOOL_RESULT_FIELD, content_options.clone());
         let dirs = builder.add_text_field(DIRS_FIELD, path_options.clone());
         let files = builder.add_text_field(FILES_FIELD, path_options.clone());
         let paths = builder.add_text_field(PATHS_FIELD, path_options);
+        let vis_always = builder.add_text_field(VIS_ALWAYS_FIELD, content_options.clone());
+        let vis_user = builder.add_text_field(VIS_USER_FIELD, content_options.clone());
+        let vis_agent = builder.add_text_field(VIS_AGENT_FIELD, content_options.clone());
+        let vis_tool_call = builder.add_text_field(VIS_TOOL_CALL_FIELD, content_options.clone());
+        let vis_tool_result =
+            builder.add_text_field(VIS_TOOL_RESULT_FIELD, content_options.clone());
+        let vis_tool_call_result =
+            builder.add_text_field(VIS_TOOL_CALL_RESULT_FIELD, content_options.clone());
+        let vis_project_docs =
+            builder.add_text_field(VIS_PROJECT_DOCS_FIELD, content_options.clone());
+        let vis_user_project_docs =
+            builder.add_text_field(VIS_USER_PROJECT_DOCS_FIELD, content_options.clone());
+        let vis_user_skill = builder.add_text_field(VIS_USER_SKILL_FIELD, content_options);
         let working_dir = builder.add_text_field(WORKING_DIR_FIELD, working_dir_options);
         let file_path = builder.add_text_field(FILE_PATH_FIELD, STRING | STORED);
         let modified_ts = builder.add_u64_field(MODIFIED_TS_FIELD, numeric_options);
@@ -86,6 +117,15 @@ impl IndexSchema {
             dirs,
             files,
             paths,
+            vis_always,
+            vis_user,
+            vis_agent,
+            vis_tool_call,
+            vis_tool_result,
+            vis_tool_call_result,
+            vis_project_docs,
+            vis_user_project_docs,
+            vis_user_skill,
             working_dir,
             file_path,
             modified_ts,
@@ -124,6 +164,33 @@ impl IndexSchema {
             paths: schema
                 .get_field(PATHS_FIELD)
                 .context("missing paths field")?,
+            vis_always: schema
+                .get_field(VIS_ALWAYS_FIELD)
+                .context("missing visibility field")?,
+            vis_user: schema
+                .get_field(VIS_USER_FIELD)
+                .context("missing visibility field")?,
+            vis_agent: schema
+                .get_field(VIS_AGENT_FIELD)
+                .context("missing visibility field")?,
+            vis_tool_call: schema
+                .get_field(VIS_TOOL_CALL_FIELD)
+                .context("missing visibility field")?,
+            vis_tool_result: schema
+                .get_field(VIS_TOOL_RESULT_FIELD)
+                .context("missing visibility field")?,
+            vis_tool_call_result: schema
+                .get_field(VIS_TOOL_CALL_RESULT_FIELD)
+                .context("missing visibility field")?,
+            vis_project_docs: schema
+                .get_field(VIS_PROJECT_DOCS_FIELD)
+                .context("missing visibility field")?,
+            vis_user_project_docs: schema
+                .get_field(VIS_USER_PROJECT_DOCS_FIELD)
+                .context("missing visibility field")?,
+            vis_user_skill: schema
+                .get_field(VIS_USER_SKILL_FIELD)
+                .context("missing visibility field")?,
             working_dir: schema
                 .get_field(WORKING_DIR_FIELD)
                 .context("missing working_dir field")?,
