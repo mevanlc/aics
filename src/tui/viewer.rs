@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -48,6 +48,7 @@ pub struct ViewerState {
     search: Input,
     active_match: Option<usize>,
     render_cache: Option<ViewerRenderCache>,
+    filter_scroll_snapshot: Option<FilterScrollSnapshot>,
     selection_path: Option<PathBuf>,
     selected_blocks: BTreeSet<SessionBlockId>,
     selection_anchor: Option<SessionBlockId>,
@@ -73,6 +74,36 @@ struct ViewerRenderCache {
 struct ViewerBlock {
     source: DisplayBlock,
     rows: Range<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct FilterScrollSnapshot {
+    path: PathBuf,
+    top_row: usize,
+    blocks: Vec<(SessionBlockId, Range<usize>)>,
+}
+
+impl FilterScrollSnapshot {
+    fn restored_scroll(&self, blocks: &[ViewerBlock]) -> usize {
+        let new_rows: BTreeMap<_, _> = blocks
+            .iter()
+            .map(|block| (block.source.id, block.rows.start))
+            .collect();
+        self.blocks
+            .iter()
+            .filter_map(|(id, rows)| {
+                let new_row = *new_rows.get(id)?;
+                // Distance to the nearest occupied row, not just the block's heading.
+                let distance = rows
+                    .start
+                    .saturating_sub(self.top_row)
+                    .max(self.top_row.saturating_sub(rows.end.saturating_sub(1)));
+                // At equal distance prefer the block following the old viewport top.
+                Some(((distance, rows.end <= self.top_row), new_row))
+            })
+            .min_by_key(|(rank, _)| *rank)
+            .map_or(0, |(_, row)| row)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +159,7 @@ impl ViewerState {
             search: Input::default().with_value(query.to_owned()),
             active_match: None,
             render_cache: None,
+            filter_scroll_snapshot: None,
             selection_path: None,
             selected_blocks: BTreeSet::new(),
             selection_anchor: None,
@@ -421,13 +453,37 @@ impl ViewerState {
         theme_name: ThemeName,
         display_options: DisplayOptions,
     ) -> usize {
-        let body_area = split_viewer(area)[0];
         let cache = self.render_cache(area, session, summary, theme, theme_name, display_options);
-        let viewport_height = body_area
-            .height
-            .saturating_sub(2)
-            .saturating_sub(STICKY_HEADER_HEIGHT) as usize;
-        cache.total_rows.saturating_sub(viewport_height)
+        cache.total_rows.saturating_sub(viewport_height(area))
+    }
+
+    /// Capture the old layout before committing display filters. The next layout
+    /// consumes this snapshot independently of the block-selection anchor.
+    pub(crate) fn capture_filter_scroll(
+        &mut self,
+        area: Rect,
+        session: &Session,
+        summary: Option<&SummarySidecar>,
+        theme: &Theme,
+        theme_name: ThemeName,
+        display_options: DisplayOptions,
+    ) {
+        self.render_cache(area, session, summary, theme, theme_name, display_options);
+        let cache = self
+            .render_cache
+            .as_ref()
+            .expect("viewer cache should exist");
+        self.filter_scroll_snapshot = Some(FilterScrollSnapshot {
+            path: cache.path.clone(),
+            top_row: self
+                .scroll
+                .min(cache.total_rows.saturating_sub(viewport_height(area))),
+            blocks: cache
+                .blocks
+                .iter()
+                .map(|block| (block.source.id, block.rows.clone()))
+                .collect(),
+        });
     }
 
     pub fn body_area(area: Rect) -> Rect {
@@ -719,9 +775,18 @@ impl ViewerState {
             profile::event("viewer.cache.hit");
         }
 
-        self.render_cache
+        let cache = self
+            .render_cache
             .as_ref()
-            .expect("viewer cache should exist")
+            .expect("viewer cache should exist");
+        if let Some(snapshot) = self.filter_scroll_snapshot.take() {
+            if snapshot.path == cache.path {
+                self.scroll = snapshot
+                    .restored_scroll(&cache.blocks)
+                    .min(cache.total_rows.saturating_sub(viewport_height(area)));
+            }
+        }
+        cache
     }
 
     fn render_options(&self, display_options: DisplayOptions) -> SessionRenderOptions {
@@ -733,6 +798,13 @@ fn split_viewer(area: Rect) -> [Rect; 2] {
     let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(VIEWER_FOOTER_HEIGHT)])
         .split(area);
     [chunks[0], chunks[1]]
+}
+
+fn viewport_height(area: Rect) -> usize {
+    ViewerState::body_area(area)
+        .height
+        .saturating_sub(2)
+        .saturating_sub(STICKY_HEADER_HEIGHT) as usize
 }
 
 fn render_viewer_document(
@@ -1305,6 +1377,7 @@ mod tests {
     use ratatui::text::{Line, Span, Text};
     use tui_input::Input;
 
+    use crate::export::SessionBlockId;
     use crate::parse::{Agent, DerivationType, MessageRole, Session, SessionCell, SessionMessage};
     use crate::settings::{DisplayOptions, ThemeName};
     use crate::summary::{Fingerprint, SummarizeBackend, SummarySidecar};
@@ -1349,6 +1422,275 @@ mod tests {
                     .then_some(i)
             })
             .collect()
+    }
+
+    fn refresh_viewer(
+        viewer: &mut ViewerState,
+        session: &Session,
+        area: Rect,
+        options: DisplayOptions,
+    ) {
+        viewer.render_cache(
+            area,
+            session,
+            None,
+            &Theme::default(),
+            ThemeName::default(),
+            options,
+        );
+    }
+
+    fn capture_scroll(
+        viewer: &mut ViewerState,
+        session: &Session,
+        area: Rect,
+        options: DisplayOptions,
+    ) {
+        viewer.capture_filter_scroll(
+            area,
+            session,
+            None,
+            &Theme::default(),
+            ThemeName::default(),
+            options,
+        );
+    }
+
+    fn block_rows(viewer: &ViewerState, id: SessionBlockId) -> std::ops::Range<usize> {
+        viewer
+            .render_cache
+            .as_ref()
+            .unwrap()
+            .blocks
+            .iter()
+            .find(|block| block.source.id == id)
+            .unwrap()
+            .rows
+            .clone()
+    }
+
+    #[test]
+    fn filter_scroll_uses_old_ranges_and_prefers_following_block_on_ties() {
+        let mut snapshot = super::FilterScrollSnapshot {
+            path: PathBuf::from("session.jsonl"),
+            top_row: 0,
+            blocks: vec![
+                (SessionBlockId::Message(0), 0..11),
+                (SessionBlockId::Message(1), 12..29),
+                (SessionBlockId::Message(2), 30..41),
+            ],
+        };
+        let new_block = |index, rows| super::ViewerBlock {
+            source: crate::tui::preview::DisplayBlock {
+                id: SessionBlockId::Message(index),
+                lines: 0..1,
+            },
+            rows,
+        };
+        // The middle block is hidden; a newly revealed block has no old position.
+        let blocks = [
+            new_block(9, 0..3),
+            new_block(0, 4..15),
+            new_block(2, 16..27),
+        ];
+        for (top, expected) in [(5, 4), (11, 4), (18, 4), (20, 16), (25, 16), (29, 16)] {
+            snapshot.top_row = top;
+            assert_eq!(snapshot.restored_scroll(&blocks), expected, "old top {top}");
+        }
+        // A surviving block containing the top wins even when its heading is far away.
+        snapshot.top_row = 28;
+        assert_eq!(
+            snapshot.restored_scroll(&[new_block(1, 0..17), new_block(2, 18..29)]),
+            0
+        );
+        assert_eq!(snapshot.restored_scroll(&[new_block(9, 0..3)]), 0);
+        assert_eq!(snapshot.restored_scroll(&[]), 0);
+    }
+
+    #[test]
+    fn filter_scroll_tracks_wrapped_block_when_earlier_content_is_hidden_or_revealed() {
+        let mut session = multi_turn_session();
+        session.messages[4].content = "Reading 界 👩‍💻 e\u{301} location. ".repeat(80);
+        let area = Rect::new(0, 0, 32, 16);
+        let mut viewer = selection_viewer(&session, area);
+        let target = SessionBlockId::Message(4);
+        let original = block_rows(&viewer, target).start;
+        viewer.scroll = original + 6;
+        viewer.select_block(Some(0), KeyModifiers::NONE);
+        capture_scroll(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        let filtered = DisplayOptions {
+            hide_agent_replies: true,
+            ..DisplayOptions::SHOW_ALL
+        };
+        refresh_viewer(&mut viewer, &session, area, filtered);
+        let restored = block_rows(&viewer, target).start;
+        assert!(restored < original);
+        assert_eq!(viewer.scroll, restored);
+        assert_eq!(viewer.selection_anchor, Some(SessionBlockId::Message(0)));
+        assert!(viewer.filter_scroll_snapshot.is_none());
+
+        // Hit testing immediately uses the restored layout and viewport.
+        viewer.handle_mouse(
+            area,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: 1 + super::STICKY_HEADER_HEIGHT,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(viewer.selected_blocks, [target].into());
+        viewer.scroll += 2;
+        refresh_viewer(&mut viewer, &session, area, filtered);
+        assert_eq!(viewer.scroll, restored + 2);
+
+        capture_scroll(&mut viewer, &session, area, filtered);
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        assert_eq!(viewer.scroll, original);
+        viewer.scroll += 3;
+        viewer.handle_key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            area,
+            Some(&session),
+            None,
+            &Theme::default(),
+            ThemeName::default(),
+            DisplayOptions::SHOW_ALL,
+        );
+        refresh_viewer(
+            &mut viewer,
+            &session,
+            Rect::new(0, 0, 48, 16),
+            DisplayOptions::SHOW_ALL,
+        );
+        assert_eq!(
+            viewer.scroll,
+            original + 3,
+            "search and resize must not restore again"
+        );
+    }
+
+    #[test]
+    fn filter_scroll_clamps_bottom_and_resets_when_no_old_blocks_survive() {
+        let mut session = multi_turn_session();
+        session.messages[4].content = "long user message\n\n".repeat(30);
+        session.messages[5].content = "long reply\n\n".repeat(30);
+        let area = Rect::new(0, 0, 60, 20);
+        let mut viewer = selection_viewer(&session, area);
+        viewer.scroll = usize::MAX;
+        capture_scroll(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        let snapshot = viewer.filter_scroll_snapshot.as_ref().unwrap();
+        let cache = viewer.render_cache.as_ref().unwrap();
+        assert_eq!(
+            snapshot.top_row,
+            cache.total_rows - super::viewport_height(area)
+        );
+        let users_only = DisplayOptions {
+            hide_agent_replies: true,
+            hide_tool_calls: true,
+            hide_tool_results: true,
+            ..DisplayOptions::SHOW_ALL
+        };
+        refresh_viewer(&mut viewer, &session, area, users_only);
+        assert_eq!(
+            viewer.scroll,
+            block_rows(&viewer, SessionBlockId::Message(4)).start
+        );
+
+        // Replacing all previously visible blocks starts at the new document's beginning.
+        capture_scroll(&mut viewer, &session, area, users_only);
+        let replies_only = DisplayOptions {
+            hide_user_messages: true,
+            hide_agent_replies: false,
+            ..users_only
+        };
+        refresh_viewer(&mut viewer, &session, area, replies_only);
+        assert_eq!(viewer.scroll, 0);
+        capture_scroll(&mut viewer, &session, area, replies_only);
+        refresh_viewer(
+            &mut viewer,
+            &session,
+            area,
+            DisplayOptions {
+                hide_agent_replies: true,
+                ..replies_only
+            },
+        );
+        assert_eq!(viewer.scroll, 0);
+        assert!(viewer.render_cache.as_ref().unwrap().blocks.is_empty());
+
+        // A short final survivor cannot be aligned above the normal bottom limit.
+        session.messages[5].content = "short final reply".into();
+        let mut viewer = selection_viewer(&session, area);
+        viewer.scroll = usize::MAX;
+        capture_scroll(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        let filtered = DisplayOptions {
+            hide_user_messages: true,
+            ..DisplayOptions::SHOW_ALL
+        };
+        refresh_viewer(&mut viewer, &session, area, filtered);
+        let cache = viewer.render_cache.as_ref().unwrap();
+        assert_eq!(
+            viewer.scroll,
+            cache
+                .total_rows
+                .saturating_sub(super::viewport_height(area))
+        );
+    }
+
+    #[test]
+    fn filter_scroll_returns_to_exec_start_when_output_shrinks() {
+        let mut session = sample_session();
+        session.cells = vec![
+            SessionCell::Exec {
+                command: vec!["echo".into(), "value".into()],
+                cwd: None,
+                parsed_summary: None,
+                stdout: "a line of command output\n".repeat(40),
+                stderr: String::new(),
+                exit_code: Some(0),
+                duration_ms: None,
+                status: crate::parse::ExecStatus::Completed,
+                timestamp: None,
+            },
+            SessionCell::Message {
+                role: MessageRole::User,
+                content: "following message\n\n".repeat(30),
+                timestamp: None,
+            },
+        ];
+        let area = Rect::new(0, 0, 50, 20);
+        let mut viewer = selection_viewer(&session, area);
+        let old_range = block_rows(&viewer, SessionBlockId::Cell(0));
+        viewer.scroll = old_range.start + 20;
+        capture_scroll(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        refresh_viewer(
+            &mut viewer,
+            &session,
+            area,
+            DisplayOptions {
+                hide_tool_results: true,
+                ..DisplayOptions::SHOW_ALL
+            },
+        );
+        let new_range = block_rows(&viewer, SessionBlockId::Cell(0));
+        assert!(new_range.len() < old_range.len());
+        assert_eq!(viewer.scroll, new_range.start);
+    }
+
+    #[test]
+    fn filter_scroll_snapshot_is_discarded_when_session_changes() {
+        let session = multi_turn_session();
+        let area = Rect::new(0, 0, 50, 16);
+        let mut viewer = selection_viewer(&session, area);
+        viewer.scroll = 8;
+        capture_scroll(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        let mut other = session.clone();
+        other.file_path = PathBuf::from("another-session.jsonl");
+        viewer.scroll = 3;
+        refresh_viewer(&mut viewer, &other, area, DisplayOptions::SHOW_ALL);
+        assert_eq!(viewer.scroll, 3);
+        assert!(viewer.filter_scroll_snapshot.is_none());
     }
 
     #[test]

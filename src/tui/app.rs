@@ -2332,9 +2332,36 @@ impl App {
 
     /// Commit filter changes and restore the viewer that opened the modal.
     fn apply_filter_update(&mut self, update: FilterUpdate) -> Result<()> {
-        let changed = self.scope != update.scope
-            || self.filters != update.filters
-            || self.display_options != update.display_options;
+        let display_changed = self.display_options != update.display_options;
+        let changed =
+            self.scope != update.scope || self.filters != update.filters || display_changed;
+        if display_changed {
+            let theme = self.current_frame_theme();
+            let theme_name = self.current_frame_theme_name();
+            let hit = self.viewer_hit.clone();
+            let summary = hit.as_ref().and_then(|hit| {
+                self.summary_sidecar_for_path(
+                    hit.session.agent,
+                    &hit.session.file_path,
+                    &hit.session.session_id,
+                )
+            });
+            let session = hit
+                .as_ref()
+                .and_then(|hit| self.preview_cache.get(&hit.session.file_path))
+                .and_then(|session| session.as_ref());
+            if let (Overlay::Filters(_, Some(viewer)), Some(session)) = (&mut self.overlay, session)
+            {
+                viewer.capture_filter_scroll(
+                    self.last_frame_area,
+                    session,
+                    summary.as_ref(),
+                    &theme,
+                    theme_name,
+                    self.display_options,
+                );
+            }
+        }
         self.scope = update.scope;
         self.filters = update.filters;
         self.sort = update.sort;
@@ -2349,6 +2376,16 @@ impl App {
                     .as_ref()
                     .map(|hit| (self.next_search_id, hit.session.file_path.clone()));
             }
+        }
+        if display_changed {
+            // Resolve restoration before the next input event, even when several
+            // events are processed before the next frame is drawn.
+            let areas = layout::split(
+                self.last_frame_area,
+                self.preview_width_pct,
+                self.preview_visible,
+            );
+            self.clamp_scroll_state(areas);
         }
         self.trigger_search_now()
     }
@@ -4470,25 +4507,95 @@ mod tests {
         path
     }
 
+    fn open_scroll_test_viewer(app: &mut App) -> PathBuf {
+        let path = open_test_viewer(app);
+        let session = app.preview_cache.get_mut(&path).unwrap().as_mut().unwrap();
+        session.messages[1].content = "Earlier assistant reply\n\n".repeat(30);
+        session.messages[4].content = "Second user reading location\n\n".repeat(30);
+        path
+    }
+
+    fn second_user_row(app: &App) -> usize {
+        let path = &app.viewer_hit.as_ref().unwrap().session.file_path;
+        let session = app.preview_cache[path].as_ref().unwrap();
+        *super::collect_message_rows(
+            session,
+            None,
+            &app.current_frame_theme(),
+            app.last_frame_area.width - 2,
+            super::MessageJumpScope::UserOnly,
+            app.display_options,
+        )
+        .last()
+        .unwrap()
+    }
+
     #[test]
-    fn applying_and_saving_filters_preserves_viewer_query_and_session() {
+    fn applying_and_saving_filters_restores_viewer_block_once() {
         for key in [
             crossterm_key(KeyCode::Enter),
             crossterm_key_mods(KeyCode::Char('s'), KeyModifiers::CONTROL),
         ] {
             let mut app = test_app();
-            let path = open_test_viewer(&mut app);
-            app.viewer_state_mut().unwrap().scroll = 4;
+            let path = open_scroll_test_viewer(&mut app);
+            let original_row = second_user_row(&app);
+            app.viewer_state_mut().unwrap().scroll = original_row + 3;
             app.open_filters();
-            app.handle_key(crossterm_key(KeyCode::Right)).unwrap();
+            app.handle_key(crossterm_key(KeyCode::Char('5'))).unwrap();
             app.handle_key(crossterm_key(KeyCode::Char(' '))).unwrap();
             app.handle_key(key).unwrap();
             assert_eq!(app.selected_hit().unwrap().session.file_path, path);
+            let expected_row = second_user_row(&app);
+            assert!(expected_row < original_row);
             let viewer = app.viewer_state_mut().unwrap();
             assert_eq!(viewer.search_query(), "first");
-            assert_eq!(viewer.scroll, 4);
+            assert_eq!(viewer.scroll, expected_row);
             assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
-            assert!(app.pending_viewer_filter_check.is_some());
+            // Input immediately after Apply must not be overwritten by restoration.
+            app.handle_key(crossterm_key(KeyCode::Down)).unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            assert_eq!(app.viewer_state_mut().unwrap().scroll, expected_row + 1);
+            let request_id = app.pending_viewer_filter_check.as_ref().unwrap().0;
+            app.finish_viewer_filter_check(request_id, Ok(false));
+            app.show_pending_viewer_exclusion();
+            app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+            assert_eq!(app.viewer_state_mut().unwrap().scroll, expected_row + 1);
+        }
+    }
+
+    #[test]
+    fn cancelling_or_applying_search_only_filters_preserves_exact_viewer_scroll() {
+        for action in ["cancel", "unchanged", "search", "sort"] {
+            let mut app = test_app();
+            open_scroll_test_viewer(&mut app);
+            let original = second_user_row(&app) + 3;
+            app.viewer_state_mut().unwrap().scroll = original;
+            app.open_filters();
+            if action == "cancel" {
+                app.handle_key(crossterm_key(KeyCode::Char('5'))).unwrap();
+                app.handle_key(crossterm_key(KeyCode::Char(' '))).unwrap();
+                app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
+            } else {
+                let mut update = super::FilterUpdate {
+                    scope: app.scope.clone(),
+                    filters: app.filters.clone(),
+                    sort: app.sort,
+                    display_options: app.display_options,
+                };
+                if action == "search" {
+                    update.scope = Scope::Global;
+                    update.filters.agent = Some(Agent::Codex);
+                } else if action == "sort" {
+                    update.sort = SortMode::Relevance;
+                }
+                app.apply_filter_update(update).unwrap();
+            }
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            assert_eq!(app.viewer_state_mut().unwrap().scroll, original, "{action}");
         }
     }
 

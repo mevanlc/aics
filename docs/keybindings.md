@@ -66,10 +66,17 @@ Copying includes role/tool headings and timestamps, preserves source Markdown an
 code indentation, and respects display filters (including hidden command output).
 Copying keeps the selection; an empty selection leaves the clipboard unchanged.
 
-Applying or saving filters from the viewer returns to the same session. Blocks
-that become hidden are deselected. If the updated search filters exclude the open
-session, a dialog offers **Close session** and **Keep session open**, with Keep
-focused by default:
+Applying or saving filters from the viewer returns to the same session. When
+display options change, the viewer returns to the beginning of the block at the
+old top of the conversation area. If that block is hidden, it chooses the surviving
+block nearest that position before filtering, preferring the following block on
+a tie. The normal bottom scroll limit still applies. If no formerly visible blocks
+remain, the viewer starts at the beginning of the new content. Changes affecting
+only session search results preserve the existing scroll position.
+
+Blocks that become hidden are deselected. If the updated search filters exclude
+the open session, a dialog offers **Close session** and **Keep session open**,
+with Keep focused by default:
 
 - Tab/Shift+Tab switches between the buttons; Enter executes the focused button.
 - `k`/`K` keeps the session open; `c`/`C` closes it and returns to filtered results.
