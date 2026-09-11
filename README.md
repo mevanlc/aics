@@ -13,6 +13,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Filter modal: scope, agent, date range, minimum length, session kind (original / trimmed / rollover / sub-agent), live, superseded, and trashed sessions
 - Sort by time or text relevance
 - Markdown rendering with syntax highlighting and search-term highlighting in the viewer
+- Ctrl/Shift-click block selection and Alt+C copying as source Markdown
 - Multiple themes (lazygit, aics, sunset, late), configurable via settings modal
 - Configurable Claude, Codex, and Antigravity launch commands so `aics` can hand off to resume a session
 - AICS trash, restore, and permanent deletion for session files and complete Antigravity bundles

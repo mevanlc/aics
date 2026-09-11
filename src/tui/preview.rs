@@ -1,3 +1,6 @@
+use std::ops::Range;
+
+use crate::export::SessionBlockId;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -27,6 +30,32 @@ use crate::tui::util::{
 pub struct DisplayDocument {
     pub text: Text<'static>,
     pub sticky_markers: Vec<StickyLineMarker>,
+    pub(crate) blocks: Vec<DisplayBlock>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DisplayBlock {
+    pub id: SessionBlockId,
+    pub lines: Range<usize>,
+}
+
+fn record_block(
+    blocks: &mut Vec<DisplayBlock>,
+    id: SessionBlockId,
+    start: usize,
+    lines: &[Line<'_>],
+) {
+    let mut end = lines.len();
+    // Separators belong to neither neighbor; blank lines within a block do.
+    while end > start && lines[end - 1] == Line::default() {
+        end -= 1;
+    }
+    if start < end {
+        blocks.push(DisplayBlock {
+            id,
+            lines: start..end,
+        });
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -159,6 +188,7 @@ pub fn render_session_document_with_options(
     let _profile = profile::scope("preview.render_session_text");
     let mut lines = Vec::new();
     let mut sticky_markers = Vec::new();
+    let mut blocks = Vec::new();
 
     if let Some(info) = session.session_info.as_ref() {
         let info_lines = render_session_info_block(info, theme, highlight_query);
@@ -167,17 +197,20 @@ pub fn render_session_document_with_options(
                 line_index: lines.len(),
                 header: StickyHeader::new("Session", String::new(), "Context"),
             });
+            let start = lines.len();
             lines.extend(info_lines);
+            record_block(&mut blocks, SessionBlockId::Context, start, &lines);
             lines.push(Line::default());
         }
     }
 
     if session.cells.is_empty() {
         // Backwards compatibility: if no cells were emitted, fall back to messages.
-        for message in &session.messages {
+        for (index, message) in session.messages.iter().enumerate() {
             if should_hide_message(message.role, &message.content, options) {
                 continue;
             }
+            let start = lines.len();
             render_message_into(
                 &mut lines,
                 &mut sticky_markers,
@@ -186,9 +219,10 @@ pub fn render_session_document_with_options(
                 theme,
                 highlight_query,
             );
+            record_block(&mut blocks, SessionBlockId::Message(index), start, &lines);
         }
     } else {
-        for cell in &session.cells {
+        for (index, cell) in session.cells.iter().enumerate() {
             if should_hide_cell(cell, options) {
                 continue;
             }
@@ -200,6 +234,7 @@ pub fn render_session_document_with_options(
             if matches!(cell, SessionCell::Metrics(_)) {
                 continue;
             }
+            let start = lines.len();
             render_cell_into(
                 &mut lines,
                 &mut sticky_markers,
@@ -209,25 +244,36 @@ pub fn render_session_document_with_options(
                 highlight_query,
                 options.display_options,
             );
+            record_block(&mut blocks, SessionBlockId::Cell(index), start, &lines);
         }
 
-        if let Some(metrics) = session.cells.iter().rev().find_map(|cell| match cell {
-            SessionCell::Metrics(metrics) => Some(metrics),
-            _ => None,
-        }) {
+        if let Some((index, metrics)) =
+            session
+                .cells
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, cell)| match cell {
+                    SessionCell::Metrics(metrics) => Some((index, metrics)),
+                    _ => None,
+                })
+        {
             let metrics_lines = render_metrics_footer(metrics, theme);
             if !metrics_lines.is_empty() {
                 sticky_markers.push(StickyLineMarker {
                     line_index: lines.len(),
                     header: StickyHeader::new("Metrics", String::new(), "Totals"),
                 });
+                let start = lines.len();
                 lines.extend(metrics_lines);
+                record_block(&mut blocks, SessionBlockId::Metrics(index), start, &lines);
             }
         }
     }
     DisplayDocument {
         text: Text::from(lines),
         sticky_markers,
+        blocks,
     }
 }
 
@@ -293,6 +339,12 @@ pub fn render_composite_document_with_options(
         display_options,
     );
     let session_offset = summary.text.lines.len();
+    summary
+        .blocks
+        .extend(session_doc.blocks.into_iter().map(|mut block| {
+            block.lines = block.lines.start + session_offset..block.lines.end + session_offset;
+            block
+        }));
     summary.text.lines.extend(session_doc.text.lines);
     summary
         .sticky_markers
@@ -439,6 +491,7 @@ pub fn render_summary_sections_document(
     DisplayDocument {
         text: Text::from(lines),
         sticky_markers,
+        blocks: Vec::new(),
     }
 }
 
@@ -484,6 +537,7 @@ pub fn render_session_section_document_with_options(
                 false,
             ),
             sticky_markers: Vec::new(),
+            blocks: Vec::new(),
         }
     };
     let text = render_section("# Session Log", &body.text, theme);
@@ -502,6 +556,14 @@ pub fn render_session_section_document_with_options(
     DisplayDocument {
         text,
         sticky_markers,
+        blocks: body
+            .blocks
+            .into_iter()
+            .map(|mut block| {
+                block.lines = block.lines.start + 2..block.lines.end + 2;
+                block
+            })
+            .collect(),
     }
 }
 
@@ -732,6 +794,7 @@ pub(crate) fn render_message_body_document(
     let rendered = render_markdown_message_with_headings(content, theme, base, highlight_query);
     DisplayDocument {
         text: rendered.text,
+        blocks: Vec::new(),
         sticky_markers: rendered
             .headings
             .into_iter()

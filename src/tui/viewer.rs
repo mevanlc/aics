@@ -1,7 +1,10 @@
+use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -12,6 +15,7 @@ use tui_input::Input;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::export::{selected_blocks_to_markdown, SessionBlockId};
 use crate::parse::{is_project_docs_autodump, MessageRole, Session, SessionCell};
 use crate::search_query::extract_highlight_terms;
 use crate::settings::{DisplayOptions, ThemeName};
@@ -19,14 +23,15 @@ use crate::summary::SummarySidecar;
 use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::markdown::render_markdown_message;
 use crate::tui::preview::{
-    render_message_body, render_session_document_with_options, split_sticky_body, DisplayDocument,
-    SessionRenderOptions,
+    render_message_body, render_session_document_with_options, split_sticky_body, DisplayBlock,
+    DisplayDocument, SessionRenderOptions,
 };
 use crate::tui::profile;
+use crate::tui::statusline;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
     abbreviate_home_path, agent_badge, block_title, format_line_count, relative_time,
-    session_display_title, session_message_label, sticky_header_for_scroll,
+    right_block_title, session_display_title, session_message_label, sticky_header_for_scroll,
     sticky_rows_from_line_markers, wrapped_text_height, FullLineBackgroundParagraph,
     StickyHeaderWidget, StickyRowMarker, STICKY_HEADER_HEIGHT,
 };
@@ -43,6 +48,10 @@ pub struct ViewerState {
     search: Input,
     active_match: Option<usize>,
     render_cache: Option<ViewerRenderCache>,
+    selection_path: Option<PathBuf>,
+    selected_blocks: BTreeSet<SessionBlockId>,
+    selection_anchor: Option<SessionBlockId>,
+    pub(crate) status: Option<statusline::Entry>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,12 +66,20 @@ struct ViewerRenderCache {
     text: Text<'static>,
     match_rows: Vec<usize>,
     sticky_rows: Vec<StickyRowMarker>,
+    blocks: Vec<ViewerBlock>,
+}
+
+#[derive(Debug, Clone)]
+struct ViewerBlock {
+    source: DisplayBlock,
+    rows: Range<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewerOutcome {
     Stay,
     Close,
+    CopySelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,12 +107,14 @@ impl Default for ViewerState {
 }
 
 impl ViewerState {
-    const HINTS: [KeymapHint; 6] = [
+    const HINTS: [KeymapHint; 8] = [
         KeymapHint::new("↑↓/PgUp/PgDn/Home/End", "scroll"),
-        KeymapHint::new("^Up/^Dn", "message"),
+        KeymapHint::new("⇧Up/⇧Dn", "message"),
         KeymapHint::new("^⇧Up/^⇧Dn", "user"),
         KeymapHint::new("^N/^P", "matches"),
         KeymapHint::new("^U/^E", "edit"),
+        KeymapHint::new("^Click/⇧Click", "select"),
+        KeymapHint::new("Alt+C", "copy"),
         KeymapHint::new("Esc", "close"),
     ];
 
@@ -109,6 +128,10 @@ impl ViewerState {
             search: Input::default().with_value(query.to_owned()),
             active_match: None,
             render_cache: None,
+            selection_path: None,
+            selected_blocks: BTreeSet::new(),
+            selection_anchor: None,
+            status: None,
         }
     }
 
@@ -129,6 +152,12 @@ impl ViewerState {
     ) -> ViewerOutcome {
         match key.code {
             KeyCode::Esc => ViewerOutcome::Close,
+            KeyCode::Char('c') if key.modifiers == KeyModifiers::ALT => {
+                if let Some(session) = session {
+                    self.render_cache(area, session, summary, theme, theme_name, display_options);
+                }
+                ViewerOutcome::CopySelection
+            }
             KeyCode::Up if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
                 self.jump_to_message(
                     MessageDirection::Previous,
@@ -258,7 +287,7 @@ impl ViewerState {
         let chunks = split_viewer(area);
         let body_area = chunks[0];
 
-        let (total_rows, mut text, match_rows, sticky_rows) = {
+        let (total_rows, mut text, match_rows, sticky_rows, blocks) = {
             let cache =
                 self.render_cache(area, session, summary, theme, theme_name, display_options);
             (
@@ -266,6 +295,7 @@ impl ViewerState {
                 cache.text.clone(),
                 cache.match_rows.clone(),
                 cache.sticky_rows.clone(),
+                cache.blocks.clone(),
             )
         };
         if let Some(active_match_row) = self
@@ -274,6 +304,20 @@ impl ViewerState {
         {
             let viewport_width = body_area.width.saturating_sub(2);
             highlight_active_match(&mut text, active_match_row, viewport_width, theme);
+        }
+        for block in &blocks {
+            if self.selected_blocks.contains(&block.source.id) {
+                for line in &mut text.lines[block.source.lines.clone()] {
+                    line.style = line.style.bg(theme.selection);
+                    for span in &mut line.spans {
+                        if span.style.bg != Some(theme.search_match_bg)
+                            && span.style.bg != Some(theme.active_match_bg)
+                        {
+                            span.style = span.style.bg(theme.selection);
+                        }
+                    }
+                }
+            }
         }
         let viewport_height = body_area
             .height
@@ -299,6 +343,18 @@ impl ViewerState {
             StickyHeaderWidget::new(sticky_header.as_ref(), theme),
             header_area,
         );
+        if sticky_rows
+            .iter()
+            .rev()
+            .find(|marker| marker.row <= scroll)
+            .or_else(|| sticky_rows.first())
+            .and_then(|marker| blocks.iter().find(|block| block.rows.contains(&marker.row)))
+            .is_some_and(|block| self.selected_blocks.contains(&block.source.id))
+        {
+            frame
+                .buffer_mut()
+                .set_style(header_area, Style::default().bg(theme.selection));
+        }
         frame.render_widget(
             FullLineBackgroundParagraph::new(text).scroll(scroll),
             body_content_area,
@@ -311,6 +367,14 @@ impl ViewerState {
         ])
         .split(chunks[1]);
 
+        let status = self.status.as_ref().filter(|entry| !entry.expired());
+        let selection_label = status.map(|entry| entry.label.clone()).unwrap_or_else(|| {
+            if self.selected_blocks.is_empty() {
+                String::new()
+            } else {
+                format!("{} selected · Alt+C copy", self.selected_blocks.len())
+            }
+        });
         let search_bar = Paragraph::new(Line::from(Span::styled(
             self.search.value().to_owned(),
             Style::default().fg(theme.text),
@@ -323,6 +387,18 @@ impl ViewerState {
                 .title(block_title(Span::styled(
                     "Search",
                     Style::default().fg(theme.accent),
+                )))
+                .title(right_block_title(Span::styled(
+                    selection_label,
+                    Style::default().fg(
+                        if status.is_some_and(|entry| {
+                            matches!(entry.kind, statusline::EntryKind::Failed)
+                        }) {
+                            ratatui::style::Color::Red
+                        } else {
+                            theme.accent
+                        },
+                    ),
                 ))),
         );
         frame.render_widget(search_bar, footer_chunks[0]);
@@ -356,6 +432,130 @@ impl ViewerState {
 
     pub fn body_area(area: Rect) -> Rect {
         split_viewer(area)[0]
+    }
+
+    /// Hit test against the same wrapped rows and clamped scroll used by rendering.
+    pub(crate) fn handle_mouse(&mut self, area: Rect, mouse: MouseEvent) {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left)
+            || mouse
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            return;
+        }
+        let body = Self::body_area(area);
+        let inner = Block::default().borders(Borders::ALL).inner(body);
+        if !inner.contains((mouse.column, mouse.row).into()) {
+            return;
+        }
+        let Some(cache) = self.render_cache.as_ref() else {
+            return;
+        };
+        let (header, content) = split_sticky_body(inner);
+        let scroll = self
+            .scroll
+            .min(cache.total_rows.saturating_sub(content.height as usize));
+        let row = if header.contains((mouse.column, mouse.row).into()) {
+            // A heading within a message still belongs to the full message block.
+            cache
+                .sticky_rows
+                .iter()
+                .rev()
+                .find(|marker| marker.row <= scroll)
+                .or_else(|| cache.sticky_rows.first())
+                .map(|marker| marker.row)
+                .unwrap_or(scroll)
+        } else {
+            scroll + mouse.row.saturating_sub(content.y) as usize
+        };
+        let index = cache
+            .blocks
+            .iter()
+            .position(|block| block.rows.contains(&row));
+        self.select_block(index, mouse.modifiers);
+    }
+
+    fn select_block(&mut self, index: Option<usize>, modifiers: KeyModifiers) {
+        let control = modifiers.contains(KeyModifiers::CONTROL);
+        let shift = modifiers.contains(KeyModifiers::SHIFT);
+        let Some(cache) = self.render_cache.as_ref() else {
+            return;
+        };
+        let Some(index) = index else {
+            if !control && !shift {
+                self.selected_blocks.clear();
+                self.selection_anchor = None;
+                self.status = None;
+            }
+            return;
+        };
+        let id = cache.blocks[index].source.id;
+        self.status = None;
+        if shift {
+            let anchor = self
+                .selection_anchor
+                .and_then(|id| cache.blocks.iter().position(|block| block.source.id == id))
+                .unwrap_or(index);
+            if !control {
+                self.selected_blocks.clear();
+            }
+            self.selected_blocks.extend(
+                cache.blocks[anchor.min(index)..=anchor.max(index)]
+                    .iter()
+                    .map(|block| block.source.id),
+            );
+            self.selection_anchor.get_or_insert(id);
+        } else {
+            if control {
+                if !self.selected_blocks.remove(&id) {
+                    self.selected_blocks.insert(id);
+                }
+            } else {
+                self.selected_blocks.clear();
+                self.selected_blocks.insert(id);
+            }
+            self.selection_anchor = Some(id);
+        }
+    }
+
+    pub(crate) fn copy_selected(
+        &mut self,
+        session: &Session,
+        summary: Option<&SummarySidecar>,
+        options: DisplayOptions,
+        write: impl FnOnce(&str) -> anyhow::Result<()>,
+    ) {
+        let (count, markdown) = self.selected_markdown(session, summary, options);
+        self.status = Some(if count == 0 {
+            statusline::Entry::failed("No blocks selected")
+        } else {
+            match write(&markdown) {
+                Ok(()) => statusline::Entry::completed(format!(
+                    "Copied {count} block{}",
+                    if count == 1 { "" } else { "s" }
+                )),
+                Err(error) => statusline::Entry::failed(format!("Clipboard error: {error:#}")),
+            }
+        });
+    }
+
+    pub(crate) fn selected_markdown(
+        &self,
+        session: &Session,
+        summary: Option<&SummarySidecar>,
+        options: DisplayOptions,
+    ) -> (usize, String) {
+        let ids: Vec<_> = self
+            .render_cache
+            .iter()
+            .flat_map(|cache| cache.blocks.iter())
+            .map(|block| block.source.id)
+            .filter(|id| self.selected_blocks.contains(id))
+            .collect();
+        (
+            ids.len(),
+            selected_blocks_to_markdown(session, summary, ids, options),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -448,6 +648,11 @@ impl ViewerState {
         let body_area = Self::body_area(area);
         let width = body_area.width.saturating_sub(2);
         let path = session.file_path.clone();
+        if self.selection_path.as_ref() != Some(&path) {
+            self.selected_blocks.clear();
+            self.selection_anchor = None;
+            self.selection_path = Some(path.clone());
+        }
         let query = self.search.value().to_owned();
         let summary_stamp = summary.map(summary_stamp);
 
@@ -473,6 +678,30 @@ impl ViewerState {
             let total_rows = wrapped_text_height(&text, width).max(1);
             let match_rows = collect_match_rows_in_text(&text, &query, width);
             let sticky_rows = sticky_rows_from_line_markers(&text, &document.sticky_markers, width);
+            let mut row_offsets = Vec::with_capacity(text.lines.len() + 1);
+            row_offsets.push(0);
+            for line in &text.lines {
+                row_offsets.push(
+                    row_offsets.last().copied().unwrap_or(0)
+                        + wrapped_rendered_line_height(line, width as usize).max(1),
+                );
+            }
+            let blocks: Vec<_> = document
+                .blocks
+                .into_iter()
+                .map(|source| ViewerBlock {
+                    rows: row_offsets[source.lines.start]..row_offsets[source.lines.end],
+                    source,
+                })
+                .collect();
+            let visible_ids: BTreeSet<_> = blocks.iter().map(|block| block.source.id).collect();
+            self.selected_blocks.retain(|id| visible_ids.contains(id));
+            if self
+                .selection_anchor
+                .is_some_and(|id| !visible_ids.contains(&id))
+            {
+                self.selection_anchor = None;
+            }
             self.render_cache = Some(ViewerRenderCache {
                 path,
                 query,
@@ -484,6 +713,7 @@ impl ViewerState {
                 text,
                 match_rows,
                 sticky_rows,
+                blocks,
             });
         } else {
             profile::event("viewer.cache.hit");
@@ -514,9 +744,14 @@ fn render_viewer_document(
 ) -> DisplayDocument {
     let mut lines = Vec::new();
     let mut sticky_markers = Vec::new();
+    let mut blocks = Vec::new();
     if let Some(summary) = summary {
         let summary_start = lines.len();
         lines.extend(render_summary_leadin(summary, theme, highlight_query).lines);
+        blocks.push(DisplayBlock {
+            id: SessionBlockId::Summary,
+            lines: summary_start..lines.len(),
+        });
         sticky_markers.push(crate::tui::util::StickyLineMarker {
             line_index: summary_start,
             header: crate::tui::util::StickyHeader::new(
@@ -531,6 +766,10 @@ fn render_viewer_document(
     let session_start = lines.len();
     let session_doc =
         render_session_document_with_options(session, theme, highlight_query, options);
+    blocks.extend(session_doc.blocks.into_iter().map(|mut block| {
+        block.lines = block.lines.start + session_start..block.lines.end + session_start;
+        block
+    }));
     lines.extend(session_doc.text.lines);
     sticky_markers.extend(session_doc.sticky_markers.into_iter().map(|marker| {
         crate::tui::util::StickyLineMarker {
@@ -541,6 +780,7 @@ fn render_viewer_document(
     DisplayDocument {
         text: Text::from(lines),
         sticky_markers,
+        blocks,
     }
 }
 
@@ -1057,7 +1297,9 @@ mod tests {
     use std::path::PathBuf;
 
     use chrono::Utc;
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui::layout::Rect;
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span, Text};
@@ -1078,6 +1320,310 @@ mod tests {
         scroll_progress_percent, viewer_title, MessageDirection, MessageJumpScope, ViewerOutcome,
         ViewerState,
     };
+
+    fn selection_viewer(session: &Session, area: Rect) -> ViewerState {
+        let mut viewer = ViewerState::new();
+        viewer.render_cache(
+            area,
+            session,
+            None,
+            &Theme::default(),
+            ThemeName::default(),
+            DisplayOptions::SHOW_ALL,
+        );
+        viewer
+    }
+
+    fn selected_indices(viewer: &ViewerState) -> Vec<usize> {
+        viewer
+            .render_cache
+            .as_ref()
+            .unwrap()
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, block)| {
+                viewer
+                    .selected_blocks
+                    .contains(&block.source.id)
+                    .then_some(i)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn copy_empty_selection_skips_clipboard_and_failure_keeps_selection() {
+        let session = multi_turn_session();
+        let mut viewer = selection_viewer(&session, Rect::new(0, 0, 80, 30));
+        viewer.copy_selected(&session, None, DisplayOptions::SHOW_ALL, |_| {
+            panic!("empty selection must not write")
+        });
+        assert_eq!(viewer.status.as_ref().unwrap().label, "No blocks selected");
+        viewer.select_block(Some(0), KeyModifiers::NONE);
+        viewer.copy_selected(&session, None, DisplayOptions::SHOW_ALL, |_| {
+            Err(anyhow::anyhow!("unavailable"))
+        });
+        assert_eq!(selected_indices(&viewer), [0]);
+        assert!(viewer
+            .status
+            .as_ref()
+            .unwrap()
+            .label
+            .contains("unavailable"));
+        viewer.copy_selected(&session, None, DisplayOptions::SHOW_ALL, |text| {
+            assert!(text.contains("first user"));
+            Ok(())
+        });
+        assert_eq!(viewer.status.as_ref().unwrap().label, "Copied 1 block");
+        assert_eq!(selected_indices(&viewer), [0]);
+    }
+
+    #[test]
+    fn all_structured_blocks_and_summary_context_metrics_have_source_identity() {
+        use crate::parse::{ExecStatus, RuntimeMetrics, SessionInfo};
+        let mut session = sample_session();
+        session.session_info = Some(SessionInfo {
+            model: Some("test model".into()),
+            ..Default::default()
+        });
+        session.cells = vec![
+            SessionCell::SessionInfo(session.session_info.clone().unwrap()),
+            SessionCell::Metrics(RuntimeMetrics {
+                total_tokens: 10,
+                ..Default::default()
+            }),
+            SessionCell::Message {
+                role: MessageRole::User,
+                content: "# Inside message\n\n**request**".into(),
+                timestamp: None,
+            },
+            SessionCell::Exec {
+                command: vec!["echo".into(), "value".into()],
+                cwd: None,
+                parsed_summary: None,
+                stdout: "hidden stdout".into(),
+                stderr: "hidden stderr".into(),
+                exit_code: Some(0),
+                duration_ms: None,
+                status: ExecStatus::Completed,
+                timestamp: None,
+            },
+            SessionCell::Metrics(RuntimeMetrics {
+                total_tokens: 20,
+                ..Default::default()
+            }),
+        ];
+        let summary = sample_summary("# Summary heading\n\n**summary source**");
+        let options = DisplayOptions {
+            hide_tool_results: true,
+            ..DisplayOptions::SHOW_ALL
+        };
+        let mut viewer = ViewerState::new();
+        viewer.render_cache(
+            Rect::new(0, 0, 80, 30),
+            &session,
+            Some(&summary),
+            &Theme::default(),
+            ThemeName::default(),
+            options,
+        );
+        viewer.select_block(Some(0), KeyModifiers::NONE);
+        viewer.select_block(Some(4), KeyModifiers::SHIFT);
+        let (count, text) = viewer.selected_markdown(&session, Some(&summary), options);
+        assert_eq!(count, 5); // summary, context, message, exec, final metrics
+        assert!(text.contains("**summary source**"));
+        assert!(text.contains("test model"));
+        assert!(text.contains("# Inside message\n\n**request**"));
+        assert!(text.contains("echo value"));
+        assert!(!text.contains("hidden stdout"));
+        assert!(!text.contains("hidden stderr"));
+        assert_eq!(text.matches("## metrics").count(), 1);
+        assert!(text.contains("20"));
+    }
+
+    #[test]
+    fn block_selection_follows_explorer_anchor_and_range_rules() {
+        let session = multi_turn_session();
+        let mut viewer = selection_viewer(&session, Rect::new(0, 0, 80, 30));
+        viewer.select_block(Some(1), KeyModifiers::NONE);
+        viewer.select_block(Some(4), KeyModifiers::CONTROL);
+        assert_eq!(selected_indices(&viewer), [1, 4]);
+        viewer.select_block(Some(4), KeyModifiers::CONTROL);
+        assert_eq!(selected_indices(&viewer), [1]);
+        viewer.select_block(Some(2), KeyModifiers::SHIFT);
+        assert_eq!(selected_indices(&viewer), [2, 3, 4]);
+        viewer.select_block(Some(5), KeyModifiers::SHIFT);
+        assert_eq!(selected_indices(&viewer), [4, 5]);
+        viewer.select_block(Some(0), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert_eq!(selected_indices(&viewer), [0, 1, 2, 3, 4, 5]);
+        viewer.select_block(None, KeyModifiers::CONTROL);
+        assert_eq!(selected_indices(&viewer).len(), 6);
+        viewer.select_block(None, KeyModifiers::NONE);
+        assert!(selected_indices(&viewer).is_empty());
+        assert!(viewer.selection_anchor.is_none());
+        viewer.select_block(Some(3), KeyModifiers::SHIFT);
+        assert_eq!(selected_indices(&viewer), [3]);
+        viewer.select_block(Some(2), KeyModifiers::NONE);
+        assert_eq!(selected_indices(&viewer), [2]);
+    }
+
+    #[test]
+    fn block_selection_survives_reflow_and_search_but_drops_hidden_sources() {
+        let session = multi_turn_session();
+        let area = Rect::new(0, 0, 80, 30);
+        let mut viewer = selection_viewer(&session, area);
+        viewer.select_block(Some(0), KeyModifiers::NONE);
+        viewer.select_block(Some(3), KeyModifiers::CONTROL);
+        viewer.handle_key(
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+            area,
+            Some(&session),
+            None,
+            &Theme::default(),
+            ThemeName::default(),
+            DisplayOptions::SHOW_ALL,
+        );
+        let options = DisplayOptions {
+            hide_tool_results: true,
+            ..DisplayOptions::SHOW_ALL
+        };
+        viewer.render_cache(
+            Rect::new(0, 0, 20, 12),
+            &session,
+            None,
+            &Theme::default(),
+            ThemeName::default(),
+            options,
+        );
+        assert_eq!(
+            viewer.selected_blocks,
+            [crate::export::SessionBlockId::Message(0)].into()
+        );
+        assert!(viewer.selection_anchor.is_none());
+        viewer.select_block(Some(3), KeyModifiers::SHIFT);
+        assert_eq!(
+            viewer.selected_blocks,
+            [crate::export::SessionBlockId::Message(4)].into()
+        );
+        let (_, text) = viewer.selected_markdown(&session, None, options);
+        assert!(text.contains("second user"));
+        assert!(!text.contains("tool output"));
+    }
+
+    #[test]
+    fn mouse_selects_wrapped_rows_and_sticky_heading_owner_without_selecting_footer() {
+        let mut session = multi_turn_session();
+        session.messages[0].content = "# Heading\n\n界面 emoji 🐈 and é words ".repeat(12);
+        let area = Rect::new(4, 3, 32, 16);
+        let mut viewer = selection_viewer(&session, area);
+        viewer.scroll = 7;
+        let body = ViewerState::body_area(area);
+        let mouse = |row, modifiers| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: body.x + 3,
+            row,
+            modifiers,
+        };
+        viewer.handle_mouse(area, mouse(body.y + 4, KeyModifiers::NONE));
+        assert_eq!(selected_indices(&viewer), [0]);
+        viewer.handle_mouse(area, mouse(body.y + 1, KeyModifiers::CONTROL));
+        assert!(selected_indices(&viewer).is_empty());
+        viewer.handle_mouse(area, mouse(body.y + 1, KeyModifiers::SHIFT));
+        assert_eq!(selected_indices(&viewer), [0]);
+        viewer.handle_mouse(area, mouse(area.bottom() - 2, KeyModifiers::NONE));
+        assert_eq!(selected_indices(&viewer), [0]);
+        // Huge scroll is clamped to the rendered bottom, including mouse hit testing.
+        viewer.scroll = usize::MAX;
+        let cache = viewer.render_cache.as_ref().unwrap();
+        let content_height =
+            body.height
+                .saturating_sub(2 + crate::tui::util::STICKY_HEADER_HEIGHT) as usize;
+        let start = cache.total_rows.saturating_sub(content_height);
+        let last = cache.blocks.last().unwrap();
+        let row =
+            (last.rows.start - start) as u16 + body.y + 1 + crate::tui::util::STICKY_HEADER_HEIGHT;
+        viewer.handle_mouse(area, mouse(row, KeyModifiers::NONE));
+        assert_eq!(selected_indices(&viewer), [5]);
+    }
+
+    #[test]
+    fn selected_markdown_follows_display_order_and_alt_c_does_not_edit_search() {
+        let mut session = multi_turn_session();
+        session.messages[0].content = "**bold**\n\n```rust\n    let x = 1;\n```".into();
+        for message in &mut session.messages {
+            message.timestamp = None;
+        }
+        let area = Rect::new(0, 0, 80, 30);
+        let mut viewer = selection_viewer(&session, area);
+        viewer.select_block(Some(4), KeyModifiers::NONE);
+        viewer.select_block(Some(0), KeyModifiers::CONTROL);
+        assert_eq!(
+            viewer.handle_key(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT),
+                area,
+                Some(&session),
+                None,
+                &Theme::default(),
+                ThemeName::default(),
+                DisplayOptions::SHOW_ALL
+            ),
+            ViewerOutcome::CopySelection
+        );
+        assert_eq!(viewer.search_query(), "");
+        let (count, markdown) = viewer.selected_markdown(&session, None, DisplayOptions::SHOW_ALL);
+        assert_eq!(count, 2);
+        assert_eq!(
+            markdown,
+            "## user\n\n**bold**\n\n```rust\n    let x = 1;\n```\n\n## user\n\nsecond user\n\n"
+        );
+    }
+
+    #[test]
+    fn selection_highlights_full_width_and_preserves_search_highlights() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let session = multi_turn_session();
+        let area = Rect::new(0, 0, 80, 30);
+        let theme = Theme::default();
+        let mut viewer = ViewerState::with_search("first");
+        viewer.render_cache(
+            area,
+            &session,
+            None,
+            &theme,
+            ThemeName::default(),
+            DisplayOptions::SHOW_ALL,
+        );
+        viewer.select_block(Some(0), KeyModifiers::NONE);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                viewer.render(
+                    frame,
+                    area,
+                    &session,
+                    false,
+                    None,
+                    &theme,
+                    ThemeName::default(),
+                    DisplayOptions::SHOW_ALL,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let body_y = 1 + crate::tui::util::STICKY_HEADER_HEIGHT;
+        assert_eq!(buffer[(78, body_y)].bg, theme.selection);
+        assert_eq!(buffer[(78, body_y + 1)].bg, theme.selection);
+        assert!(buffer
+            .content
+            .iter()
+            .any(|cell| cell.bg == theme.search_match_bg));
+        assert!(buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .contains("1 selected"));
+    }
 
     #[test]
     fn active_match_uses_theme_foreground() {

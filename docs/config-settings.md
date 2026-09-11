@@ -39,9 +39,20 @@ stderr and in the TUI status line.
 - `display_options`: visibility of skill injection, tool calls, tool results,
   agent replies, user messages, and project-document boilerplate
 - `default_filter`: saved startup scope, sort order, and search filters
+- `viewer_filter_exclusion`: `ask` (default), `keep`, or `close`; controls what happens
+  when updated filters exclude the session open in the full viewer
 
 Unknown theme names fall back to `lazygit` without discarding the other settings
 in the file.
+
+## Viewer filter exclusion
+
+The exclusion dialog's **Remember my choice** checkbox saves `keep` or `close` in
+`viewer_filter_exclusion`. Escape never saves the choice, even if checked. This
+preference is configured in `settings.json`, with no Settings-modal control.
+
+To restore the dialog, set `"viewer_filter_exclusion": "ask"` or remove the property
+before launching AICS. Unknown values also use `ask`.
 
 See [Session summaries](session-summaries.md) for summarizer setup, command
 templates, placeholders, and sidecar behavior.

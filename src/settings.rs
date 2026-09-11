@@ -40,6 +40,16 @@ impl ThemeName {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewerFilterExclusion {
+    Keep,
+    Close,
+    #[default]
+    #[serde(other)]
+    Ask,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -72,6 +82,8 @@ pub struct Settings {
     pub display_options: DisplayOptions,
     #[serde(default)]
     pub default_filter: Option<DefaultFilter>,
+    #[serde(default)]
+    pub viewer_filter_exclusion: ViewerFilterExclusion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,9 +137,17 @@ pub struct SettingsPatch {
     summarize_prompt: Option<String>,
     display_options: Option<DisplayOptions>,
     default_filter: Option<Option<DefaultFilter>>,
+    viewer_filter_exclusion: Option<ViewerFilterExclusion>,
 }
 
 impl SettingsPatch {
+    pub fn viewer_filter_exclusion(choice: ViewerFilterExclusion) -> Self {
+        Self {
+            viewer_filter_exclusion: Some(choice),
+            ..Self::default()
+        }
+    }
+
     pub fn settings_modal(settings: &Settings) -> Self {
         Self {
             theme: Some(settings.theme),
@@ -176,6 +196,9 @@ impl SettingsPatch {
     }
 
     pub fn apply_to(&self, settings: &mut Settings) {
+        if let Some(choice) = self.viewer_filter_exclusion {
+            settings.viewer_filter_exclusion = choice;
+        }
         if let Some(value) = self.theme {
             settings.theme = value;
         }
@@ -313,6 +336,7 @@ impl Default for Settings {
             summarize_prompt: default_summarize_prompt(),
             display_options: DisplayOptions::default(),
             default_filter: None,
+            viewer_filter_exclusion: ViewerFilterExclusion::Ask,
         }
     }
 }
@@ -547,6 +571,7 @@ const SETTINGS_FIELD_NAMES: &[&str] = &[
     "summarize_prompt",
     "display_options",
     "default_filter",
+    "viewer_filter_exclusion",
 ];
 
 fn settings_path() -> Result<PathBuf> {
@@ -595,6 +620,39 @@ mod tests {
     use super::*;
     use crate::ring_cursor::RingCursor;
     use tempfile::TempDir;
+
+    #[test]
+    fn viewer_exclusion_preference_round_trip_and_patch_preserve_other_settings() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        fs::write(&path, r#"{"snippet_line_count":7,"custom_key":"keep"}"#).unwrap();
+        assert_eq!(
+            Settings::load_from_path(&path)
+                .unwrap()
+                .viewer_filter_exclusion,
+            ViewerFilterExclusion::Ask
+        );
+        for choice in [
+            ViewerFilterExclusion::Keep,
+            ViewerFilterExclusion::Close,
+            ViewerFilterExclusion::Ask,
+        ] {
+            Settings::save_patch_to_path(&path, &SettingsPatch::viewer_filter_exclusion(choice))
+                .unwrap();
+            let settings = Settings::load_from_path(&path).unwrap();
+            assert_eq!(settings.viewer_filter_exclusion, choice);
+            assert_eq!(settings.snippet_line_count, 7);
+            let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(value["custom_key"], "keep");
+            Settings::save_patch_to_path(&path, &SettingsPatch::layout(true, 40)).unwrap();
+            assert_eq!(
+                Settings::load_from_path(&path)
+                    .unwrap()
+                    .viewer_filter_exclusion,
+                choice
+            );
+        }
+    }
 
     #[test]
     fn fresh_install_has_preview_pane_on() {

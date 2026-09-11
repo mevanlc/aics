@@ -18,5 +18,6 @@ pub mod statusline;
 pub mod theme;
 pub mod util;
 pub mod viewer;
+mod viewer_exclusion;
 
 pub use app::{run_app, run_rules_preview_app};

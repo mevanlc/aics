@@ -45,6 +45,7 @@ use crate::rules::{
 use crate::scan::{is_default_antigravity_home, AgentHomes, SessionRoots};
 use crate::settings::{
     DefaultFilter, DefaultFilterScope, DisplayOptions, Settings, SettingsPatch, ThemeName,
+    ViewerFilterExclusion,
 };
 use crate::summary::sidecar::sidecar_path;
 use crate::summary::staleness::fingerprint as compute_fingerprint;
@@ -72,6 +73,7 @@ use crate::tui::viewer::{
     previous_match_index, scroll_for_match, MatchDirection, MessageDirection, MessageJumpScope,
     ViewerOutcome, ViewerState,
 };
+use crate::tui::viewer_exclusion::ViewerExclusionDialog;
 use crate::tui::{keymap_hint, layout, list, preview, search};
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -371,12 +373,14 @@ struct SearchCommand {
     request_id: u64,
     request: SearchRequest,
     display_options: DisplayOptions,
+    viewer_check: Option<PathBuf>,
 }
 
 #[derive(Debug)]
 struct SearchResponse {
     request_id: u64,
     result: std::result::Result<Vec<SearchHit>, String>,
+    viewer_matches: Option<std::result::Result<bool, String>>,
 }
 
 impl SearchWorker {
@@ -453,6 +457,11 @@ pub struct App {
     pending_action_menu_click: Option<PendingListClick>,
     preview_resize_drag: Option<PreviewResizeDrag>,
     viewer_before_actions: Option<ViewerState>,
+    // Independent of the result list, which may change while the viewer is open.
+    viewer_hit: Option<SearchHit>,
+    pending_viewer_filter_check: Option<(u64, PathBuf)>,
+    pending_viewer_exclusion: bool,
+    viewer_exclusion_dialog: Option<ViewerExclusionDialog>,
 }
 
 impl App {
@@ -543,6 +552,10 @@ impl App {
             pending_action_menu_click: None,
             preview_resize_drag: None,
             viewer_before_actions: None,
+            viewer_hit: None,
+            pending_viewer_filter_check: None,
+            pending_viewer_exclusion: false,
+            viewer_exclusion_dialog: None,
         }
     }
 
@@ -586,6 +599,9 @@ impl App {
             let mut needs_redraw = true;
 
             while !self.should_quit {
+                if self.expire_status_entries() {
+                    needs_redraw = true;
+                }
                 if self.maybe_dispatch_search()? {
                     needs_redraw = true;
                 }
@@ -730,6 +746,15 @@ impl App {
         self.preview_cache
             .get(&path)
             .and_then(|session| session.as_ref())
+    }
+
+    fn active_session(&mut self) -> Option<&Session> {
+        let hit = self.selected_hit()?;
+        let path = hit.session.file_path;
+        self.preview_cache
+            .entry(path.clone())
+            .or_insert_with(|| parse_session_file(hit.session.agent, &path).ok().flatten());
+        self.preview_cache.get(&path).and_then(Option::as_ref)
     }
 
     pub fn preview_render_state<'a>(
@@ -968,6 +993,7 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
+        self.show_pending_viewer_exclusion();
         let _draw_profile = profile::scope("app.draw");
         let theme = self.current_frame_theme();
         frame.render_widget(Clear, frame.area());
@@ -1008,9 +1034,9 @@ impl App {
 
         let local_scope_label = self.local_scope_label();
         let viewer_theme_name = self.current_frame_theme_name();
-        let selected = self.selected;
         let display_options = self.display_options;
-        let viewer_summary_target = self.results.get(selected).map(|hit| {
+        let active_hit = self.selected_hit();
+        let viewer_summary_target = active_hit.as_ref().map(|hit| {
             (
                 hit.session.agent,
                 hit.session.file_path.clone(),
@@ -1020,14 +1046,13 @@ impl App {
         let viewer_summary = viewer_summary_target.and_then(|(agent, path, session_id)| {
             self.summary_sidecar_for_path(agent, &path, &session_id)
         });
-        let results = &self.results;
         let preview_cache = &self.preview_cache;
         let viewer_before_actions = &mut self.viewer_before_actions;
         match &mut self.overlay {
             Overlay::None => {}
             Overlay::Filters(filter_state, viewer_before_filters) => {
                 if let Some(viewer_state) = viewer_before_filters.as_mut() {
-                    let hit = results.get(selected);
+                    let hit = active_hit.as_ref();
                     let session = hit
                         .and_then(|hit| preview_cache.get(&hit.session.file_path))
                         .and_then(|session| session.as_ref());
@@ -1048,7 +1073,7 @@ impl App {
             }
             Overlay::Actions(action_menu) => {
                 if let Some(viewer_state) = viewer_before_actions.as_mut() {
-                    let hit = results.get(selected);
+                    let hit = active_hit.as_ref();
                     let session = hit
                         .and_then(|hit| preview_cache.get(&hit.session.file_path))
                         .and_then(|session| session.as_ref());
@@ -1071,7 +1096,7 @@ impl App {
                 action_menu.render(frame, frame.area(), &theme);
             }
             Overlay::Viewer(viewer_state) => {
-                let hit = results.get(selected);
+                let hit = active_hit.as_ref();
                 let session = hit
                     .and_then(|hit| preview_cache.get(&hit.session.file_path))
                     .and_then(|session| session.as_ref());
@@ -1089,13 +1114,9 @@ impl App {
                 }
             }
             Overlay::Settings(settings_state) => settings_state.render(frame, frame.area(), &theme),
-            Overlay::ConfirmDelete(mode) => Self::render_delete_confirm(
-                frame,
-                frame.area(),
-                &theme,
-                results.get(selected),
-                *mode,
-            ),
+            Overlay::ConfirmDelete(mode) => {
+                Self::render_delete_confirm(frame, frame.area(), &theme, active_hit.as_ref(), *mode)
+            }
             Overlay::ConfirmRulesProcess(summary) => {
                 Self::render_rules_process_confirm(frame, frame.area(), &theme, *summary)
             }
@@ -1110,17 +1131,32 @@ impl App {
             }
             Overlay::ConfirmExit => self.render_exit_confirm(frame, frame.area(), &theme),
         }
+        if let Some(dialog) = &self.viewer_exclusion_dialog {
+            dialog.render(frame, frame.area(), &theme);
+        }
         if let Some(help_state) = &mut self.help {
             help_state.render(frame, frame.area(), &theme);
         }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        let result = self.handle_key_inner(key);
+        self.release_closed_viewer();
+        result
+    }
+
+    fn handle_key_inner(&mut self, key: KeyEvent) -> Result<()> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.request_quit();
             return Ok(());
         }
 
+        if let Some(dialog) = self.viewer_exclusion_dialog.as_mut() {
+            if let Some((choice, remember)) = dialog.handle_key(key) {
+                self.resolve_viewer_exclusion(choice, remember);
+            }
+            return Ok(());
+        }
         if self.help.is_some() {
             return self.handle_help_key(key);
         }
@@ -1301,7 +1337,7 @@ impl App {
         let viewer_area = self.last_frame_area;
         let viewer_theme_name = self.current_frame_theme_name();
         let viewer_session = if matches!(self.overlay, Overlay::Viewer(_)) {
-            self.selected_preview().cloned()
+            self.active_session().cloned()
         } else {
             None
         };
@@ -1366,6 +1402,16 @@ impl App {
                 ) {
                     ViewerOutcome::Stay => {}
                     ViewerOutcome::Close => self.overlay = Overlay::None,
+                    ViewerOutcome::CopySelection => {
+                        if let Some(session) = viewer_session.as_ref() {
+                            state.copy_selected(
+                                session,
+                                viewer_summary.as_ref(),
+                                self.display_options,
+                                crate::clipboard::set_text,
+                            );
+                        }
+                    }
                 }
             }
             Overlay::Settings(state) => match state.handle_key(key) {
@@ -1438,6 +1484,18 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
+        let result = self.handle_mouse_inner(mouse);
+        self.release_closed_viewer();
+        result
+    }
+
+    fn handle_mouse_inner(&mut self, mouse: MouseEvent) -> Result<()> {
+        if let Some(dialog) = self.viewer_exclusion_dialog.as_mut() {
+            if let Some((choice, remember)) = dialog.handle_mouse(self.last_frame_area, mouse) {
+                self.resolve_viewer_exclusion(choice, remember);
+            }
+            return Ok(());
+        }
         if let Some(help_state) = self.help.as_mut() {
             if matches!(
                 help_state.handle_mouse(self.last_frame_area, mouse.kind, mouse.column, mouse.row),
@@ -1537,6 +1595,9 @@ impl App {
     }
 
     fn handle_overlay_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
+        if let Some(areas) = self.last_layout {
+            self.clamp_scroll_state(areas);
+        }
         match &mut self.overlay {
             Overlay::Filters(state, viewer_before_filters) => {
                 match state.handle_mouse(self.last_frame_area, mouse.kind, mouse.column, mouse.row)
@@ -1558,6 +1619,7 @@ impl App {
                 }
             }
             Overlay::Viewer(state) => {
+                state.handle_mouse(self.last_frame_area, mouse);
                 let body = ViewerState::body_area(self.last_frame_area);
                 if contains(body, mouse.column, mouse.row) {
                     match mouse.kind {
@@ -1682,6 +1744,9 @@ impl App {
         self.committed_query = self.query.value().to_owned();
         self.preview_active_match = None;
 
+        if let Some((id, _)) = self.pending_viewer_filter_check.as_mut() {
+            *id = request_id;
+        }
         if self.rules_preview.is_some() {
             self.apply_rules_preview_filter(request_id);
             return Ok(());
@@ -1712,6 +1777,10 @@ impl App {
                     filters: self.filters.clone(),
                 },
                 display_options: self.display_options,
+                viewer_check: self
+                    .pending_viewer_filter_check
+                    .as_ref()
+                    .map(|(_, path)| path.clone()),
             })
             .map_err(|_| anyhow::anyhow!("search worker exited unexpectedly"))?;
 
@@ -1757,6 +1826,21 @@ impl App {
             self.ensure_selection_visible();
         }
         self.preview_scroll = 0;
+        if let Some((_, path)) = self.pending_viewer_filter_check.as_ref() {
+            let matches = self.rules_preview.as_ref().is_some_and(|state| {
+                state.matches.iter().any(|matched| {
+                    &matched.hit.session.file_path == path
+                        && rules_preview_hit_matches(
+                            matched,
+                            &query,
+                            &self.scope,
+                            &self.filters,
+                            false,
+                        )
+                })
+            });
+            self.finish_viewer_filter_check(request_id, Ok(matches));
+        }
     }
 
     fn collect_search_responses(&mut self) -> Result<bool> {
@@ -1789,6 +1873,9 @@ impl App {
                     }
 
                     self.search_in_flight = false;
+                    if let Some(matches) = response.viewer_matches {
+                        self.finish_viewer_filter_check(response.request_id, matches);
+                    }
                     match response.result {
                         Ok(results) => {
                             let raw_count = results.len();
@@ -1980,7 +2067,7 @@ impl App {
             }) else {
                 return;
             };
-            let Some(session) = self.selected_preview().cloned() else {
+            let Some(session) = self.active_session().cloned() else {
                 return;
             };
             self.ensure_summary_cache(agent, &path, &session_id);
@@ -2126,15 +2213,143 @@ impl App {
         Ok(())
     }
 
-    /// Adopt the filter modal's values as the live search state and re-run the
-    /// search. Closing the modal here keeps `Enter` and `^S` behaving alike, so
-    /// reopening it always shows the values that were last committed.
+    fn expire_status_entries(&mut self) -> bool {
+        let mut changed = false;
+        if self
+            .statusline
+            .as_ref()
+            .is_some_and(statusline::Entry::expired)
+        {
+            self.statusline = None;
+            changed = true;
+        }
+        if let Some(viewer) = self.viewer_state_mut() {
+            if viewer
+                .status
+                .as_ref()
+                .is_some_and(statusline::Entry::expired)
+            {
+                viewer.status = None;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn viewer_state_mut(&mut self) -> Option<&mut ViewerState> {
+        match &mut self.overlay {
+            Overlay::Viewer(state) | Overlay::Filters(_, Some(state)) => Some(state),
+            Overlay::Actions(_) | Overlay::RulesActions(_) => self.viewer_before_actions.as_mut(),
+            _ => None,
+        }
+    }
+
+    fn viewer_status(&mut self, entry: statusline::Entry) {
+        self.statusline = Some(entry.clone());
+        if let Some(viewer) = self.viewer_state_mut() {
+            viewer.status = Some(entry);
+        }
+    }
+
+    fn release_closed_viewer(&mut self) {
+        if matches!(self.overlay, Overlay::None) {
+            self.viewer_hit = None;
+            self.viewer_before_actions = None;
+            self.pending_viewer_filter_check = None;
+            self.pending_viewer_exclusion = false;
+            self.viewer_exclusion_dialog = None;
+        }
+    }
+
+    fn finish_viewer_filter_check(
+        &mut self,
+        request_id: u64,
+        result: std::result::Result<bool, String>,
+    ) {
+        let Some((id, path)) = self.pending_viewer_filter_check.as_ref() else {
+            return;
+        };
+        if *id != request_id
+            || self
+                .viewer_hit
+                .as_ref()
+                .is_none_or(|hit| &hit.session.file_path != path)
+        {
+            return;
+        }
+        self.pending_viewer_filter_check = None;
+        match result {
+            Ok(matches) => self.pending_viewer_exclusion = !matches,
+            Err(error) => self.viewer_status(statusline::Entry::failed(format!(
+                "Filter check failed: {error}"
+            ))),
+        }
+    }
+
+    fn show_pending_viewer_exclusion(&mut self) {
+        if !self.pending_viewer_exclusion
+            || !matches!(self.overlay, Overlay::Viewer(_))
+            || self.help.is_some()
+        {
+            return;
+        }
+        self.pending_viewer_exclusion = false;
+        match self.settings.viewer_filter_exclusion {
+            ViewerFilterExclusion::Ask => {
+                self.viewer_exclusion_dialog = Some(ViewerExclusionDialog::default())
+            }
+            choice => self.resolve_viewer_exclusion(choice, false),
+        }
+    }
+
+    fn resolve_viewer_exclusion(&mut self, choice: ViewerFilterExclusion, remember: bool) {
+        self.resolve_viewer_exclusion_with(choice, remember, |patch| {
+            Settings::save_patch(patch).map(|_| ())
+        });
+    }
+
+    fn resolve_viewer_exclusion_with(
+        &mut self,
+        choice: ViewerFilterExclusion,
+        remember: bool,
+        save: impl FnOnce(&SettingsPatch) -> Result<()>,
+    ) {
+        self.viewer_exclusion_dialog = None;
+        if remember {
+            let patch = SettingsPatch::viewer_filter_exclusion(choice);
+            match save(&patch) {
+                Ok(_) => patch.apply_to(&mut self.settings),
+                Err(error) => self.viewer_status(statusline::Entry::failed(format!(
+                    "Could not remember choice: {error:#}"
+                ))),
+            }
+        }
+        if choice == ViewerFilterExclusion::Close {
+            self.overlay = Overlay::None;
+            self.release_closed_viewer();
+        }
+    }
+
+    /// Commit filter changes and restore the viewer that opened the modal.
     fn apply_filter_update(&mut self, update: FilterUpdate) -> Result<()> {
+        let changed = self.scope != update.scope
+            || self.filters != update.filters
+            || self.display_options != update.display_options;
         self.scope = update.scope;
         self.filters = update.filters;
         self.sort = update.sort;
         self.set_display_options(update.display_options);
-        self.overlay = Overlay::None;
+        let previous = std::mem::replace(&mut self.overlay, Overlay::None);
+        if let Overlay::Filters(_, Some(viewer)) = previous {
+            self.overlay = Overlay::Viewer(viewer);
+            self.pending_viewer_exclusion = false;
+            if changed {
+                self.pending_viewer_filter_check = self
+                    .viewer_hit
+                    .as_ref()
+                    .map(|hit| (self.next_search_id, hit.session.file_path.clone()));
+            }
+        }
         self.trigger_search_now()
     }
 
@@ -2185,6 +2400,7 @@ impl App {
     fn open_viewer(&mut self) {
         if self.selected_index().is_some() {
             let _ = self.selected_preview();
+            self.viewer_hit = self.results.get(self.selected).cloned();
             self.pending_list_click = None;
             self.pending_action_menu_click = None;
             self.viewer_before_actions = None;
@@ -2201,7 +2417,7 @@ impl App {
     }
 
     fn open_actions_menu(&mut self) {
-        if self.selected_index().is_none() {
+        if self.selected_hit().is_none() {
             return;
         }
 
@@ -2289,7 +2505,7 @@ impl App {
     }
 
     fn selected_rule_path(&self) -> Option<PathBuf> {
-        let hit = self.results.get(self.selected)?;
+        let hit = self.selected_hit()?;
         self.rules_preview
             .as_ref()?
             .proposal_for_path(&hit.session.file_path)?;
@@ -2662,8 +2878,8 @@ impl App {
         let theme = self.current_frame_theme();
         let frame_area = self.last_frame_area;
         let theme_name = self.current_frame_theme_name();
-        let selected = self.selected;
-        let viewer_summary_target = self.results.get(selected).map(|hit| {
+        let active_hit = self.selected_hit();
+        let viewer_summary_target = active_hit.as_ref().map(|hit| {
             (
                 hit.session.agent,
                 hit.session.file_path.clone(),
@@ -2673,9 +2889,8 @@ impl App {
         let viewer_summary = viewer_summary_target.and_then(|(agent, path, session_id)| {
             self.summary_sidecar_for_path(agent, &path, &session_id)
         });
-        let viewer_session = self
-            .results
-            .get(selected)
+        let viewer_session = active_hit
+            .as_ref()
             .and_then(|hit| self.preview_cache.get(&hit.session.file_path))
             .and_then(|session| session.as_ref());
         if let (Overlay::Viewer(state), Some(session)) = (&mut self.overlay, viewer_session) {
@@ -2692,7 +2907,10 @@ impl App {
     }
 
     fn selected_hit(&self) -> Option<SearchHit> {
-        self.results.get(self.selected).cloned()
+        self.viewer_hit
+            .as_ref()
+            .or_else(|| self.results.get(self.selected))
+            .cloned()
     }
 
     fn local_scope_label(&self) -> String {
@@ -2926,6 +3144,14 @@ impl App {
         }
         self.preview_scroll = 0;
         self.preview_cache.remove(&source);
+        if self
+            .viewer_hit
+            .as_ref()
+            .is_some_and(|hit| hit.session.file_path == source)
+        {
+            self.overlay = Overlay::None;
+            self.release_closed_viewer();
+        }
         self.hidden_deleted_paths.insert(source.clone());
         self.preview_render_cache = None;
         self.cancel_pending_searches();
@@ -2961,7 +3187,7 @@ impl App {
     }
 
     fn export_selected_session(&mut self, display_options: DisplayOptions) -> Result<()> {
-        let Some(session) = self.selected_preview().cloned() else {
+        let Some(session) = self.active_session().cloned() else {
             bail!("no session selected");
         };
         let rendered = session_to_plain_text_with_options(&session, display_options);
@@ -2977,7 +3203,7 @@ impl App {
         let Some(hit) = self.selected_hit() else {
             bail!("no session selected");
         };
-        let Some(session) = self.selected_preview().cloned() else {
+        let Some(session) = self.active_session().cloned() else {
             bail!("no session selected");
         };
         let rendered = session_to_rule_context_json(
@@ -3021,6 +3247,8 @@ impl App {
         }
         self.preview_scroll = 0;
         self.preview_cache.remove(&hit.session.file_path);
+        self.overlay = Overlay::None;
+        self.release_closed_viewer();
         self.hidden_deleted_paths
             .insert(hit.session.file_path.clone());
         self.preview_render_cache = None;
@@ -3513,10 +3741,17 @@ fn search_worker_loop(
                 Err(format!("{error:#}"))
             }
         };
+        let viewer_matches = command.viewer_check.as_ref().map(|path| match &result {
+            Ok(_) => search_engine
+                .matches_session(&command.request, command.display_options, path)
+                .map_err(|error| format!("{error:#}")),
+            Err(error) => Err(error.clone()),
+        });
         if response_tx
             .send(SearchResponse {
                 request_id: command.request_id,
                 result,
+                viewer_matches,
             })
             .is_err()
         {
@@ -4223,6 +4458,140 @@ mod tests {
         SummarizeBackend, SummarySidecar, SummarySources, SummaryWorker,
     };
     use crate::trash::{TrashPaths, TrashStore};
+
+    fn open_test_viewer(app: &mut App) -> PathBuf {
+        let session = sample_preview_session();
+        let path = session.file_path.clone();
+        app.results = vec![sample_hit_with_path(Agent::Claude, path.clone())];
+        app.preview_cache.insert(path.clone(), Some(session));
+        app.committed_query = "first".into();
+        app.open_viewer();
+        app.last_frame_area = Rect::new(0, 0, 100, 30);
+        path
+    }
+
+    #[test]
+    fn applying_and_saving_filters_preserves_viewer_query_and_session() {
+        for key in [
+            crossterm_key(KeyCode::Enter),
+            crossterm_key_mods(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        ] {
+            let mut app = test_app();
+            let path = open_test_viewer(&mut app);
+            app.viewer_state_mut().unwrap().scroll = 4;
+            app.open_filters();
+            app.handle_key(crossterm_key(KeyCode::Right)).unwrap();
+            app.handle_key(crossterm_key(KeyCode::Char(' '))).unwrap();
+            app.handle_key(key).unwrap();
+            assert_eq!(app.selected_hit().unwrap().session.file_path, path);
+            let viewer = app.viewer_state_mut().unwrap();
+            assert_eq!(viewer.search_query(), "first");
+            assert_eq!(viewer.scroll, 4);
+            assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+            assert!(app.pending_viewer_filter_check.is_some());
+        }
+    }
+
+    #[test]
+    fn viewer_and_actions_remain_on_captured_session_when_results_change() {
+        let mut app = test_app();
+        let path = open_test_viewer(&mut app);
+        app.results = vec![sample_hit_with_path(
+            Agent::Codex,
+            PathBuf::from("different.jsonl"),
+        )];
+        assert_eq!(app.active_session().unwrap().file_path, path);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("first user"));
+        app.results.clear();
+        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
+        assert!(matches!(app.overlay, super::Overlay::Actions(_)));
+        assert_eq!(app.selected_hit().unwrap().session.file_path, path);
+        app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+        app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
+        assert!(app.viewer_hit.is_none());
+    }
+
+    #[test]
+    fn exclusion_check_ignores_stale_results_and_escape_never_remembers() {
+        let mut app = test_app();
+        let path = open_test_viewer(&mut app);
+        app.pending_viewer_filter_check = Some((42, path.clone()));
+        app.finish_viewer_filter_check(41, Ok(false));
+        assert!(!app.pending_viewer_exclusion);
+        app.finish_viewer_filter_check(42, Ok(false));
+        app.show_pending_viewer_exclusion();
+        assert!(app.viewer_exclusion_dialog.is_some());
+        app.handle_key(crossterm_key(KeyCode::Char('r'))).unwrap();
+        app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
+        assert!(app.viewer_exclusion_dialog.is_none());
+        assert_eq!(
+            app.settings.viewer_filter_exclusion,
+            crate::settings::ViewerFilterExclusion::Ask
+        );
+        assert_eq!(app.selected_hit().unwrap().session.file_path, path);
+        app.show_pending_viewer_exclusion();
+        assert!(app.viewer_exclusion_dialog.is_none());
+    }
+
+    #[test]
+    fn remembered_exclusion_choice_and_save_failure_execute_correct_action() {
+        use crate::settings::ViewerFilterExclusion;
+        let mut app = test_app();
+        open_test_viewer(&mut app);
+        app.resolve_viewer_exclusion_with(ViewerFilterExclusion::Keep, true, |_| Ok(()));
+        assert_eq!(
+            app.settings.viewer_filter_exclusion,
+            ViewerFilterExclusion::Keep
+        );
+        app.pending_viewer_exclusion = true;
+        app.show_pending_viewer_exclusion();
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+        assert!(app.viewer_exclusion_dialog.is_none());
+        app.resolve_viewer_exclusion_with(ViewerFilterExclusion::Close, true, |_| {
+            Err(anyhow!("disk full"))
+        });
+        assert!(matches!(app.overlay, super::Overlay::None));
+        assert!(app.viewer_hit.is_none());
+        assert_eq!(
+            app.settings.viewer_filter_exclusion,
+            ViewerFilterExclusion::Keep
+        );
+        assert!(app.statusline.as_ref().unwrap().label.contains("disk full"));
+        open_test_viewer(&mut app);
+        app.settings.viewer_filter_exclusion = ViewerFilterExclusion::Close;
+        app.pending_viewer_exclusion = true;
+        app.show_pending_viewer_exclusion();
+        assert!(matches!(app.overlay, super::Overlay::None));
+    }
+
+    #[test]
+    fn exclusion_check_errors_leave_viewer_open_and_report_failure() {
+        let mut app = test_app();
+        let path = open_test_viewer(&mut app);
+        app.pending_viewer_filter_check = Some((1, path));
+        app.finish_viewer_filter_check(1, Err("index unavailable".into()));
+        app.show_pending_viewer_exclusion();
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+        assert!(app.viewer_exclusion_dialog.is_none());
+        assert!(app
+            .viewer_state_mut()
+            .unwrap()
+            .status
+            .as_ref()
+            .unwrap()
+            .label
+            .contains("index unavailable"));
+    }
 
     #[test]
     fn main_hints_match_session_screen_shortcut_bar() {
@@ -5010,7 +5379,7 @@ mod tests {
 
         app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
 
-        assert!(matches!(app.overlay, super::Overlay::None));
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
     }
 
     #[test]
@@ -5826,6 +6195,7 @@ mod tests {
 
         response_tx
             .send(SearchResponse {
+                viewer_matches: None,
                 request_id: 4,
                 result: Ok(vec![sample_hit_with_path(Agent::Codex, surviving_path)]),
             })
@@ -5848,6 +6218,7 @@ mod tests {
 
         response_tx
             .send(SearchResponse {
+                viewer_matches: None,
                 request_id: 7,
                 result: Ok(vec![sample_hit_with_path(
                     Agent::Claude,
@@ -5862,6 +6233,7 @@ mod tests {
 
         response_tx
             .send(SearchResponse {
+                viewer_matches: None,
                 request_id: 7,
                 result: Ok(vec![sample_hit_with_path(Agent::Codex, surviving_path)]),
             })
@@ -5880,6 +6252,7 @@ mod tests {
 
         response_tx
             .send(SearchResponse {
+                viewer_matches: None,
                 request_id: 11,
                 result: Ok(vec![sample_hit_with_path(Agent::Claude, missing_path)]),
             })

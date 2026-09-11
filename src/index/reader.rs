@@ -22,7 +22,7 @@ use crate::search_query::{
 };
 use crate::settings::DisplayOptions;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
     Global,
     /// The original path plus an optional canonical form (when it differs).
@@ -239,6 +239,44 @@ impl SearchEngine {
 
     pub fn search(&self, request: &SearchRequest) -> Result<Vec<SearchHit>> {
         self.search_with_display_options(request, DisplayOptions::SHOW_ALL)
+    }
+
+    /// Check a specific source against the complete query before result limits/ranking.
+    pub(crate) fn matches_session(
+        &self,
+        request: &SearchRequest,
+        display_options: DisplayOptions,
+        path: &Path,
+    ) -> Result<bool> {
+        self.reader
+            .reload()
+            .context("failed to reload tantivy reader")?;
+        let (text, visibility) =
+            extract_visibility_search(request.query.trim()).map_err(|message| anyhow!(message))?;
+        let base: Box<dyn Query> = if text.trim().is_empty() {
+            Box::new(AllQuery)
+        } else {
+            let (parser, fields) = self.query_parser(visibility, display_options);
+            let (base, syntax, _) = parse_query_with_aliases(&parser, text.trim(), &fields);
+            build_phrase_boosted_query(&parser, text.trim(), base, syntax)
+        };
+        let path_query = tantivy::query::TermQuery::new(
+            tantivy::Term::from_field_text(self.fields.file_path, &path.to_string_lossy()),
+            tantivy::schema::IndexRecordOption::Basic,
+        );
+        let query = BooleanQuery::intersection(vec![base, Box::new(path_query)]);
+        let searcher = self.reader.searcher();
+        let docs = searcher.search(&query, &TopDocs::with_limit(1).order_by_score())?;
+        let Some((_, address)) = docs.first() else {
+            return Ok(false);
+        };
+        let document = searcher.doc::<TantivyDocument>(*address)?;
+        let session = self.session_from_doc(*address, &document, &mut HashMap::new())?;
+        let is_live = self
+            .live_sessions
+            .live_session_ids()
+            .contains(&session.session_id);
+        Ok(matches_request(request, &session, is_live))
     }
 
     pub fn search_with_display_options(
@@ -1191,6 +1229,74 @@ mod tests {
             original_path: None,
             superseded_by: None,
         }
+    }
+
+    #[test]
+    fn specific_session_match_checks_query_visibility_and_filters_before_limit(
+    ) -> anyhow::Result<()> {
+        use crate::index::{IndexManager, IndexPaths, SearchFilters, SearchRequest, SortMode};
+        use crate::scan::SessionRoots;
+        use crate::settings::DisplayOptions;
+        let temp = tempfile::tempdir()?;
+        let codex = temp.path().join("sessions");
+        std::fs::create_dir_all(&codex)?;
+        for id in ["one", "two", "three"] {
+            let records = [
+                serde_json::json!({"type":"session_meta", "payload":{"id":id, "cwd":"/tmp/demo", "timestamp":"2026-08-07T12:00:00Z", "source":"cli"}}),
+                serde_json::json!({"type":"response_item", "timestamp":"2026-08-07T12:00:01Z", "payload":{"type":"message", "role":"user", "content":[{"type":"input_text", "text":format!("needle {id}")}]}}),
+            ];
+            std::fs::write(
+                codex.join(format!("rollout-{id}.jsonl")),
+                records
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )?;
+        }
+        let roots = SessionRoots {
+            claude_projects: temp.path().join("claude"),
+            codex_sessions: codex,
+            antigravity_home: temp.path().join("agy"),
+            trash: None,
+        };
+        let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+        manager.sync_with_roots(&roots, true)?;
+        let engine = manager.open_search_engine()?;
+        let mut request = SearchRequest {
+            query: "needle".into(),
+            scope: Scope::Global,
+            limit: 10,
+            sort: SortMode::Time,
+            filters: SearchFilters::default(),
+        };
+        let hits = engine.search(&request)?;
+        assert_eq!(hits.len(), 3);
+        let path = &hits[2].session.file_path;
+        request.limit = 1;
+        assert_ne!(&engine.search(&request)?[0].session.file_path, path);
+        assert!(engine.matches_session(&request, DisplayOptions::SHOW_ALL, path)?);
+        request.filters.agent = Some(Agent::Claude);
+        assert!(!engine.matches_session(&request, DisplayOptions::SHOW_ALL, path)?);
+        request.filters.agent = None;
+        request.scope = Scope::current_dir(PathBuf::from("/not/the/project"));
+        assert!(!engine.matches_session(&request, DisplayOptions::SHOW_ALL, path)?);
+        request.scope = Scope::Global;
+        request.query = "missingterm".into();
+        assert!(!engine.matches_session(&request, DisplayOptions::SHOW_ALL, path)?);
+        request.query = "visible: needle".into();
+        let hidden = DisplayOptions {
+            hide_user_messages: true,
+            ..DisplayOptions::SHOW_ALL
+        };
+        assert!(!engine.matches_session(&request, hidden, path)?);
+        request.query = "hidden: needle".into();
+        assert!(engine.matches_session(&request, hidden, path)?);
+        request.query = "user:needle".into();
+        assert!(engine.matches_session(&request, hidden, path)?);
+        request.query.clear();
+        assert!(engine.matches_session(&request, hidden, path)?);
+        Ok(())
     }
 
     #[test]

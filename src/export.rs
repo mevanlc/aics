@@ -39,6 +39,60 @@ use crate::settings::DisplayOptions;
 /// a narrow terminal.
 const MAX_TITLE_SLUG_CHARS: usize = 48;
 
+/// Source identity of a selectable viewer block, independent of wrapping and filters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SessionBlockId {
+    Summary,
+    Context,
+    Message(usize),
+    Cell(usize),
+    Metrics(usize),
+}
+
+/// Render only the requested blocks, in the caller's display order.
+/// Each cell is self-contained so a selected result retains its call context.
+pub(crate) fn selected_blocks_to_markdown(
+    session: &Session,
+    summary: Option<&crate::summary::SummarySidecar>,
+    blocks: impl IntoIterator<Item = SessionBlockId>,
+    display_options: DisplayOptions,
+) -> String {
+    let mut output = String::new();
+    for block in blocks {
+        match block {
+            SessionBlockId::Summary => {
+                if let Some(summary) = summary {
+                    push_heading(&mut output, "AICS summary", Some(summary.generated_at));
+                    push_body(&mut output, &summary.body);
+                }
+            }
+            SessionBlockId::Context => {
+                if let Some(info) = &session.session_info {
+                    push_session_info(&mut output, info);
+                }
+            }
+            SessionBlockId::Message(index) => {
+                if let Some(message) = session.messages.get(index) {
+                    if !hides_message(display_options, message.role, &message.content) {
+                        push_message(&mut output, message);
+                    }
+                }
+            }
+            SessionBlockId::Cell(index) | SessionBlockId::Metrics(index) => {
+                if let Some(cell) = session.cells.get(index) {
+                    push_cell(
+                        &mut output,
+                        cell,
+                        display_options,
+                        &mut CellContext::default(),
+                    );
+                }
+            }
+        }
+    }
+    output
+}
+
 /// Render a session as plain text: a role/timestamp line per message, then the
 /// body verbatim. This is what the TUI's export action writes.
 pub fn session_to_plain_text(session: &Session) -> String {
@@ -916,6 +970,25 @@ mod tests {
             session_info: None,
             lineage: Default::default(),
         }
+    }
+
+    #[test]
+    fn selected_result_markdown_keeps_call_context_and_fences_nested_code() {
+        let mut session = sample_session();
+        session.cells.push(SessionCell::ToolResult {
+            tool: Some("read".into()),
+            output: "```rust\n    code\n```".into(),
+            is_error: false,
+            call_summary: Some("read src/main.rs".into()),
+            timestamp: None,
+        });
+        let text = selected_blocks_to_markdown(
+            &session,
+            None,
+            [SessionBlockId::Cell(0)],
+            DisplayOptions::SHOW_ALL,
+        );
+        assert_eq!(text, "## tool result: read\n\n- **Status:** ok\n\n**Call**\n\n```text\nread src/main.rs\n```\n\n**Output**\n\n````text\n```rust\n    code\n```\n````\n\n");
     }
 
     #[test]

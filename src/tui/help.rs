@@ -138,7 +138,13 @@ const SESSION_LIST_ITEMS: [HelpItem; 20] = [
     ),
 ];
 
-const VIEWER_ITEMS: [HelpItem; 16] = [
+const VIEWER_ITEMS: [HelpItem; 22] = [
+    HelpItem::new("Left click", "select one block", "Select one whole message, tool event, summary, context, or metrics block. Clicking empty conversation space clears selection."),
+    HelpItem::new("Ctrl+click", "toggle block selection", "Add or remove the clicked block and establish the anchor for Shift-click."),
+    HelpItem::new("Shift+click", "select block range", "Replace the selection with the inclusive range from the anchor. Repeated Shift-clicks retain the anchor; without an anchor, select the clicked block."),
+    HelpItem::new("Ctrl+Shift+click", "add block range", "Add the inclusive anchored range to the selection, including offscreen blocks and skipping filtered-out blocks."),
+    HelpItem::new("Alt+C", "copy selected blocks as Markdown", "Copy selected blocks in conversation order, preserving source Markdown and respecting display filters. The selection remains after copying."),
+    HelpItem::new("^F", "apply filters and return to viewer", "Apply or save filters and return to the same session. Blocks hidden by display filters are deselected. If search filters exclude the session, choose Close session or Keep session open; Keep is selected by default. Tab switches buttons, Enter executes, K keeps, C closes, Space/R toggles Remember my choice, and Esc keeps without remembering."),
     HelpItem::new(
         "^L",
         "open this help",
