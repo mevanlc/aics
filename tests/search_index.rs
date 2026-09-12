@@ -396,6 +396,108 @@ fn semantic_text_and_path_fields_are_isolated_and_searchable() -> Result<()> {
 }
 
 #[test]
+fn internal_context_visibility_search_and_version_15_upgrade() -> Result<()> {
+    let temp = TempDir::new()?;
+    copy_fixture(
+        &temp,
+        "tests/fixtures/sessions/codex/internal_context.jsonl",
+        ".codex/sessions/rollout-internal-context.jsonl",
+    )?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
+        trash: None,
+    };
+    let paths = IndexPaths::from_root(temp.path().join("cache"));
+    let manager = IndexManager::with_paths(paths.clone());
+    manager.sync_with_roots(&roots, true)?;
+
+    // Retain fingerprints for unchanged source files, but simulate the old index
+    // schema and version. A normal sync must recreate and repopulate the index.
+    let mut schema = serde_json::to_value(aics::index::schema::IndexSchema::new().schema)?;
+    schema
+        .as_array_mut()
+        .unwrap()
+        .retain(|field| field["name"] != "_vis_user_internal_context");
+    fs::remove_dir_all(&paths.index_dir)?;
+    fs::create_dir_all(&paths.index_dir)?;
+    drop(tantivy::Index::create_in_dir(
+        &paths.index_dir,
+        serde_json::from_value(schema)?,
+    )?);
+    let mut state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&paths.state_file)?)?;
+    state["format_version"] = 15.into();
+    fs::write(&paths.state_file, serde_json::to_vec(&state)?)?;
+    manager.sync_with_roots(&roots, false)?;
+    let engine = manager.open_search_engine()?;
+
+    for hide_internal_context in [false, true] {
+        for hide_user_messages in [false, true] {
+            let options = DisplayOptions {
+                hide_internal_context,
+                hide_user_messages,
+                ..DisplayOptions::SHOW_ALL
+            };
+            let hidden = hide_internal_context || hide_user_messages;
+            for needle in ["InternalGoalNeedle", "LegacyGoalNeedle", "<internalgoal.*>"] {
+                assert_eq!(
+                    search_hits_with_options(&engine, &format!("visible: {needle}"), options)?
+                        .len(),
+                    usize::from(!hidden),
+                    "{needle}"
+                );
+                assert_eq!(
+                    search_hits_with_options(&engine, &format!("hidden: {needle}"), options)?.len(),
+                    usize::from(hidden),
+                    "{needle}"
+                );
+                assert_eq!(
+                    search_hits_with_options(&engine, &format!("all: {needle}"), options)?.len(),
+                    1
+                );
+                assert_eq!(search_hits_with_options(&engine, needle, options)?.len(), 1);
+            }
+            assert_eq!(
+                search_hits_with_options(&engine, "visible: content:InternalGoalNeedle", options)?
+                    .len(),
+                1
+            );
+            assert!(
+                search_hits_with_options(&engine, "user:InternalGoalNeedle", options)?.is_empty()
+            );
+        }
+    }
+    for needle in [
+        "UserPromptNeedle",
+        "NotificationNeedle",
+        "MixedPromptNeedle",
+        "AssistantQuoteNeedle",
+    ] {
+        assert_eq!(
+            search_hits_with_options(
+                &engine,
+                &format!("visible: {needle}"),
+                DisplayOptions::default()
+            )?
+            .len(),
+            1
+        );
+    }
+    assert_eq!(
+        search_hits_with_options(
+            &engine,
+            "hidden: InternalGoalNeedle",
+            DisplayOptions::default()
+        )?
+        .len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn visibility_modifiers_follow_display_toggles_and_explicit_fields_override_them() -> Result<()> {
     let temp = TempDir::new()?;
     write_semantic_field_codex_session(&temp)?;

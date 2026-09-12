@@ -168,8 +168,8 @@ defaults, so a scripted export selects exactly what its flags asked for. Use
 | `--hide ITEM` | Hide one transcript part; repeat the flag for more than one |
 
 `ITEM` is one of `project-docs-autodump`, `skill-text-injection`, `tool-calls`,
-`tool-results`, `agent-replies`, or `user-messages` — the six toggles the filter
-modal offers, each named after its `display_options` key in `settings.json` with
+`tool-results`, `agent-replies`, `user-messages`, or `internal-context` — the seven
+toggles the filter modal offers, each named after its `display_options` key in `settings.json` with
 `hide_` stripped.
 
 ```bash
@@ -193,6 +193,10 @@ Two items hide more than their name suggests, matching the viewer:
 `tool-calls` also drops exec, patch, and web-search blocks, since those are tool
 invocations; `tool-results` also suppresses the stdout and stderr inside exec and
 patch blocks while leaving the invocations themselves in place.
+
+`internal-context` hides complete user-message `<codex_internal_context …>` and
+`<goal_context>` injections. The TUI hides these by default; complete exports
+include them unless `--hide internal-context` is specified.
 
 Session provenance — the id, project, branch, timestamps, and source path at the
 top of an exported file — is not part of the transcript and is never hidden.

@@ -100,6 +100,8 @@ pub struct DisplayOptions {
     pub hide_user_messages: bool,
     #[serde(default = "default_hide_project_docs_autodump")]
     pub hide_project_docs_autodump: bool,
+    #[serde(default = "default_hide_internal_context")]
+    pub hide_internal_context: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,7 +251,7 @@ impl SettingsPatch {
 
 impl DisplayOptions {
     /// Every part of a transcript visible. Unlike `default()`, which hides
-    /// project-doc autodumps because they are noise in a preview pane, this
+    /// project-doc autodumps and internal context in a preview pane, this
     /// hides nothing — it is the baseline for exports, which are archives.
     pub const SHOW_ALL: Self = Self {
         hide_skill_text_injection: false,
@@ -258,6 +260,7 @@ impl DisplayOptions {
         hide_agent_replies: false,
         hide_user_messages: false,
         hide_project_docs_autodump: false,
+        hide_internal_context: false,
     };
 }
 
@@ -265,6 +268,7 @@ impl Default for DisplayOptions {
     fn default() -> Self {
         Self {
             hide_project_docs_autodump: default_hide_project_docs_autodump(),
+            hide_internal_context: default_hide_internal_context(),
             ..Self::SHOW_ALL
         }
     }
@@ -311,6 +315,10 @@ fn default_snippet_line_count() -> usize {
 }
 
 fn default_hide_project_docs_autodump() -> bool {
+    true
+}
+
+fn default_hide_internal_context() -> bool {
     true
 }
 
@@ -695,6 +703,7 @@ mod tests {
         assert_eq!(parsed.display_options, DisplayOptions::default());
         assert!(!parsed.display_options.hide_skill_text_injection);
         assert!(parsed.display_options.hide_project_docs_autodump);
+        assert!(parsed.display_options.hide_internal_context);
     }
 
     #[test]
@@ -704,6 +713,24 @@ mod tests {
         assert!(parsed.hide_tool_calls);
         assert!(!parsed.hide_skill_text_injection);
         assert!(parsed.hide_project_docs_autodump);
+        assert!(parsed.hide_internal_context);
+    }
+
+    #[test]
+    fn internal_context_setting_persists_both_visibility_choices() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        for hide_internal_context in [false, true] {
+            let options = DisplayOptions {
+                hide_internal_context,
+                ..DisplayOptions::default()
+            };
+            Settings::save_patch_to_path(&path, &SettingsPatch::display_options(options)).unwrap();
+            assert_eq!(
+                Settings::load_from_path(&path).unwrap().display_options,
+                options
+            );
+        }
     }
 
     #[test]

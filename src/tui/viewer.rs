@@ -16,7 +16,9 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::export::{selected_blocks_to_markdown, SessionBlockId};
-use crate::parse::{is_project_docs_autodump, MessageRole, Session, SessionCell};
+use crate::parse::{
+    is_internal_context_injection, is_project_docs_autodump, MessageRole, Session, SessionCell,
+};
 use crate::search_query::extract_highlight_terms;
 use crate::settings::{DisplayOptions, ThemeName};
 use crate::summary::SummarySidecar;
@@ -1136,6 +1138,8 @@ fn should_skip_message_row(
         || options.hide_project_docs_autodump && is_project_docs_autodump(role, content)
         || options.display_options.hide_skill_text_injection
             && crate::parse::is_skill_text_injection(role, content)
+        || options.display_options.hide_internal_context
+            && is_internal_context_injection(role, content)
 }
 
 fn message_header_text(message: &crate::parse::SessionMessage) -> String {
@@ -2147,6 +2151,44 @@ mod tests {
         let state = ViewerState::new();
 
         assert!(state.active_match.is_none());
+    }
+
+    #[test]
+    fn internal_context_visibility_updates_viewer_and_message_navigation() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sessions/codex/internal_context.jsonl");
+        let mut session = crate::parse::parse_codex_session_file(path)
+            .unwrap()
+            .unwrap();
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 100, 30);
+        for fallback in [false, true] {
+            if fallback {
+                session.cells.clear();
+            }
+            let mut state = ViewerState::new();
+            for hidden in [true, false, true] {
+                let options = DisplayOptions {
+                    hide_internal_context: hidden,
+                    ..DisplayOptions::default()
+                };
+                let text = rendered_lines(
+                    &state
+                        .render_cache(area, &session, None, &theme, ThemeName::default(), options)
+                        .text,
+                )
+                .join("\n");
+                assert_eq!(text.contains("InternalGoalNeedle"), !hidden);
+                assert_eq!(text.contains("LegacyGoalNeedle"), !hidden);
+                assert!(text.contains("MixedPromptNeedle"));
+                for (scope, count) in [(MessageJumpScope::Any, 6), (MessageJumpScope::UserOnly, 5)]
+                {
+                    let rows = collect_message_rows(&session, None, &theme, 96, scope, options);
+                    assert_eq!(rows.len(), count - if hidden { 2 } else { 0 });
+                    assert!(rows.windows(2).all(|pair| pair[0] < pair[1]));
+                }
+            }
+        }
     }
 
     #[test]

@@ -18,9 +18,9 @@ use crate::index::schema::IndexSchema;
 use crate::live::LiveSessionTracker;
 use crate::parse::search_fields::readable_tool_text;
 use crate::parse::{
-    is_project_docs_autodump, is_skill_text_injection, parse_codex_session_meta_lineage_file,
-    parse_scanned_session_file, Agent, DerivationType, MessageRole, Session, SessionCell,
-    SessionInfo, SessionLineage,
+    is_internal_context_injection, is_project_docs_autodump, is_skill_text_injection,
+    parse_codex_session_meta_lineage_file, parse_scanned_session_file, Agent, DerivationType,
+    MessageRole, Session, SessionCell, SessionInfo, SessionLineage,
 };
 use crate::scan::{
     default_session_roots, scan_session_files_with_progress, ResolvedPaths, SessionFile,
@@ -626,6 +626,11 @@ fn add_session_document(
         &visibility.user_project_docs,
     );
     add_joined_text(&mut document, fields.vis_user_skill, &visibility.user_skill);
+    add_joined_text(
+        &mut document,
+        fields.vis_user_internal_context,
+        &visibility.user_internal_context,
+    );
     if let Some(cwd) = session.cwd.as_deref() {
         for term in working_dir_search_terms(cwd) {
             document.add_text(fields.working_dir, term);
@@ -689,6 +694,7 @@ struct VisibilityContent {
     project_docs: Vec<String>,
     user_project_docs: Vec<String>,
     user_skill: Vec<String>,
+    user_internal_context: Vec<String>,
 }
 
 impl VisibilityContent {
@@ -703,6 +709,10 @@ impl VisibilityContent {
         }
         if is_skill_text_injection(role, content) {
             push_visibility_text(&mut self.user_skill, content);
+            return;
+        }
+        if is_internal_context_injection(role, content) {
+            push_visibility_text(&mut self.user_internal_context, content);
             return;
         }
 
@@ -853,7 +863,7 @@ fn working_dir_search_terms(cwd: &str) -> Vec<String> {
 
 /// Bump when indexed/stored fields or searchable-content semantics change so old
 /// state files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 15;
+const INDEX_FORMAT_VERSION: u32 = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {

@@ -23,6 +23,7 @@ const VIS_TOOL_CALL_RESULT_FIELD: &str = "_vis_toolcall_result";
 const VIS_PROJECT_DOCS_FIELD: &str = "_vis_projectdocs";
 const VIS_USER_PROJECT_DOCS_FIELD: &str = "_vis_user_projectdocs";
 const VIS_USER_SKILL_FIELD: &str = "_vis_user_skill";
+const VIS_USER_INTERNAL_CONTEXT_FIELD: &str = "_vis_user_internal_context";
 const WORKING_DIR_FIELD: &str = "working_dir";
 const WORKING_DIR_TOKENIZER: &str = "working_dir";
 const FILE_PATH_FIELD: &str = "file_path";
@@ -49,6 +50,7 @@ pub struct IndexSchema {
     pub vis_project_docs: Field,
     pub vis_user_project_docs: Field,
     pub vis_user_skill: Field,
+    pub vis_user_internal_context: Field,
     pub working_dir: Field,
     pub file_path: Field,
     pub modified_ts: Field,
@@ -101,7 +103,9 @@ impl IndexSchema {
             builder.add_text_field(VIS_PROJECT_DOCS_FIELD, content_options.clone());
         let vis_user_project_docs =
             builder.add_text_field(VIS_USER_PROJECT_DOCS_FIELD, content_options.clone());
-        let vis_user_skill = builder.add_text_field(VIS_USER_SKILL_FIELD, content_options);
+        let vis_user_skill = builder.add_text_field(VIS_USER_SKILL_FIELD, content_options.clone());
+        let vis_user_internal_context =
+            builder.add_text_field(VIS_USER_INTERNAL_CONTEXT_FIELD, content_options);
         let working_dir = builder.add_text_field(WORKING_DIR_FIELD, working_dir_options);
         let file_path = builder.add_text_field(FILE_PATH_FIELD, STRING | STORED);
         let modified_ts = builder.add_u64_field(MODIFIED_TS_FIELD, numeric_options);
@@ -126,6 +130,7 @@ impl IndexSchema {
             vis_project_docs,
             vis_user_project_docs,
             vis_user_skill,
+            vis_user_internal_context,
             working_dir,
             file_path,
             modified_ts,
@@ -190,6 +195,9 @@ impl IndexSchema {
                 .context("missing visibility field")?,
             vis_user_skill: schema
                 .get_field(VIS_USER_SKILL_FIELD)
+                .context("missing visibility field")?,
+            vis_user_internal_context: schema
+                .get_field(VIS_USER_INTERNAL_CONTEXT_FIELD)
                 .context("missing visibility field")?,
             working_dir: schema
                 .get_field(WORKING_DIR_FIELD)

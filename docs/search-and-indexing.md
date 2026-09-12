@@ -139,6 +139,11 @@ are hidden. For structured exec and patch cells, output counts as hidden when
 either Tool Calls or Tool Results hides it, matching what the transcript viewer
 can display.
 
+Internal/goal wrapper messages count as hidden when either **Internal Context**
+or **User Messages** hides them. Internal Context is hidden by default. Use
+`hidden: "Continue working toward the active thread goal"` to find those messages
+while they are hidden; ordinary searches and `all:` still include them.
+
 Queries use Tantivy's lenient query parser:
 
 - Bare words are token searches and multiple bare words are ANDed by default.

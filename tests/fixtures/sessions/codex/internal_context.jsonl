@@ -1,0 +1,8 @@
+{"timestamp":"2026-08-08T19:52:50Z","type":"session_meta","payload":{"id":"internal-context-fixture","timestamp":"2026-08-08T19:52:50Z","cwd":"/tmp/internal-context-fixture","originator":"codex_cli_rs","source":"cli"}}
+{"timestamp":"2026-08-08T19:52:50Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"UserPromptNeedle: work on the task."}]}}
+{"timestamp":"2026-08-08T19:52:51Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<codex_internal_context source=\"goal\">\nContinue working toward the active thread goal. InternalGoalNeedle\n</codex_internal_context>"}]}}
+{"timestamp":"2026-08-08T19:52:52Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<goal_context>LegacyGoalNeedle</goal_context>"}]}}
+{"timestamp":"2026-08-08T19:52:53Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>EnvironmentNeedle</environment_context>"}]}}
+{"timestamp":"2026-08-08T19:52:53.500Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<subagent_notification>NotificationNeedle</subagent_notification>"}]}}
+{"timestamp":"2026-08-08T19:52:54Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<goal_context>MixedContextNeedle</goal_context>\nMixedPromptNeedle: actual request."}]}}
+{"timestamp":"2026-08-08T19:52:55Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"<goal_context>AssistantQuoteNeedle</goal_context>"}]}}

@@ -38,13 +38,14 @@ const FIELD_ORDER: [FilterField; 15] = [
     FilterField::Sort,
 ];
 
-const DISPLAY_ORDER: [DisplayField; 6] = [
+const DISPLAY_ORDER: [DisplayField; 7] = [
     DisplayField::ProjectDocsAutodump,
     DisplayField::SkillTextInjection,
     DisplayField::ToolCalls,
     DisplayField::ToolResults,
     DisplayField::AgentReplies,
     DisplayField::UserMessages,
+    DisplayField::InternalContext,
 ];
 
 const FILTER_COLUMN_WIDTH: u16 = 27;
@@ -77,6 +78,7 @@ enum DisplayField {
     ToolResults,
     AgentReplies,
     UserMessages,
+    InternalContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -454,6 +456,10 @@ impl FilterModalState {
             DisplayField::UserMessages => {
                 self.display_options.hide_user_messages = !self.display_options.hide_user_messages;
             }
+            DisplayField::InternalContext => {
+                self.display_options.hide_internal_context =
+                    !self.display_options.hide_internal_context;
+            }
         }
     }
 
@@ -797,6 +803,7 @@ impl DisplayField {
             Self::ToolResults => '4',
             Self::AgentReplies => '5',
             Self::UserMessages => '6',
+            Self::InternalContext => '7',
         }
     }
 
@@ -814,6 +821,7 @@ impl DisplayField {
             Self::ToolResults => "Tool Results",
             Self::AgentReplies => "Agent Replies",
             Self::UserMessages => "User Messages",
+            Self::InternalContext => "Internal Context",
         }
     }
 
@@ -827,6 +835,9 @@ impl DisplayField {
             Self::ToolResults => "Hide tool result blocks from previews and viewers.",
             Self::AgentReplies => "Hide assistant reply messages from previews and viewers.",
             Self::UserMessages => "Hide user messages from previews and viewers.",
+            Self::InternalContext => {
+                "Hide generated codex_internal_context and goal_context messages."
+            }
         }
     }
 
@@ -838,6 +849,7 @@ impl DisplayField {
             DisplayField::ToolResults => options.hide_tool_results,
             DisplayField::AgentReplies => options.hide_agent_replies,
             DisplayField::UserMessages => options.hide_user_messages,
+            DisplayField::InternalContext => options.hide_internal_context,
         };
         on_off(!hidden)
     }
@@ -944,7 +956,8 @@ mod tests {
         assert_eq!(DisplayField::SkillTextInjection.value(defaults), "on");
         assert_eq!(DisplayField::ToolResults.label(), "Tool Results");
         assert_eq!(DisplayField::ToolResults.value(defaults), "on");
-        for (field, mnemonic) in super::DISPLAY_ORDER.into_iter().zip('1'..='6') {
+        assert_eq!(DisplayField::InternalContext.value(defaults), "off");
+        for (field, mnemonic) in super::DISPLAY_ORDER.into_iter().zip('1'..='7') {
             assert_eq!(field.mnemonic(), mnemonic);
         }
     }
@@ -975,7 +988,7 @@ mod tests {
         let first_value_x = right.x + 6 + super::DISPLAY_LABEL_WIDTH as u16;
         assert_eq!(visibility_header, "Visibility");
         assert_eq!(right.x, left.right() + 1);
-        for (row_offset, mnemonic) in ('1'..='6').enumerate() {
+        for (row_offset, mnemonic) in ('1'..='7').enumerate() {
             assert_eq!(
                 buffer[(mnemonic_x, right.y + row_offset as u16)].symbol(),
                 "["
@@ -1227,6 +1240,59 @@ mod tests {
             DisplayField::SkillTextInjection
         );
         assert!(state.display_options.hide_skill_text_injection);
+    }
+
+    #[test]
+    fn internal_context_toggle_applies_saves_and_resets() {
+        let scope = Scope::Global;
+        let mut state = FilterModalState::new(
+            &scope,
+            &SearchFilters::default(),
+            SortMode::Time,
+            DisplayOptions::default(),
+        );
+        for _ in 0..2 {
+            state
+                .handle_key(
+                    KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE),
+                    &scope,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            *state.display_selected.current(),
+            DisplayField::InternalContext
+        );
+        assert!(
+            !state
+                .build_update(&scope)
+                .unwrap()
+                .display_options
+                .hide_internal_context
+        );
+        let super::FilterOutcome::SaveDefault(update) = state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                &scope,
+            )
+            .unwrap()
+        else {
+            panic!("expected save-default action");
+        };
+        assert!(!update.display_options.hide_internal_context);
+        state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                &scope,
+            )
+            .unwrap();
+        assert!(
+            state
+                .build_update(&scope)
+                .unwrap()
+                .display_options
+                .hide_internal_context
+        );
     }
 
     #[test]

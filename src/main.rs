@@ -252,7 +252,7 @@ enum CliSupersededFilter {
     Both,
 }
 
-/// The six transcript parts the filter modal can toggle. Each name is the
+/// The transcript parts the filter modal can toggle. Each name is the
 /// matching `display_options` settings key with `hide_` stripped, so what is
 /// typed here is greppable in `settings.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -263,6 +263,7 @@ enum CliHideItem {
     ToolResults,
     AgentReplies,
     UserMessages,
+    InternalContext,
 }
 
 impl CliHideItem {
@@ -277,6 +278,7 @@ impl CliHideItem {
             Self::ToolResults => options.hide_tool_results = true,
             Self::AgentReplies => options.hide_agent_replies = true,
             Self::UserMessages => options.hide_user_messages = true,
+            Self::InternalContext => options.hide_internal_context = true,
         }
     }
 }
@@ -1576,6 +1578,8 @@ mod tests {
             "agent-replies",
             "--hide",
             "user-messages",
+            "--hide",
+            "internal-context",
         ]);
 
         let options = hidden_from(DisplayOptions::SHOW_ALL, &cli.hide);
@@ -1586,6 +1590,7 @@ mod tests {
         assert!(options.hide_tool_results);
         assert!(options.hide_agent_replies);
         assert!(options.hide_user_messages);
+        assert!(options.hide_internal_context);
     }
 
     #[test]

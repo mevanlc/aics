@@ -524,6 +524,7 @@ impl SearchEngine {
         const TOOL_RESULT: u8 = 1 << 3;
         const PROJECT_DOCS: u8 = 1 << 4;
         const SKILL: u8 = 1 << 5;
+        const INTERNAL_CONTEXT: u8 = 1 << 6;
 
         let hidden_bit = |hidden: bool, bit| if hidden { bit } else { 0 };
         let hidden = hidden_bit(display_options.hide_user_messages, USER)
@@ -531,7 +532,8 @@ impl SearchEngine {
             | hidden_bit(display_options.hide_tool_calls, TOOL_CALL)
             | hidden_bit(display_options.hide_tool_results, TOOL_RESULT)
             | hidden_bit(display_options.hide_project_docs_autodump, PROJECT_DOCS)
-            | hidden_bit(display_options.hide_skill_text_injection, SKILL);
+            | hidden_bit(display_options.hide_skill_text_injection, SKILL)
+            | hidden_bit(display_options.hide_internal_context, INTERNAL_CONTEXT);
         let candidates = [
             (self.fields.vis_always, "_vis_always", 0),
             (self.fields.vis_user, "_vis_user", USER),
@@ -554,6 +556,11 @@ impl SearchEngine {
                 USER | PROJECT_DOCS,
             ),
             (self.fields.vis_user_skill, "_vis_user_skill", USER | SKILL),
+            (
+                self.fields.vis_user_internal_context,
+                "_vis_user_internal_context",
+                USER | INTERNAL_CONTEXT,
+            ),
         ];
 
         candidates

@@ -8,8 +8,9 @@ use ratatui::widgets::{Block, BorderType, Borders};
 use ratatui::Frame;
 
 use crate::parse::{
-    is_project_docs_autodump, is_skill_text_injection, Agent, ExecStatus, MessageRole, PatchFile,
-    PatchOp, PlanItemStatus, RuntimeMetrics, Session, SessionCell, SessionInfo, ToolStatus,
+    is_internal_context_injection, is_project_docs_autodump, is_skill_text_injection, Agent,
+    ExecStatus, MessageRole, PatchFile, PatchOp, PlanItemStatus, RuntimeMetrics, Session,
+    SessionCell, SessionInfo, ToolStatus,
 };
 use crate::settings::DisplayOptions;
 use crate::summary::{
@@ -282,6 +283,8 @@ fn should_hide_message(role: MessageRole, content: &str, options: SessionRenderO
         || options.hide_project_docs_autodump && is_project_docs_autodump(role, content)
         || options.display_options.hide_skill_text_injection
             && is_skill_text_injection(role, content)
+        || options.display_options.hide_internal_context
+            && is_internal_context_injection(role, content)
 }
 
 fn should_hide_cell(cell: &SessionCell, options: SessionRenderOptions) -> bool {
@@ -1996,6 +1999,50 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn preview_internal_context_visibility_handles_cells_and_fallback_messages() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sessions/codex/internal_context.jsonl");
+        let mut session = crate::parse::parse_codex_session_file(path)
+            .unwrap()
+            .unwrap();
+        let theme = Theme::default();
+        assert!(!session.cells.is_empty());
+        for fallback in [false, true] {
+            if fallback {
+                session.cells.clear();
+            }
+            for hidden in [true, false] {
+                let options = DisplayOptions {
+                    hide_internal_context: hidden,
+                    ..DisplayOptions::default()
+                };
+                let document = super::render_session_section_document_with_options(
+                    Some(&session),
+                    &theme,
+                    None,
+                    options,
+                );
+                let text = rendered_lines(&document.text).join("\n");
+                for needle in ["InternalGoalNeedle", "LegacyGoalNeedle"] {
+                    assert_eq!(
+                        text.contains(needle),
+                        !hidden,
+                        "{needle}, fallback={fallback}"
+                    );
+                }
+                for needle in [
+                    "UserPromptNeedle",
+                    "NotificationNeedle",
+                    "MixedPromptNeedle",
+                    "AssistantQuoteNeedle",
+                ] {
+                    assert!(text.contains(needle), "{needle}, fallback={fallback}");
+                }
+            }
+        }
     }
 
     #[test]

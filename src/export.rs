@@ -29,8 +29,9 @@ use crate::fs_safename::{
     validate_windows_filename_component, validate_windows_stem_with_extension,
 };
 use crate::parse::{
-    is_project_docs_autodump, is_skill_text_injection, ExecStatus, MessageRole, PatchOp,
-    PlanItemStatus, RuntimeMetrics, Session, SessionCell, SessionInfo, SessionMessage, ToolStatus,
+    is_internal_context_injection, is_project_docs_autodump, is_skill_text_injection, ExecStatus,
+    MessageRole, PatchOp, PlanItemStatus, RuntimeMetrics, Session, SessionCell, SessionInfo,
+    SessionMessage, ToolStatus,
 };
 use crate::settings::DisplayOptions;
 
@@ -204,6 +205,7 @@ fn hides_message(display_options: DisplayOptions, role: MessageRole, content: &s
     role_hidden
         || display_options.hide_project_docs_autodump && is_project_docs_autodump(role, content)
         || display_options.hide_skill_text_injection && is_skill_text_injection(role, content)
+        || display_options.hide_internal_context && is_internal_context_injection(role, content)
 }
 
 /// Write `rendered` as a `.txt` file in the current directory.
@@ -1543,6 +1545,46 @@ mod tests {
     }
 
     #[test]
+    fn internal_context_is_retained_in_complete_exports_and_hidden_on_request() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sessions/codex/internal_context.jsonl");
+        let mut session = crate::parse::parse_codex_session_file(path)
+            .unwrap()
+            .unwrap();
+        let hidden_options = DisplayOptions {
+            hide_internal_context: true,
+            ..DisplayOptions::SHOW_ALL
+        };
+        for fallback in [false, true] {
+            if fallback {
+                session.cells.clear();
+            }
+            for text in [
+                session_to_markdown(&session),
+                session_to_plain_text(&session),
+            ] {
+                assert!(text.contains("InternalGoalNeedle"));
+                assert!(text.contains("LegacyGoalNeedle"));
+            }
+            for text in [
+                session_to_markdown_with_options(&session, hidden_options),
+                session_to_plain_text_with_options(&session, hidden_options),
+            ] {
+                assert!(!text.contains("InternalGoalNeedle"));
+                assert!(!text.contains("LegacyGoalNeedle"));
+                for needle in [
+                    "UserPromptNeedle",
+                    "NotificationNeedle",
+                    "MixedPromptNeedle",
+                    "AssistantQuoteNeedle",
+                ] {
+                    assert!(text.contains(needle), "{needle}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn provenance_survives_even_when_everything_is_hidden() {
         let options = DisplayOptions {
             hide_skill_text_injection: true,
@@ -1551,6 +1593,7 @@ mod tests {
             hide_agent_replies: true,
             hide_user_messages: true,
             hide_project_docs_autodump: true,
+            hide_internal_context: true,
         };
 
         let rendered = session_to_markdown_with_options(&session_with_every_cell_kind(), options);

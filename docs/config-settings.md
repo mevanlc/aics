@@ -37,13 +37,20 @@ stderr and in the TUI status line.
 - `summarize_command`: command used to generate a session summary
 - `summarize_prompt`: prompt template supplied to the summarizer
 - `display_options`: visibility of skill injection, tool calls, tool results,
-  agent replies, user messages, and project-document boilerplate
+  agent replies, user messages, project-document boilerplate, and internal context
 - `default_filter`: saved startup scope, sort order, and search filters
 - `viewer_filter_exclusion`: `ask` (default), `keep`, or `close`; controls what happens
   when updated filters exclude the session open in the full viewer
 
 Unknown theme names fall back to `lazygit` without discarding the other settings
 in the file.
+
+`display_options.hide_internal_context` defaults to `true`, including when the
+key is absent from existing settings. The **Internal Context** visibility toggle
+in `Ctrl+F` (mnemonic `7`) shows or hides user messages consisting entirely of
+`<codex_internal_context …>` or `<goal_context>` blocks. Messages with ordinary
+prose outside the blocks or incomplete wrappers remain visible. Other generated
+context, such as environment blocks, keeps its existing visibility behavior.
 
 ## Viewer filter exclusion
 

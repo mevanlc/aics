@@ -478,6 +478,49 @@ pub fn is_skill_text_injection(role: MessageRole, content: &str) -> bool {
         && starts_with_marked_block("<skill>", "</skill>", content.trim_start())
 }
 
+/// Match entire generated messages, never prose that merely mentions a wrapper.
+pub fn is_internal_context_injection(role: MessageRole, content: &str) -> bool {
+    if role != MessageRole::User {
+        return false;
+    }
+    let content = content.trim();
+    if !["<codex_internal_context", "<goal_context"]
+        .into_iter()
+        .any(|open| {
+            content
+                .get(..open.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(open))
+        })
+    {
+        return false;
+    }
+    let normalized = content.to_ascii_lowercase();
+    let mut remaining = normalized.as_str();
+    while !remaining.is_empty() {
+        let Some((open, close)) = [
+            ("<codex_internal_context", "</codex_internal_context>"),
+            ("<goal_context", "</goal_context>"),
+        ]
+        .into_iter()
+        .find(|(open, _)| {
+            remaining
+                .strip_prefix(open)
+                .is_some_and(|rest| rest.starts_with('>') || rest.starts_with(char::is_whitespace))
+        }) else {
+            return false;
+        };
+        let Some(open_end) = remaining[open.len()..].find('>') else {
+            return false;
+        };
+        let body = &remaining[open.len() + open_end + 1..];
+        let Some(close_start) = body.find(close) else {
+            return false;
+        };
+        remaining = body[close_start + close.len()..].trim_start();
+    }
+    true
+}
+
 pub fn is_contextual_user_message_text(content: &str) -> bool {
     let trimmed = content.trim_start();
     is_project_docs_contextual_user_text(trimmed)
@@ -990,5 +1033,41 @@ mod tests {
             MessageRole::Assistant,
             "<skill>quoted helper instructions</skill>",
         ));
+    }
+
+    #[test]
+    fn internal_context_matches_only_complete_user_wrapper_messages() {
+        for content in [
+            "<codex_internal_context source=\"goal\">\nContinue working toward the active thread goal.\n</codex_internal_context>",
+            "<codex_internal_context source=\"other\">context</codex_internal_context>",
+            "\n <CODEX_INTERNAL_CONTEXT source='goal'>界</CoDeX_Internal_Context> \n",
+            "<goal_context>goal</goal_context>",
+            "<goal_context source=\"goal\">goal</goal_context>",
+            "<goal_context>first</goal_context>\n<codex_internal_context>second</codex_internal_context>",
+        ] {
+            assert!(super::is_internal_context_injection(MessageRole::User, content), "{content}");
+            for role in [MessageRole::Assistant, MessageRole::System, MessageRole::ToolResult] {
+                assert!(!super::is_internal_context_injection(role, content));
+            }
+        }
+        for content in [
+            "",
+            "ordinary prompt",
+            "Please explain <goal_context>goal</goal_context>",
+            "```xml\n<goal_context>goal</goal_context>\n```",
+            "<goal_context>goal</goal_context>\nActual request",
+            "<goal_context>goal</goal_context>\n<goal_context>incomplete",
+            "<codex_internal_contextual>context</codex_internal_context>",
+            "<goal_context_extra>goal</goal_context>",
+            "<codex_internal_context source=\"goal\">incomplete",
+            "<goal_context>wrong close</codex_internal_context>",
+            "<environment_context>environment</environment_context>",
+            "<skill>instructions</skill>",
+        ] {
+            assert!(
+                !super::is_internal_context_injection(MessageRole::User, content),
+                "{content}"
+            );
+        }
     }
 }

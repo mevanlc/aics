@@ -8,6 +8,9 @@ before changing files or apply supported actions non-interactively.
 
 Rules live at `~/.config/aics/rules.js` by default.
 
+See [the maintainer's rules.js](rules.js) for a complete exemplar, including
+startup cleanup, commit-only sessions, and superseded sessions.
+
 - `aics --preview-rules` reviews proposed actions in the TUI without changing
   files.
 - `aics --preview-rules --json` prints proposed actions as JSONL.
