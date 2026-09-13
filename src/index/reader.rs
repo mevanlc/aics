@@ -8,9 +8,11 @@ use log::warn;
 use tantivy::collector::TopDocs;
 use tantivy::query::{AllQuery, BooleanQuery, BoostQuery, Query, QueryParser};
 use tantivy::query_grammar::{UserInputAst, UserInputLeaf};
-use tantivy::schema::Value;
+use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::snippet::{Snippet, SnippetGenerator};
-use tantivy::{DocAddress, Index, IndexReader, Order, ReloadPolicy, TantivyDocument};
+use tantivy::{
+    DocAddress, DocSet, Index, IndexReader, Order, ReloadPolicy, TantivyDocument, TERMINATED,
+};
 
 use crate::index::schema::IndexSchema;
 use crate::index::writer::{IndexPaths, StoredSession};
@@ -380,6 +382,7 @@ impl SearchEngine {
     ) -> Result<Vec<SearchHit>> {
         let modified_ts_field = self.fields.schema.get_field_name(self.fields.modified_ts);
         let candidate_limit = candidate_limit(request, true);
+        let scope_candidates = self.recent_scope_candidates(searcher, &request.scope)?;
         let mut hits = Vec::with_capacity(limit);
         let mut offset = 0usize;
 
@@ -398,6 +401,11 @@ impl SearchEngine {
             let docs_len = docs.len();
             offset += docs_len;
             for (_, address) in docs {
+                if scope_candidates.as_ref().is_some_and(|segments| {
+                    !segments[address.segment_ord as usize][address.doc_id as usize]
+                }) {
+                    continue;
+                }
                 let session = self.load_session(searcher, address, session_cache)?;
                 let is_live = live_ids.contains(&session.session_id);
                 if !matches_request(request, &session, is_live) {
@@ -421,6 +429,56 @@ impl SearchEngine {
         }
 
         Ok(hits)
+    }
+
+    /// Reject unrelated directories using the small term dictionary and postings,
+    /// before decompressing documents containing the full transcript. All parsers
+    /// set project to cwd when present; sessions without cwd still need the normal
+    /// project fallback check. This is only a prefilter: matches_request remains
+    /// authoritative, including case sensitivity and all other filters.
+    fn recent_scope_candidates(
+        &self,
+        searcher: &tantivy::Searcher,
+        scope: &Scope,
+    ) -> Result<Option<Vec<Vec<bool>>>> {
+        let Scope::CurrentDir(original, canonical) = scope else {
+            return Ok(None);
+        };
+        // Match the working_dir tokenizer's separator and case normalization.
+        // Compare path components rather than raw strings to preserve equivalent
+        // spellings such as repeated or trailing separators and interior `.`.
+        let mut tokenizer = self.index.tokenizer_for_field(self.fields.working_dir)?;
+        let mut paths = Vec::new();
+        for path in std::iter::once(original).chain(canonical.iter()) {
+            let normalized = path.to_string_lossy().replace('\\', "/");
+            tokenizer
+                .token_stream(&normalized)
+                .process(&mut |token| paths.push(token.text.clone()));
+        }
+        let mut candidates = Vec::with_capacity(searcher.segment_readers().len());
+        for segment in searcher.segment_readers() {
+            let inverted = segment.inverted_index(self.fields.working_dir)?;
+            let mut has_cwd = vec![false; segment.max_doc() as usize];
+            let mut matches = vec![false; segment.max_doc() as usize];
+            let mut terms = inverted.terms().stream()?;
+            while terms.advance() {
+                let term = std::str::from_utf8(terms.key())?;
+                let matches_scope = paths.iter().any(|path| paths_equal(path, term));
+                let mut postings = inverted
+                    .read_postings_from_terminfo(terms.value(), IndexRecordOption::Basic)?;
+                let mut doc = postings.doc();
+                while doc != TERMINATED {
+                    has_cwd[doc as usize] = true;
+                    matches[doc as usize] |= matches_scope;
+                    doc = postings.advance();
+                }
+            }
+            for (matched, has_cwd) in matches.iter_mut().zip(has_cwd) {
+                *matched |= !has_cwd;
+            }
+            candidates.push(matches);
+        }
+        Ok(Some(candidates))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1236,6 +1294,116 @@ mod tests {
             original_path: None,
             superseded_by: None,
         }
+    }
+
+    #[test]
+    fn recent_scope_prefilter_preserves_matches_without_loading_unrelated_transcripts(
+    ) -> anyhow::Result<()> {
+        use crate::index::{IndexManager, IndexPaths, SearchFilters, SearchRequest, SortMode};
+        use crate::scan::SessionRoots;
+        use std::collections::{HashMap, HashSet};
+
+        let temp = tempfile::tempdir()?;
+        let codex = temp.path().join("sessions");
+        std::fs::create_dir_all(&codex)?;
+        // Missing cwd falls back to the session ID as its project. The remaining
+        // cases exercise exact scope, canonical aliases, and conservative matches
+        // that must still pass through the platform's normal scope comparison.
+        let sessions = [
+            ("original", Some("/link/repo")),
+            ("canonical", Some("/real/repo")),
+            ("trailing", Some("/link/repo/")),
+            ("components", Some("/link//./repo")),
+            ("case", Some("/LINK/REPO")),
+            ("separators", Some(r"\link\repo")),
+            ("unrelated", Some("/other/project")),
+            ("child", Some("/link/repo/child")),
+            ("sibling", Some("/link/repository")),
+            ("unicode", Some("/link/ΟΣ")),
+            ("/link/repo", None),
+        ];
+        for (index, (id, cwd)) in sessions.iter().enumerate() {
+            let records = [
+                serde_json::json!({"type":"session_meta", "payload":{
+                    "id":id, "cwd":cwd, "source":"cli",
+                    "timestamp":format!("2026-08-07T12:00:{index:02}Z")
+                }}),
+                serde_json::json!({"type":"response_item", "payload":{
+                    "type":"message", "role":"user",
+                    "content":[{"type":"input_text", "text":"searchable transcript"}]
+                }}),
+            ];
+            std::fs::write(
+                codex.join(format!("rollout-{index}.jsonl")),
+                records
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )?;
+        }
+        let roots = SessionRoots {
+            claude_projects: temp.path().join("claude"),
+            codex_sessions: codex,
+            antigravity_home: temp.path().join("agy"),
+            trash: None,
+        };
+        let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+        manager.sync_with_roots(&roots, true)?;
+        let engine = manager.open_search_engine()?;
+        let mut request = SearchRequest {
+            query: String::new(),
+            scope: Scope::Global,
+            limit: 20,
+            sort: SortMode::Time,
+            filters: SearchFilters::default(),
+        };
+        let all = engine.search(&request)?;
+        assert_eq!(all.len(), sessions.len());
+        request.scope = Scope::CurrentDir("/link/repo".into(), Some("/real/repo".into()));
+        let expected = all
+            .iter()
+            .filter(|hit| matches_scope(&request.scope, &hit.session))
+            .map(|hit| hit.session.session_id.as_str())
+            .collect::<Vec<_>>();
+
+        let mut loaded = HashMap::new();
+        let hits = engine.search_recent(
+            &engine.reader.searcher(),
+            &request,
+            request.limit,
+            &HashSet::new(),
+            &mut loaded,
+        )?;
+        assert_eq!(
+            hits.iter()
+                .map(|hit| hit.session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(hits.iter().any(|hit| hit.session.cwd.is_none()));
+        assert!(loaded.values().all(
+            |session| !["unrelated", "child", "sibling"].contains(&session.session_id.as_str())
+        ));
+        assert!(loaded.len() < all.len());
+
+        request.limit = 2;
+        assert_eq!(
+            engine
+                .search(&request)?
+                .iter()
+                .map(|hit| hit.session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            expected[..2]
+        );
+        request.filters.agent = Some(Agent::Claude);
+        assert!(engine.search(&request)?.is_empty());
+        request.filters.agent = None;
+        // Tantivy lowercases characters individually; str::to_lowercase would
+        // produce a different final sigma here and incorrectly skip this cwd.
+        request.scope = Scope::CurrentDir("/link/ΟΣ".into(), None);
+        assert_eq!(engine.search(&request)?[0].session.session_id, "unicode");
+        Ok(())
     }
 
     #[test]
