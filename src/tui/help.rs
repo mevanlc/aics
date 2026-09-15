@@ -140,9 +140,9 @@ const SESSION_LIST_ITEMS: [HelpItem; 20] = [
 
 const VIEWER_ITEMS: [HelpItem; 22] = [
     HelpItem::new("Left click", "select one block", "Select one whole message, tool event, summary, context, or metrics block. Clicking empty conversation space clears selection."),
-    HelpItem::new("Ctrl+click", "toggle block selection", "Add or remove the clicked block and establish the anchor for Shift-click."),
-    HelpItem::new("Shift+click", "select block range", "Replace the selection with the inclusive range from the anchor. Repeated Shift-clicks retain the anchor; without an anchor, select the clicked block."),
-    HelpItem::new("Ctrl+Shift+click", "add block range", "Add the inclusive anchored range to the selection, including offscreen blocks and skipping filtered-out blocks."),
+    HelpItem::new("Ctrl+click (+Alt)", "toggle block selection", "Ctrl-click or Alt+Ctrl-click adds or removes the clicked block and establishes the range anchor. The terminal must forward the modified mouse event; Alt-click alone is ignored."),
+    HelpItem::new("Shift+click (+Alt)", "select block range", "Shift-click or Alt+Shift-click replaces the selection with the inclusive range from the anchor. Repeated range clicks retain the anchor; without an anchor, select the clicked block. The terminal must forward the modified mouse event."),
+    HelpItem::new("Ctrl+Shift+click (+Alt)", "add block range", "Ctrl+Shift-click or Alt+Ctrl+Shift-click adds the inclusive anchored range to the selection, including offscreen blocks and skipping filtered-out blocks. The terminal must forward the modified mouse event."),
     HelpItem::new("Alt+C", "copy selected blocks as Markdown", "Copy selected blocks in conversation order, preserving source Markdown and respecting display filters. The selection remains after copying."),
     HelpItem::new("^F", "apply filters and return to viewer", "Apply or save filters and return to the same session. Blocks hidden by display filters are deselected. If search filters exclude the session, choose Close session or Keep session open; Keep is selected by default. Tab switches buttons, Enter executes, K keeps, C closes, Space/R toggles Remember my choice, and Esc keeps without remembering."),
     HelpItem::new(
@@ -1066,8 +1066,15 @@ mod tests {
         }
 
         let items = help.filtered_items();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].key, "Mouse");
+        assert_eq!(
+            items.iter().map(|item| item.key).collect::<Vec<_>>(),
+            [
+                "Ctrl+click (+Alt)",
+                "Shift+click (+Alt)",
+                "Ctrl+Shift+click (+Alt)",
+                "Mouse"
+            ]
+        );
     }
 
     #[test]

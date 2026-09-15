@@ -49,18 +49,25 @@ In the tables below, `^` means Ctrl.
 | `Esc` | Close the viewer |
 | Mouse wheel | Scroll the conversation |
 | Left-click | Select one whole block; click empty conversation space to clear selection |
-| `Ctrl+left-click` | Toggle a block and set the range anchor |
-| `Shift+left-click` | Select the inclusive range from the anchor, replacing the selection |
-| `Ctrl+Shift+left-click` | Add the inclusive anchored range to the selection |
+| `Ctrl+left-click` or `Alt+Ctrl+left-click` | Toggle a block and set the range anchor |
+| `Shift+left-click` or `Alt+Shift+left-click` | Select the inclusive range from the anchor, replacing the selection |
+| `Ctrl+Shift+left-click` or `Alt+Ctrl+Shift+left-click` | Add the inclusive anchored range to the selection |
 | `Alt+C` | Copy selected blocks as source Markdown, in conversation order |
 
 Blocks include messages, tool events, reasoning, plans, summaries, session context,
 and metrics. Markdown headings within a message remain part of that message.
 Selection survives scrolling, searching, resizing, and temporary overlays. Range
 selection includes offscreen blocks and skips hidden blocks. Without an anchor,
-Shift-click selects just the clicked block. Some terminals reserve Shift-click for
-native text selection; these terminals must forward modified mouse events to AICS
-for Shift-click block selection to work.
+Shift-click or Alt+Shift-click selects just the clicked block. Alt-click alone is
+ignored. Alt is optional for toggle/range gestures, and both forms share the same
+selection and anchor.
+
+The terminal must forward modified mouse events to AICS. Terminal and OS shortcuts
+can intercept these gestures: some terminals reserve Shift-click for local text
+selection, [iTerm2 uses Option/Alt to disable mouse reporting](https://iterm2.com/documentation-preferences-profiles-terminal.html#enable-mouse-reporting),
+and [Kitty reserves Alt+Ctrl+Shift-click for rectangular selection](https://sw.kovidgoyal.net/kitty/conf/#mouse-actions).
+The Alt alternatives work where those combinations are forwarded; they do not
+override terminal or OS bindings.
 
 Copying includes role/tool headings and timestamps, preserves source Markdown and
 code indentation, and respects display filters (including hidden command output).

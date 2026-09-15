@@ -146,7 +146,7 @@ impl ViewerState {
         KeymapHint::new("^⇧Up/^⇧Dn", "user"),
         KeymapHint::new("^N/^P", "matches"),
         KeymapHint::new("^U/^E", "edit"),
-        KeymapHint::new("^Click/⇧Click", "select"),
+        KeymapHint::new("^Click/⇧Click (+Alt)", "select"),
         KeymapHint::new("Alt+C", "copy"),
         KeymapHint::new("Esc", "close"),
     ];
@@ -494,10 +494,11 @@ impl ViewerState {
 
     /// Hit test against the same wrapped rows and clamped scroll used by rendering.
     pub(crate) fn handle_mouse(&mut self, area: Rect, mouse: MouseEvent) {
+        // Alt is optional for toggle/range gestures, but Alt-click alone is ignored.
+        let modifiers = mouse.modifiers.difference(KeyModifiers::ALT);
         if mouse.kind != MouseEventKind::Down(MouseButton::Left)
-            || mouse
-                .modifiers
-                .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+            || !(KeyModifiers::CONTROL | KeyModifiers::SHIFT).contains(modifiers)
+            || mouse.modifiers == KeyModifiers::ALT
         {
             return;
         }
@@ -530,7 +531,7 @@ impl ViewerState {
             .blocks
             .iter()
             .position(|block| block.rows.contains(&row));
-        self.select_block(index, mouse.modifiers);
+        self.select_block(index, modifiers);
     }
 
     fn select_block(&mut self, index: Option<usize>, modifiers: KeyModifiers) {
@@ -1788,29 +1789,133 @@ mod tests {
     }
 
     #[test]
+    fn viewer_hints_fit_two_rows_at_standard_terminal_widths() {
+        for width in [80, 120] {
+            let lines = crate::tui::keymap_hint::layout_hints(
+                &ViewerState::HINTS,
+                width,
+                2,
+                &Theme::default(),
+                None,
+            );
+            assert!(lines.iter().all(|line| line.width() <= width));
+            let text = lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            for hint in &ViewerState::HINTS {
+                assert!(
+                    text.contains(hint.key),
+                    "missing {} at width {width}",
+                    hint.key
+                );
+            }
+        }
+    }
+
+    #[test]
     fn block_selection_follows_explorer_anchor_and_range_rules() {
         let session = multi_turn_session();
-        let mut viewer = selection_viewer(&session, Rect::new(0, 0, 80, 30));
+        let area = Rect::new(0, 0, 80, 80);
+        for alt in [KeyModifiers::NONE, KeyModifiers::ALT] {
+            let mut viewer = selection_viewer(&session, area);
+            let click = |viewer: &mut ViewerState, index: Option<usize>, modifiers| {
+                let cache = viewer.render_cache.as_ref().unwrap();
+                let row = index.map_or(cache.total_rows + 1, |i| cache.blocks[i].rows.start);
+                assert!(row < super::viewport_height(area));
+                viewer.handle_mouse(
+                    area,
+                    MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: 2,
+                        row: row as u16 + 1 + super::STICKY_HEADER_HEIGHT,
+                        modifiers,
+                    },
+                );
+            };
+            click(&mut viewer, Some(1), KeyModifiers::NONE);
+            click(&mut viewer, Some(4), KeyModifiers::CONTROL | alt);
+            assert_eq!(selected_indices(&viewer), [1, 4]);
+            click(&mut viewer, Some(4), KeyModifiers::CONTROL | alt);
+            assert_eq!(selected_indices(&viewer), [1]);
+            // Both forms share the anchor: start with a conventional Shift-click.
+            click(&mut viewer, Some(2), KeyModifiers::SHIFT);
+            assert_eq!(selected_indices(&viewer), [2, 3, 4]);
+            click(&mut viewer, Some(5), KeyModifiers::SHIFT | alt);
+            assert_eq!(selected_indices(&viewer), [4, 5]);
+            click(
+                &mut viewer,
+                Some(0),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT | alt,
+            );
+            assert_eq!(selected_indices(&viewer), [0, 1, 2, 3, 4, 5]);
+            for modifiers in [
+                KeyModifiers::CONTROL,
+                KeyModifiers::SHIFT,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ] {
+                click(&mut viewer, None, modifiers | alt);
+                assert_eq!(selected_indices(&viewer).len(), 6);
+                assert_eq!(viewer.selection_anchor, Some(SessionBlockId::Message(4)));
+            }
+            click(&mut viewer, None, KeyModifiers::NONE);
+            assert!(selected_indices(&viewer).is_empty());
+            assert!(viewer.selection_anchor.is_none());
+            click(&mut viewer, Some(3), KeyModifiers::SHIFT | alt);
+            assert_eq!(selected_indices(&viewer), [3]);
+            click(&mut viewer, Some(2), KeyModifiers::NONE);
+            assert_eq!(selected_indices(&viewer), [2]);
+        }
+    }
+
+    #[test]
+    fn unsupported_mouse_gestures_preserve_block_selection_and_anchor() {
+        let session = sample_session();
+        let area = Rect::new(0, 0, 80, 30);
+        let mut viewer = selection_viewer(&session, area);
         viewer.select_block(Some(1), KeyModifiers::NONE);
-        viewer.select_block(Some(4), KeyModifiers::CONTROL);
-        assert_eq!(selected_indices(&viewer), [1, 4]);
-        viewer.select_block(Some(4), KeyModifiers::CONTROL);
-        assert_eq!(selected_indices(&viewer), [1]);
-        viewer.select_block(Some(2), KeyModifiers::SHIFT);
-        assert_eq!(selected_indices(&viewer), [2, 3, 4]);
-        viewer.select_block(Some(5), KeyModifiers::SHIFT);
-        assert_eq!(selected_indices(&viewer), [4, 5]);
-        viewer.select_block(Some(0), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
-        assert_eq!(selected_indices(&viewer), [0, 1, 2, 3, 4, 5]);
-        viewer.select_block(None, KeyModifiers::CONTROL);
-        assert_eq!(selected_indices(&viewer).len(), 6);
-        viewer.select_block(None, KeyModifiers::NONE);
-        assert!(selected_indices(&viewer).is_empty());
-        assert!(viewer.selection_anchor.is_none());
-        viewer.select_block(Some(3), KeyModifiers::SHIFT);
-        assert_eq!(selected_indices(&viewer), [3]);
-        viewer.select_block(Some(2), KeyModifiers::NONE);
-        assert_eq!(selected_indices(&viewer), [2]);
+        viewer.status = Some(crate::tui::statusline::Entry::completed("unchanged"));
+        let empty_row = viewer.render_cache.as_ref().unwrap().total_rows + 1;
+        for row in [0, empty_row] {
+            for (kind, modifiers) in [
+                (MouseEventKind::Down(MouseButton::Left), KeyModifiers::ALT),
+                (MouseEventKind::Down(MouseButton::Left), KeyModifiers::SUPER),
+                (
+                    MouseEventKind::Down(MouseButton::Left),
+                    KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::META,
+                ),
+                (
+                    MouseEventKind::Down(MouseButton::Left),
+                    KeyModifiers::ALT | KeyModifiers::SHIFT | KeyModifiers::SUPER,
+                ),
+                (
+                    MouseEventKind::Down(MouseButton::Right),
+                    KeyModifiers::ALT | KeyModifiers::CONTROL,
+                ),
+                (
+                    MouseEventKind::Up(MouseButton::Left),
+                    KeyModifiers::ALT | KeyModifiers::CONTROL,
+                ),
+                (
+                    MouseEventKind::Drag(MouseButton::Left),
+                    KeyModifiers::ALT | KeyModifiers::SHIFT,
+                ),
+            ] {
+                viewer.handle_mouse(
+                    area,
+                    MouseEvent {
+                        kind,
+                        modifiers,
+                        column: 2,
+                        row: row as u16 + 1 + super::STICKY_HEADER_HEIGHT,
+                    },
+                );
+                assert_eq!(selected_indices(&viewer), [1]);
+                assert_eq!(viewer.selection_anchor, Some(SessionBlockId::Message(1)));
+                assert_eq!(viewer.status.as_ref().unwrap().label, "unchanged");
+            }
+        }
     }
 
     #[test]

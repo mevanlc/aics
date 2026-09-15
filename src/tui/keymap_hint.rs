@@ -1,7 +1,7 @@
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     Frame,
 };
 
@@ -21,7 +21,7 @@ impl KeymapHint {
 
     /// Total display width: "key desc" (key + space + desc).
     pub fn width(&self) -> usize {
-        self.key.len() + 1 + self.desc.len()
+        Text::from(self.key).width() + 1 + Text::from(self.desc).width()
     }
 
     /// Render as styled spans: bold key, then muted description.
@@ -62,7 +62,7 @@ pub fn layout_hints<'a>(
 
     // If there's a prefix (status text), start with it on the first line.
     if let Some(prefix_spans) = prefix {
-        let prefix_width: usize = prefix_spans.iter().map(|s| s.content.len()).sum();
+        let prefix_width: usize = prefix_spans.iter().map(Span::width).sum();
         if prefix_width > 0 {
             spans.extend(prefix_spans);
             // Add separator after prefix
