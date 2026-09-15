@@ -43,6 +43,7 @@ use crate::rules::{
     RuleProposal, RulesReport,
 };
 use crate::scan::{is_default_antigravity_home, AgentHomes, SessionRoots};
+use crate::search_query::VisibilitySearch;
 use crate::settings::{
     DefaultFilter, DefaultFilterScope, DisplayOptions, Settings, SettingsPatch, ThemeName,
     ViewerFilterExclusion,
@@ -425,6 +426,7 @@ pub struct App {
     scope: Scope,
     local_scope: Scope,
     filters: SearchFilters,
+    visibility_search: VisibilitySearch,
     sort: SortMode,
     result_limit: usize,
     selected: usize,
@@ -518,6 +520,7 @@ impl App {
             scope: initial_request.scope,
             local_scope,
             filters: initial_request.filters,
+            visibility_search: initial_request.visibility_search,
             sort: initial_request.sort,
             result_limit: initial_request.limit.max(1),
             selected: 0,
@@ -1770,6 +1773,7 @@ impl App {
             .send(SearchCommand {
                 request_id,
                 request: SearchRequest {
+                    visibility_search: self.visibility_search,
                     query: self.committed_query.clone(),
                     scope: self.scope.clone(),
                     limit: self.result_limit.max(1),
@@ -2333,8 +2337,10 @@ impl App {
     /// Commit filter changes and restore the viewer that opened the modal.
     fn apply_filter_update(&mut self, update: FilterUpdate) -> Result<()> {
         let display_changed = self.display_options != update.display_options;
-        let changed =
-            self.scope != update.scope || self.filters != update.filters || display_changed;
+        let changed = self.scope != update.scope
+            || self.filters != update.filters
+            || self.visibility_search != update.visibility_search
+            || display_changed;
         if display_changed {
             let theme = self.current_frame_theme();
             let theme_name = self.current_frame_theme_name();
@@ -2364,6 +2370,7 @@ impl App {
         }
         self.scope = update.scope;
         self.filters = update.filters;
+        self.visibility_search = update.visibility_search;
         self.sort = update.sort;
         self.set_display_options(update.display_options);
         let previous = std::mem::replace(&mut self.overlay, Overlay::None);
@@ -2392,6 +2399,7 @@ impl App {
 
     fn save_default_filter(&mut self, update: &FilterUpdate) {
         let default_filter = DefaultFilter {
+            visibility_search: update.visibility_search,
             scope: if matches!(update.scope, Scope::Global) {
                 DefaultFilterScope::Global
             } else {
@@ -2421,7 +2429,14 @@ impl App {
             }
         };
         self.overlay = Overlay::Filters(
-            FilterModalState::new(&self.scope, &self.filters, self.sort, self.display_options),
+            FilterModalState::new(
+                &self.scope,
+                &self.filters,
+                self.sort,
+                self.display_options,
+                self.visibility_search,
+            )
+            .with_search_context(self.query.value(), self.rules_preview.is_none()),
             viewer_before_filters,
         );
     }
@@ -4568,7 +4583,7 @@ mod tests {
 
     #[test]
     fn cancelling_or_applying_search_only_filters_preserves_exact_viewer_scroll() {
-        for action in ["cancel", "unchanged", "search", "sort"] {
+        for action in ["cancel", "unchanged", "search", "sort", "content"] {
             let mut app = test_app();
             open_scroll_test_viewer(&mut app);
             let original = second_user_row(&app) + 3;
@@ -4580,6 +4595,7 @@ mod tests {
                 app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
             } else {
                 let mut update = super::FilterUpdate {
+                    visibility_search: app.visibility_search,
                     scope: app.scope.clone(),
                     filters: app.filters.clone(),
                     sort: app.sort,
@@ -4590,8 +4606,13 @@ mod tests {
                     update.filters.agent = Some(Agent::Codex);
                 } else if action == "sort" {
                     update.sort = SortMode::Relevance;
+                } else if action == "content" {
+                    update.visibility_search = super::VisibilitySearch::Hidden;
                 }
                 app.apply_filter_update(update).unwrap();
+                if action == "content" {
+                    assert!(app.pending_viewer_filter_check.is_some());
+                }
             }
             let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
             terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -5377,6 +5398,64 @@ mod tests {
 
         assert!(app.settings.display_options.hide_skill_text_injection);
         assert!(app.settings.default_filter.is_some());
+    }
+
+    #[test]
+    fn filter_search_content_applies_saves_and_cancels_independently_of_query_override() {
+        use crate::search_query::VisibilitySearch;
+
+        for action in ["apply", "save", "cancel"] {
+            let mut app = test_app();
+            let (request_tx, request_rx) = mpsc::channel();
+            app.worker.as_mut().unwrap().request_tx = request_tx;
+            app.query = Input::default().with_value("all: needle".to_owned());
+            app.open_filters();
+            for key in ['v', ' ', ' '] {
+                app.handle_key(crossterm_key(KeyCode::Char(key))).unwrap();
+            }
+            let key = match action {
+                "apply" => crossterm_key(KeyCode::Enter),
+                "save" => crossterm_key_mods(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                _ => crossterm_key(KeyCode::Esc),
+            };
+            app.handle_key(key).unwrap();
+            assert_eq!(app.query.value(), "all: needle");
+            if action == "cancel" {
+                assert_eq!(app.visibility_search, VisibilitySearch::Visible);
+                assert!(request_rx.try_recv().is_err());
+            } else {
+                assert_eq!(app.visibility_search, VisibilitySearch::Hidden);
+                let command = request_rx.try_recv().unwrap();
+                assert_eq!(command.request.visibility_search, VisibilitySearch::Hidden);
+                assert_eq!(command.request.query, "all: needle");
+                app.query = Input::default().with_value("needle".to_owned());
+                app.trigger_search_now().unwrap();
+                assert_eq!(
+                    request_rx.try_recv().unwrap().request.visibility_search,
+                    VisibilitySearch::Hidden
+                );
+            }
+            if action == "save" {
+                assert_eq!(
+                    app.settings
+                        .default_filter
+                        .as_ref()
+                        .unwrap()
+                        .visibility_search,
+                    VisibilitySearch::Hidden
+                );
+                assert_eq!(
+                    Settings::load_with_recovery()
+                        .settings
+                        .default_filter
+                        .unwrap()
+                        .visibility_search,
+                    VisibilitySearch::Hidden
+                );
+            } else {
+                assert!(app.settings.default_filter.is_none());
+            }
+        }
     }
 
     #[test]
@@ -6574,6 +6653,7 @@ mod tests {
                 worker,
                 summary_worker,
                 SearchRequest {
+                    visibility_search: crate::search_query::VisibilitySearch::Visible,
                     query: String::new(),
                     scope: Scope::Global,
                     limit: 10,

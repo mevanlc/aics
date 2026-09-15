@@ -858,12 +858,12 @@ fn search_query_help_text() -> &'static str {
     "## What AICS searches\n\
 - The query is trimmed before it is sent to the search engine.\n\
 - An empty query shows recent sessions instead of running a text query.\n\
-- Non-empty queries run through Tantivy's lenient QueryParser against AICS's default content field.\n\
-- That content field contains the custom thread title, the first user/resume-preview text, and the full parsed transcript.\n\
+- Interactive queries default to Visible content, following the ^F Visibility toggles. Change Search content (v) in ^F; Enter applies it, ^S also saves it, and ^R resets it to Visible.\n\
+- All searches the full indexed content: custom thread title, first user/resume-preview text, and full parsed transcript. Queries use Tantivy's lenient QueryParser.\n\
 - Use user:TEXT for user-authored prompts and agent:TEXT for assistant prose, plaintext reasoning, and native session summaries/checkpoints. Agent search excludes system/developer and tool/MCP/skill traffic.\n\
 - Use toolcall:TEXT for readable tool names and inputs, and toolresult:TEXT for readable tool output. Opaque IDs, signatures, media, and internal metadata are excluded.\n\
 - Use dirs:PATH for directory-valued properties, files:PATH for file-valued properties, and paths:PATH for their union plus ambiguous file-or-directory properties. Path fields use a semantic allowlist, not filesystem existence or slash guessing.\n\
-- Use visible: to search only content shown by the current ^F Visibility toggles, hidden: for content they hide, or all: to ignore them. These mutually exclusive modifiers can appear anywhere; explicit fields such as toolcall:TEXT always search their field.\n\
+- Use visible: to search content shown by the ^F Visibility toggles, hidden: for content they hide, or all: to ignore them. Modifiers override Search content temporarily; removing them restores the preference. Saving defaults saves the selector's value. These mutually exclusive modifiers can appear anywhere; explicit fields such as toolcall:TEXT always search their field. JSON/export default to All and ignore saved preferences.\n\
 \n\
 ## Query syntax\n\
 - Bare words are token searches. Tantivy's default tokenizer handles case and punctuation normalization.\n\

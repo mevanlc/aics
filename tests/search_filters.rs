@@ -23,6 +23,7 @@ fn search_filters_respect_agent_date_and_min_lines() -> Result<()> {
     let engine = manager.open_search_engine()?;
 
     let claude_hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: String::new(),
         scope: Scope::Global,
         limit: 10,
@@ -38,6 +39,7 @@ fn search_filters_respect_agent_date_and_min_lines() -> Result<()> {
         .all(|hit| matches!(hit.session.agent, Agent::Claude)));
 
     let recent_hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: String::new(),
         scope: Scope::Global,
         limit: 10,
@@ -54,6 +56,7 @@ fn search_filters_respect_agent_date_and_min_lines() -> Result<()> {
     );
 
     let long_hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: String::new(),
         scope: Scope::Global,
         limit: 10,
@@ -79,6 +82,7 @@ fn search_filters_respect_session_id() -> Result<()> {
     let engine = manager.open_search_engine()?;
 
     let hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: String::new(),
         scope: Scope::Global,
         limit: 10,
@@ -96,6 +100,7 @@ fn search_filters_respect_session_id() -> Result<()> {
     );
 
     let misses = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: String::new(),
         scope: Scope::Global,
         limit: 10,
@@ -135,6 +140,7 @@ fn sub_agent_sessions_are_hidden_unless_requested() -> Result<()> {
     let engine = manager.open_search_engine()?;
 
     let default_hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: String::new(),
         scope: Scope::Global,
         limit: 10,
@@ -149,6 +155,7 @@ fn sub_agent_sessions_are_hidden_unless_requested() -> Result<()> {
         .all(|hit| hit.session.file_path != sub_agent));
 
     let all_hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: String::new(),
         scope: Scope::Global,
         limit: 10,
@@ -188,6 +195,7 @@ fn live_only_filter_uses_live_session_markers() -> Result<()> {
     )?;
 
     let hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: String::new(),
         scope: Scope::Global,
         limit: 10,
@@ -240,6 +248,7 @@ fn trashed_filter_defaults_to_normal_sessions_and_can_include_trash() -> Result<
     let engine = manager.open_search_engine()?;
 
     let default_hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: String::new(),
         scope: Scope::Global,
         limit: 10,
@@ -249,6 +258,7 @@ fn trashed_filter_defaults_to_normal_sessions_and_can_include_trash() -> Result<
     assert!(default_hits.is_empty());
 
     let trashed_hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: String::new(),
         scope: Scope::Global,
         limit: 10,
@@ -267,6 +277,7 @@ fn trashed_filter_defaults_to_normal_sessions_and_can_include_trash() -> Result<
     );
 
     let both_hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: String::new(),
         scope: Scope::Global,
         limit: 10,
@@ -290,6 +301,7 @@ fn time_sort_keeps_query_results_in_modified_order() -> Result<()> {
     let engine = manager.open_search_engine()?;
 
     let hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: "the".to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -339,6 +351,7 @@ fn superseded_filter_tracks_direct_codex_forks_across_incremental_sync() -> Resu
 
     let search = |superseded| -> Result<Vec<_>> {
         manager.open_search_engine()?.search(&SearchRequest {
+            visibility_search: aics::search_query::VisibilitySearch::All,
             query: String::new(),
             scope: Scope::Global,
             limit: 10,
@@ -412,6 +425,7 @@ fn superseded_filter_excludes_families_with_reference_backed_codex_history() -> 
 
     let search = |superseded| -> Result<Vec<_>> {
         manager.open_search_engine()?.search(&SearchRequest {
+            visibility_search: aics::search_query::VisibilitySearch::All,
             query: String::new(),
             scope: Scope::Global,
             limit: 10,
@@ -481,6 +495,7 @@ fn superseded_filter_collapses_equivalent_codex_fork_siblings() -> Result<()> {
 
     let search = |superseded| -> Result<Vec<_>> {
         manager.open_search_engine()?.search(&SearchRequest {
+            visibility_search: aics::search_query::VisibilitySearch::All,
             query: String::new(),
             scope: Scope::Global,
             limit: 10,
@@ -543,6 +558,7 @@ fn superseded_filter_collapses_empty_aborted_codex_fork_parent() -> Result<()> {
 
     let search = |superseded| -> Result<Vec<_>> {
         manager.open_search_engine()?.search(&SearchRequest {
+            visibility_search: aics::search_query::VisibilitySearch::All,
             query: String::new(),
             scope: Scope::Global,
             limit: 10,
@@ -605,6 +621,7 @@ fn superseded_filter_recognizes_trailing_aborted_codex_parent_turn() -> Result<(
 
     let search = |superseded| -> Result<Vec<_>> {
         manager.open_search_engine()?.search(&SearchRequest {
+            visibility_search: aics::search_query::VisibilitySearch::All,
             query: String::new(),
             scope: Scope::Global,
             limit: 10,
@@ -672,6 +689,7 @@ fn superseded_filter_recognizes_retried_legacy_codex_aborted_turn() -> Result<()
 
     let search = |superseded| -> Result<Vec<_>> {
         manager.open_search_engine()?.search(&SearchRequest {
+            visibility_search: aics::search_query::VisibilitySearch::All,
             query: String::new(),
             scope: Scope::Global,
             limit: 10,
@@ -727,6 +745,7 @@ fn superseded_filter_recognizes_claude_fork_lineage() -> Result<()> {
     manager.sync_with_roots(&roots, true)?;
 
     let hits = manager.open_search_engine()?.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: String::new(),
         scope: Scope::Global,
         limit: 10,
@@ -773,6 +792,7 @@ fn superseded_filter_collapses_equivalent_claude_fork() -> Result<()> {
 
     let search = |superseded| -> Result<Vec<_>> {
         manager.open_search_engine()?.search(&SearchRequest {
+            visibility_search: aics::search_query::VisibilitySearch::All,
             query: String::new(),
             scope: Scope::Global,
             limit: 10,

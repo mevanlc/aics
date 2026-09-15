@@ -1,14 +1,23 @@
 const BOOLEAN_OPERATORS: &[&str] = &["AND", "OR", "NOT"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum VisibilitySearch {
-    #[default]
     All,
+    #[default]
     Visible,
     Hidden,
 }
 
 impl VisibilitySearch {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Visible => "Visible",
+            Self::Hidden => "Hidden",
+        }
+    }
+
     fn from_modifier(token: &str) -> Option<Self> {
         if token.eq_ignore_ascii_case("all:") {
             Some(Self::All)
@@ -27,7 +36,10 @@ impl VisibilitySearch {
 /// Modifiers are recognized only as complete, unquoted tokens. Repeating the
 /// same modifier is harmless, while combining different modifiers is rejected
 /// because their transcript scopes are mutually exclusive.
-pub fn extract_visibility_search(query: &str) -> Result<(String, VisibilitySearch), &'static str> {
+/// No modifier returns `None`, leaving the caller's selected mode in effect.
+pub fn extract_visibility_search(
+    query: &str,
+) -> Result<(String, Option<VisibilitySearch>), &'static str> {
     let mut output = String::with_capacity(query.len());
     let mut modifier = None;
     let mut token_start = 0usize;
@@ -61,7 +73,7 @@ pub fn extract_visibility_search(query: &str) -> Result<(String, VisibilitySearc
     }
     append_query_token(query, token_start, query.len(), &mut output, &mut modifier)?;
 
-    Ok((output.trim().to_owned(), modifier.unwrap_or_default()))
+    Ok((output.trim().to_owned(), modifier))
 }
 
 fn append_query_token(
@@ -238,7 +250,7 @@ mod tests {
         ] {
             let (query, mode) = extract_visibility_search(query).unwrap();
             assert_eq!(query, expected_query);
-            assert_eq!(mode, expected_mode);
+            assert_eq!(mode, Some(expected_mode));
         }
     }
 
@@ -246,10 +258,7 @@ mod tests {
     fn leaves_quoted_and_prefixed_modifier_text_alone() {
         assert_eq!(
             extract_visibility_search(r#""visible:" content:hidden:"#).unwrap(),
-            (
-                r#""visible:" content:hidden:"#.to_owned(),
-                VisibilitySearch::All
-            )
+            (r#""visible:" content:hidden:"#.to_owned(), None)
         );
     }
 
@@ -258,7 +267,19 @@ mod tests {
         assert!(extract_visibility_search("visible: needle hidden:").is_err());
         assert_eq!(
             extract_visibility_search("hidden: needle hidden:").unwrap(),
-            ("needle".to_owned(), VisibilitySearch::Hidden)
+            ("needle".to_owned(), Some(VisibilitySearch::Hidden))
+        );
+    }
+
+    #[test]
+    fn omitted_modifier_is_distinct_from_explicit_all() {
+        assert_eq!(
+            extract_visibility_search("needle").unwrap(),
+            ("needle".to_owned(), None)
+        );
+        assert_eq!(
+            extract_visibility_search("all: needle").unwrap(),
+            ("needle".to_owned(), Some(VisibilitySearch::All))
         );
     }
 

@@ -10,7 +10,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Native Claude Code autosummaries and Codex rollout summaries in previews and summary snippets
 - Incremental indexing — only new or changed sessions get re-indexed on startup
 - Interactive TUI with session list, snippet preview, and scrollable full-session viewer
-- Filter modal: scope, agent, date range, minimum length, session kind (original / trimmed / rollover / sub-agent), live, superseded, and trashed sessions
+- Filter modal: search content (Visible / All / Hidden), scope, agent, date range, minimum length, session kind (original / trimmed / rollover / sub-agent), live, superseded, and trashed sessions
 - Sort by time or text relevance
 - Markdown rendering with syntax highlighting and search-term highlighting in the viewer
 - Ctrl/Shift-click block selection, optional Alt-modified alternatives, and Alt+C copying as source Markdown
@@ -64,6 +64,11 @@ aics --preview-rules -g
 The optional `QUERY` starts a search immediately or prefills the TUI. Searches
 default to the current directory; use `-g` / `--global` to search all indexed
 sessions. Run `aics --help` for a compact flag list.
+
+Interactive searches default to **Visible** content, following the `^F`
+Visibility toggles. Choose **Search content** in `^F` and use `^S` to save a
+preference. Add `all:`, `visible:`, or `hidden:` to a query for a temporary
+override. JSON/export searches default to All and ignore saved filters.
 
 [See command-line usage, filters, modes, and the complete flag reference.](docs/command-line.md)
 

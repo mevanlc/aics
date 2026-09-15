@@ -96,9 +96,12 @@ created beneath `<AICS_CACHE_ROOT>/profiles/`.
 
 ## What is searched
 
-An empty query shows recent sessions. A non-empty query searches an indexed
-content field containing the custom thread title, first user or resume-preview
-text, and the full parsed transcript.
+An empty query shows recent sessions. A non-empty interactive query defaults to
+**Visible** content, following the current `^F` Visibility toggles. **Search
+content** in the same dialog selects Visible, All, or Hidden; Enter applies it,
+`^S` applies and saves it as the startup preference, and `^R` resets it to Visible.
+All searches the full indexed content, including the custom thread title, first
+user or resume-preview text, and the parsed transcript.
 
 Field prefixes narrow a query to semantic parts of the source session:
 
@@ -121,16 +124,25 @@ Field prefixes narrow a query to semantic parts of the source session:
 The three path fields use the same case-insensitive, path-component-prefix
 matching as `wd:`. They come from a semantic property allowlist; AICS does not
 guess from slashes in arbitrary text or whether a path currently exists. Bare
-queries retain the existing `content` behavior and therefore can still match
-tool text as part of the full parsed transcript.
+queries can match tool text according to the selected search-content mode and
+Visibility toggles.
 
 Three position-independent modifiers control how bare query terms interact with
 the current ^F Visibility toggles:
 
 - `visible:` searches only transcript content that the toggles currently show.
 - `hidden:` searches only transcript content that the toggles currently hide.
-- `all:` searches all indexed transcript content regardless of the toggles. This
-  is also the behavior when no visibility modifier is present.
+- `all:` searches all indexed transcript content regardless of the toggles.
+
+A modifier temporarily overrides the selected Search content preference. Removing
+it returns to the selected mode; saving defaults while an override is active
+saves the selector's value. The selected row's help identifies an active override.
+These modes govern bare terms, not which transcript blocks the viewer displays.
+
+JSON/export searches default to All and ignore saved filter/display preferences.
+Use a query modifier with `--hide` to search visible or hidden content there.
+The Search content selector is unavailable in rules preview, which uses a
+separate search over proposal metadata.
 
 The modifiers are mutually exclusive and may appear at the beginning, middle,
 or end of a query. Explicit field clauses are not constrained by them, so
@@ -142,7 +154,7 @@ can display.
 Internal/goal wrapper messages count as hidden when either **Internal Context**
 or **User Messages** hides them. Internal Context is hidden by default. Use
 `hidden: "Continue working toward the active thread goal"` to find those messages
-while they are hidden; ordinary searches and `all:` still include them.
+while they are hidden, or `all:` to include them alongside visible content.
 
 Queries use Tantivy's lenient query parser:
 

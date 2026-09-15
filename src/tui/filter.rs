@@ -14,14 +14,16 @@ use tui_input::Input;
 use crate::index::{Scope, SearchFilters, SortMode, SupersededFilter, TrashFilter};
 use crate::parse::Agent;
 use crate::ring_cursor::RingCursor;
+use crate::search_query::{extract_visibility_search, VisibilitySearch};
 use crate::settings::DisplayOptions;
 use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::layout;
 use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
 
-const FIELD_ORDER: [FilterField; 15] = [
+const FIELD_ORDER: [FilterField; 16] = [
     FilterField::Scope,
+    FilterField::SearchContent,
     FilterField::Agent,
     FilterField::Session,
     FilterField::Branch,
@@ -48,12 +50,14 @@ const DISPLAY_ORDER: [DisplayField; 7] = [
     DisplayField::InternalContext,
 ];
 
-const FILTER_COLUMN_WIDTH: u16 = 27;
+const FILTER_LABEL_WIDTH: usize = 15;
+const FILTER_COLUMN_WIDTH: u16 = 31;
 const DISPLAY_LABEL_WIDTH: usize = "AGENTS.md/CLAUDE.md".len() + 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterField {
     Scope,
+    SearchContent,
     Agent,
     Session,
     Branch,
@@ -99,6 +103,9 @@ pub struct FilterModalState {
     display_selected: RingCursor<DisplayField>,
     selected_side: FilterSide,
     scope_global: bool,
+    visibility_search: VisibilitySearch,
+    query_override: Option<VisibilitySearch>,
+    indexed_search: bool,
     agent: Option<Agent>,
     session_id: Input,
     branch: Input,
@@ -119,6 +126,7 @@ pub struct FilterModalState {
 #[derive(Debug, Clone)]
 pub struct FilterUpdate {
     pub scope: Scope,
+    pub visibility_search: VisibilitySearch,
     pub filters: SearchFilters,
     pub sort: SortMode,
     pub display_options: DisplayOptions,
@@ -138,12 +146,16 @@ impl FilterModalState {
         filters: &SearchFilters,
         sort: SortMode,
         display_options: DisplayOptions,
+        visibility_search: VisibilitySearch,
     ) -> Self {
         Self {
             selected: filter_field_cursor(FilterField::Scope),
             display_selected: display_field_cursor(DisplayField::ProjectDocsAutodump),
             selected_side: FilterSide::Filters,
             scope_global: matches!(scope, Scope::Global),
+            visibility_search,
+            query_override: None,
+            indexed_search: true,
             agent: filters.agent,
             session_id: Input::default().with_value(filters.session_id.clone().unwrap_or_default()),
             branch: Input::default().with_value(filters.branch.clone().unwrap_or_default()),
@@ -167,17 +179,32 @@ impl FilterModalState {
         }
     }
 
+    pub fn with_search_context(mut self, query: &str, indexed_search: bool) -> Self {
+        self.query_override = extract_visibility_search(query)
+            .ok()
+            .and_then(|(_, modifier)| modifier);
+        self.indexed_search = indexed_search;
+        self
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, local_scope: &Scope) -> Result<FilterOutcome> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('f') {
             return Ok(FilterOutcome::Close);
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
-            *self = Self::new(
+            let mut reset = Self::new(
                 local_scope,
                 &SearchFilters::default(),
                 SortMode::Time,
                 DisplayOptions::default(),
+                VisibilitySearch::default(),
             );
+            reset.query_override = self.query_override;
+            reset.indexed_search = self.indexed_search;
+            if !self.indexed_search {
+                reset.visibility_search = self.visibility_search;
+            }
+            *self = reset;
             return Ok(FilterOutcome::Stay);
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
@@ -297,7 +324,7 @@ impl FilterModalState {
             rows.push(Line::from(vec![
                 Span::styled(prefix, style),
                 Span::styled(format!("[{}] ", field.mnemonic()), style),
-                Span::styled(format!("{:<12}", field.label()), style),
+                Span::styled(format!("{:<FILTER_LABEL_WIDTH$}", field.label()), style),
                 Span::styled(field.value(self, scope_label), style),
             ]));
         }
@@ -305,8 +332,8 @@ impl FilterModalState {
         const FILTER_HINTS: [KeymapHint; 6] = [
             KeymapHint::new("←↑↓→", "nav"),
             KeymapHint::new("Space", "toggle"),
-            KeymapHint::new("Enter", "apply"),
-            KeymapHint::new("^S", "apply + save default"),
+            KeymapHint::new("⏎", "apply"),
+            KeymapHint::new("^S", "save"),
             KeymapHint::new("^R", "reset"),
             KeymapHint::new("Esc", "cancel"),
         ];
@@ -355,11 +382,24 @@ impl FilterModalState {
         }
     }
 
-    fn selected_description(&self) -> &'static str {
+    fn selected_description(&self) -> String {
+        if self.selected_side == FilterSide::Filters && self.selected == FilterField::SearchContent
+        {
+            if !self.indexed_search {
+                return "Search content is unavailable in rules preview, which searches proposal metadata.".to_owned();
+            }
+            if let Some(mode) = self.query_override {
+                return format!(
+                    "Current query overrides this with {}:. Apply/save changes the preference; remove the modifier to use it.",
+                    mode.label().to_ascii_lowercase()
+                );
+            }
+        }
         match self.selected_side {
             FilterSide::Filters => self.selected.current().description(),
             FilterSide::Display => self.display_selected.current().description(),
         }
+        .to_owned()
     }
 
     fn build_update(&self, local_scope: &Scope) -> Result<FilterUpdate> {
@@ -370,6 +410,7 @@ impl FilterModalState {
         };
         Ok(FilterUpdate {
             scope,
+            visibility_search: self.visibility_search,
             sort: self.sort,
             display_options: self.display_options,
             filters: SearchFilters {
@@ -513,6 +554,19 @@ impl FilterModalState {
     fn adjust_current(&mut self, forward: bool) {
         match *self.selected.current() {
             FilterField::Scope => self.scope_global = !self.scope_global,
+            FilterField::SearchContent if self.indexed_search => {
+                self.visibility_search = match (self.visibility_search, forward) {
+                    (VisibilitySearch::Visible, true) | (VisibilitySearch::Hidden, false) => {
+                        VisibilitySearch::All
+                    }
+                    (VisibilitySearch::All, true) | (VisibilitySearch::Visible, false) => {
+                        VisibilitySearch::Hidden
+                    }
+                    (VisibilitySearch::Hidden, true) | (VisibilitySearch::All, false) => {
+                        VisibilitySearch::Visible
+                    }
+                };
+            }
             FilterField::Agent => {
                 self.agent = match (self.agent, forward) {
                     (None, true) => Some(Agent::Claude),
@@ -576,11 +630,11 @@ impl FilterModalState {
             _ => return None,
         };
 
-        // prefix "› " (2) + mnemonic "[x] " (4) + label "{:<12}" (12) = 18
+        // Prefix, mnemonic, and padded label precede the editable value.
         Some((
             rows_area
                 .x
-                .saturating_add(18 + input.visual_cursor() as u16),
+                .saturating_add(6 + FILTER_LABEL_WIDTH as u16 + input.visual_cursor() as u16),
             rows_area.y.saturating_add(row_index),
         ))
     }
@@ -633,7 +687,14 @@ fn filter_chunks(inner: Rect) -> FilterChunks {
 }
 
 fn popup_area(area: Rect) -> Rect {
-    layout::centered_rect(area, 92, 72)
+    let mut popup = layout::centered_rect(area, 92, 72);
+    // Keep every filter row and the description/hints visible at 80x24.
+    popup.height = popup
+        .height
+        .max(FIELD_ORDER.len() as u16 + 7)
+        .min(area.height);
+    popup.y = area.y + area.height.saturating_sub(popup.height) / 2;
+    popup
 }
 
 fn filter_columns(area: Rect) -> (Rect, Rect) {
@@ -697,6 +758,7 @@ impl FilterField {
     fn label(self) -> &'static str {
         match self {
             FilterField::Scope => "Scope",
+            FilterField::SearchContent => "Search content",
             FilterField::Agent => "Agent",
             FilterField::Session => "Session",
             FilterField::Branch => "Branch",
@@ -717,6 +779,7 @@ impl FilterField {
     fn mnemonic(self) -> char {
         match self {
             FilterField::Scope => 's',
+            FilterField::SearchContent => 'v',
             FilterField::Agent => 'a',
             FilterField::Session => 'i',
             FilterField::Branch => 'b',
@@ -742,6 +805,7 @@ impl FilterField {
     fn description(self) -> &'static str {
         match self {
             FilterField::Scope => "Limit results to sessions from the launch directory or search globally across all sessions.",
+            FilterField::SearchContent => "Search shown (Visible), excluded (Hidden), or All content. visible:/all:/hidden: override this; field: queries ignore it.",
             FilterField::Agent => {
                 "Filter by agent type: Claude, Codex, Antigravity, or all. Use Space to cycle."
             }
@@ -763,6 +827,13 @@ impl FilterField {
 
     fn value(self, state: &FilterModalState, scope_label: &str) -> String {
         match self {
+            FilterField::SearchContent => {
+                if state.indexed_search {
+                    state.visibility_search.label().to_owned()
+                } else {
+                    "N/A".to_owned()
+                }
+            }
             FilterField::Scope => {
                 if state.scope_global {
                     "Global".to_owned()
@@ -964,13 +1035,14 @@ mod tests {
 
     #[test]
     fn filter_modal_renders_visibility_header_and_column_divider() {
-        let area = Rect::new(0, 0, 120, 40);
+        let area = Rect::new(0, 0, 80, 24);
         let scope = Scope::current_dir(PathBuf::from("/tmp/demo"));
         let state = FilterModalState::new(
             &scope,
             &SearchFilters::default(),
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
 
@@ -1008,6 +1080,93 @@ mod tests {
         for row in left.y..left.bottom() {
             assert_eq!(buffer[(left.right(), row)].symbol(), "│");
         }
+        let text = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Search content Visible"));
+        assert!(text.contains("^R reset"));
+        assert!(text.contains("Esc cancel"));
+    }
+
+    #[test]
+    fn search_content_cycles_with_keyboard_and_mouse_and_retains_override_on_reset() {
+        use super::VisibilitySearch;
+
+        let scope = Scope::Global;
+        let mut state = FilterModalState::new(
+            &scope,
+            &SearchFilters::default(),
+            SortMode::Time,
+            DisplayOptions::default(),
+            VisibilitySearch::Visible,
+        )
+        .with_search_context("all: needle", true);
+        let key = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+        state.handle_key(key('v'), &scope).unwrap();
+        assert_eq!(state.visibility_search, VisibilitySearch::Visible);
+        assert!(state
+            .selected_description()
+            .contains("overrides this with all:"));
+        state.handle_key(key('v'), &scope).unwrap();
+        assert_eq!(state.visibility_search, VisibilitySearch::All);
+        let rows = field_rows_area(Rect::new(0, 0, 80, 24));
+        state.handle_mouse(
+            Rect::new(0, 0, 80, 24),
+            MouseEventKind::Down(MouseButton::Left),
+            rows.x + 8,
+            rows.y + 1,
+        );
+        assert_eq!(state.visibility_search, VisibilitySearch::Hidden);
+        state.handle_key(key(' '), &scope).unwrap();
+        assert_eq!(state.visibility_search, VisibilitySearch::Visible);
+        state.handle_key(key(' '), &scope).unwrap();
+        state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                &scope,
+            )
+            .unwrap();
+        assert_eq!(state.visibility_search, VisibilitySearch::Visible);
+        state.handle_key(key('v'), &scope).unwrap();
+        assert!(state
+            .selected_description()
+            .contains("overrides this with all:"));
+        assert!(rows.height >= super::FIELD_ORDER.len() as u16);
+    }
+
+    #[test]
+    fn search_content_is_unavailable_in_rules_preview() {
+        use super::VisibilitySearch;
+
+        let scope = Scope::Global;
+        let mut state = FilterModalState::new(
+            &scope,
+            &SearchFilters::default(),
+            SortMode::Time,
+            DisplayOptions::default(),
+            VisibilitySearch::Hidden,
+        )
+        .with_search_context("", false);
+        for ch in ['v', 'v', ' '] {
+            state
+                .handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), &scope)
+                .unwrap();
+        }
+        assert_eq!(state.visibility_search, VisibilitySearch::Hidden);
+        assert_eq!(FilterField::SearchContent.value(&state, ""), "N/A");
+        assert!(state
+            .selected_description()
+            .contains("unavailable in rules preview"));
+        state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                &scope,
+            )
+            .unwrap();
+        assert_eq!(state.visibility_search, VisibilitySearch::Hidden);
+        assert!(!state.indexed_search);
     }
 
     #[test]
@@ -1018,6 +1177,7 @@ mod tests {
             &SearchFilters::default(),
             SortMode::Relevance,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
 
         let outcome = state
@@ -1044,6 +1204,7 @@ mod tests {
             },
             SortMode::Relevance,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
 
         let outcome = state
@@ -1070,6 +1231,7 @@ mod tests {
             &SearchFilters::default(),
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
         assert!(state.selected.set(&FilterField::Agent));
 
@@ -1100,6 +1262,7 @@ mod tests {
             },
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
 
         let update = state.build_update(&scope).unwrap();
@@ -1115,6 +1278,7 @@ mod tests {
             &SearchFilters::default(),
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
         assert!(state.selected.set(&FilterField::Superseded));
 
@@ -1137,6 +1301,7 @@ mod tests {
             &SearchFilters::default(),
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
 
         let outcome = state
@@ -1169,6 +1334,7 @@ mod tests {
             &SearchFilters::default(),
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
         assert!(state.selected.set(&FilterField::Branch));
 
@@ -1191,6 +1357,7 @@ mod tests {
             &SearchFilters::default(),
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
         assert!(state.selected.set(&FilterField::Branch));
 
@@ -1210,6 +1377,7 @@ mod tests {
             &SearchFilters::default(),
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
         assert!(state.selected.set(&FilterField::Branch));
         state.selected_side = FilterSide::Display;
@@ -1250,6 +1418,7 @@ mod tests {
             &SearchFilters::default(),
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
         for _ in 0..2 {
             state
@@ -1303,6 +1472,7 @@ mod tests {
             &SearchFilters::default(),
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
         let area = Rect::new(0, 0, 120, 40);
         let rows = field_rows_area(area);
@@ -1311,7 +1481,7 @@ mod tests {
             area,
             MouseEventKind::Down(MouseButton::Left),
             rows.x,
-            rows.y + 3,
+            rows.y + 4,
         );
         state
             .handle_key(
@@ -1332,6 +1502,7 @@ mod tests {
             &SearchFilters::default(),
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
         let area = Rect::new(0, 0, 120, 40);
         let rows = field_rows_area(area);
@@ -1340,7 +1511,7 @@ mod tests {
             area,
             MouseEventKind::Down(MouseButton::Left),
             rows.x,
-            rows.y + 1,
+            rows.y + 2,
         );
 
         assert_eq!(*state.selected.current(), FilterField::Agent);
@@ -1355,6 +1526,7 @@ mod tests {
             &SearchFilters::default(),
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
         let area = Rect::new(0, 0, 120, 40);
         let rows = field_rows_area(area);
@@ -1364,7 +1536,7 @@ mod tests {
             area,
             MouseEventKind::Down(MouseButton::Left),
             rows.x,
-            rows.y + 1,
+            rows.y + 2,
         );
 
         assert_eq!(*state.selected.current(), FilterField::Agent);
@@ -1379,6 +1551,7 @@ mod tests {
             &SearchFilters::default(),
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
 
         state
@@ -1408,6 +1581,7 @@ mod tests {
             &SearchFilters::default(),
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
         let area = Rect::new(0, 0, 120, 40);
         let rows = display_rows_area(area);
@@ -1434,6 +1608,7 @@ mod tests {
             &SearchFilters::default(),
             SortMode::Time,
             DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
         );
         let area = Rect::new(0, 0, 120, 40);
         let rows = display_rows_area(area);

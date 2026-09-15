@@ -177,6 +177,8 @@ impl SearchFilters {
 #[derive(Debug, Clone)]
 pub struct SearchRequest {
     pub query: String,
+    /// Content searched by bare terms when the query has no visibility modifier.
+    pub visibility_search: VisibilitySearch,
     pub scope: Scope,
     pub limit: usize,
     pub sort: SortMode,
@@ -255,6 +257,7 @@ impl SearchEngine {
             .context("failed to reload tantivy reader")?;
         let (text, visibility) =
             extract_visibility_search(request.query.trim()).map_err(|message| anyhow!(message))?;
+        let visibility = visibility.unwrap_or(request.visibility_search);
         let base: Box<dyn Query> = if text.trim().is_empty() {
             Box::new(AllQuery)
         } else {
@@ -292,6 +295,7 @@ impl SearchEngine {
             .context("failed to reload tantivy reader")?;
         let (query_text, visibility_search) =
             extract_visibility_search(request.query.trim()).map_err(|message| anyhow!(message))?;
+        let visibility_search = visibility_search.unwrap_or(request.visibility_search);
         let searcher = self.reader.searcher();
         if searcher.num_docs() == 0 {
             return Ok(Vec::new());
@@ -1269,6 +1273,7 @@ mod tests {
     };
     use crate::index::writer::StoredSession;
     use crate::parse::{Agent, DerivationType};
+    use crate::search_query::VisibilitySearch;
     use std::path::PathBuf;
 
     fn stub_session(project: &str, cwd: Option<&str>) -> StoredSession {
@@ -1352,6 +1357,7 @@ mod tests {
         manager.sync_with_roots(&roots, true)?;
         let engine = manager.open_search_engine()?;
         let mut request = SearchRequest {
+            visibility_search: crate::search_query::VisibilitySearch::All,
             query: String::new(),
             scope: Scope::Global,
             limit: 20,
@@ -1439,6 +1445,7 @@ mod tests {
         manager.sync_with_roots(&roots, true)?;
         let engine = manager.open_search_engine()?;
         let mut request = SearchRequest {
+            visibility_search: crate::search_query::VisibilitySearch::All,
             query: "needle".into(),
             scope: Scope::Global,
             limit: 10,
@@ -1471,6 +1478,22 @@ mod tests {
         assert!(engine.matches_session(&request, hidden, path)?);
         request.query.clear();
         assert!(engine.matches_session(&request, hidden, path)?);
+        for mode in [
+            VisibilitySearch::Visible,
+            VisibilitySearch::All,
+            VisibilitySearch::Hidden,
+        ] {
+            request.visibility_search = mode;
+            request.query = "needle".into();
+            assert_eq!(
+                engine.matches_session(&request, hidden, path)?,
+                mode != VisibilitySearch::Visible
+            );
+            request.query = "all: needle".into();
+            assert!(engine.matches_session(&request, hidden, path)?);
+            request.query = "visible: needle".into();
+            assert!(!engine.matches_session(&request, hidden, path)?);
+        }
         Ok(())
     }
 

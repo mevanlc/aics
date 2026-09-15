@@ -258,6 +258,7 @@ fn search(
     agent: Option<Agent>,
 ) -> Result<Vec<aics::index::SearchHit>> {
     engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: query.to_owned(),
         scope: Scope::Global,
         limit: 10,

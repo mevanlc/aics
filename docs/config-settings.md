@@ -45,6 +45,12 @@ stderr and in the TUI status line.
 Unknown theme names fall back to `lazygit` without discarding the other settings
 in the file.
 
+`default_filter.visibility_search` selects `visible` (default), `all`, or `hidden`
+for interactive searches. Missing values, including in existing settings, use
+Visible. Change **Search content** (`v`) in `Ctrl+F`; Enter applies it and `Ctrl+S`
+also saves it. Query modifiers override the selection temporarily, without
+changing the saved preference. JSON/export modes ignore saved defaults.
+
 `display_options.hide_internal_context` defaults to `true`, including when the
 key is absent from existing settings. The **Internal Context** visibility toggle
 in `Ctrl+F` (mnemonic `7`) shows or hides user messages consisting entirely of

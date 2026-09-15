@@ -20,6 +20,7 @@ fn rebuild_reindexes_sessions_even_when_fingerprints_match() -> Result<()> {
     let first_count = manager
         .open_search_engine()?
         .search(&SearchRequest {
+            visibility_search: aics::search_query::VisibilitySearch::All,
             query: String::new(),
             scope: Scope::Global,
             limit: 20,
@@ -32,6 +33,7 @@ fn rebuild_reindexes_sessions_even_when_fingerprints_match() -> Result<()> {
     let second_count = manager
         .open_search_engine()?
         .search(&SearchRequest {
+            visibility_search: aics::search_query::VisibilitySearch::All,
             query: String::new(),
             scope: Scope::Global,
             limit: 20,
@@ -135,6 +137,7 @@ fn long_lived_search_engine_drops_deleted_sessions_after_sync() -> Result<()> {
     let cache_root = temp.path().join("cache");
     let manager = IndexManager::with_paths(IndexPaths::from_root(&cache_root));
     let request = SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: String::new(),
         scope: Scope::Global,
         limit: 20,

@@ -430,6 +430,11 @@ fn main() -> Result<()> {
         }
         if mode == RulesMode::Preview && !cli.json {
             let initial_request = SearchRequest {
+                visibility_search: settings
+                    .default_filter
+                    .as_ref()
+                    .map(|filter| filter.visibility_search)
+                    .unwrap_or_default(),
                 query: String::new(),
                 scope: rules_scope,
                 limit: report.preview_matches.len().max(1),
@@ -756,6 +761,7 @@ fn build_request(cli: &Cli) -> Result<SearchRequest> {
     };
 
     Ok(SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: cli.query.clone().unwrap_or_default(),
         scope,
         limit: cli.num_results.max(1),
@@ -783,6 +789,9 @@ fn apply_default_filter_to_request(
     cli: &Cli,
     default_filter: Option<&DefaultFilter>,
 ) {
+    request.visibility_search = default_filter
+        .map(|filter| filter.visibility_search)
+        .unwrap_or_default();
     let Some(default_filter) = default_filter else {
         return;
     };
@@ -1324,6 +1333,7 @@ mod tests {
         let cli = Cli::parse_from(["aics", "deploy"]);
         let mut request = build_request(&cli).unwrap();
         let default_filter = DefaultFilter {
+            visibility_search: Default::default(),
             scope: DefaultFilterScope::Global,
             sort: SortMode::Relevance,
             filters: SearchFilters {
@@ -1350,10 +1360,37 @@ mod tests {
     }
 
     #[test]
+    fn interactive_search_content_uses_saved_preference_or_visible() {
+        use aics::search_query::VisibilitySearch;
+
+        let cli = Cli::parse_from(["aics", "all: needle"]);
+        let mut request = build_request(&cli).unwrap();
+        assert_eq!(request.visibility_search, VisibilitySearch::All);
+        apply_default_filter_to_request(&mut request, &cli, None);
+        assert_eq!(request.visibility_search, VisibilitySearch::Visible);
+        for mode in [
+            VisibilitySearch::All,
+            VisibilitySearch::Hidden,
+            VisibilitySearch::Visible,
+        ] {
+            let saved = DefaultFilter {
+                visibility_search: mode,
+                scope: DefaultFilterScope::Local,
+                sort: SortMode::Time,
+                filters: SearchFilters::default(),
+            };
+            apply_default_filter_to_request(&mut request, &cli, Some(&saved));
+            assert_eq!(request.visibility_search, mode);
+            assert_eq!(request.query, "all: needle");
+        }
+    }
+
+    #[test]
     fn no_global_overrides_saved_global_startup_scope() {
         let cli = Cli::parse_from(["aics", "--no-global", "deploy"]);
         let mut request = build_request(&cli).unwrap();
         let default_filter = DefaultFilter {
+            visibility_search: Default::default(),
             scope: DefaultFilterScope::Global,
             sort: SortMode::Time,
             filters: SearchFilters::default(),
@@ -1386,6 +1423,7 @@ mod tests {
         ]);
         let mut request = build_request(&cli).unwrap();
         let default_filter = DefaultFilter {
+            visibility_search: Default::default(),
             scope: DefaultFilterScope::Global,
             sort: SortMode::Relevance,
             filters: SearchFilters {

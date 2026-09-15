@@ -30,6 +30,11 @@ In the tables below, `^` means Ctrl.
 | Double click | Open a session directly in the full viewer |
 | Mouse wheel | Scroll the session list or preview under the pointer |
 
+In `^F`, **Search content** (`v`) cycles Visible / All / Hidden with Space or a
+repeated mnemonic. Visible is the interactive default and follows the Visibility
+toggles. `all:`, `visible:`, and `hidden:` in the query temporarily override this
+selection. `^R` resets it to Visible; Escape cancels modal edits.
+
 ## Session viewer
 
 | Key | Action |

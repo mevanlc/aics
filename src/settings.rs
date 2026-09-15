@@ -107,6 +107,8 @@ pub struct DisplayOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DefaultFilter {
     #[serde(default)]
+    pub visibility_search: crate::search_query::VisibilitySearch,
+    #[serde(default)]
     pub scope: DefaultFilterScope,
     #[serde(default)]
     pub sort: SortMode,
@@ -810,6 +812,7 @@ mod tests {
         Settings::save_to_path(&path, &disk).unwrap();
 
         let default_filter = DefaultFilter {
+            visibility_search: Default::default(),
             scope: DefaultFilterScope::Global,
             sort: SortMode::Relevance,
             filters: SearchFilters {
@@ -839,6 +842,7 @@ mod tests {
         Settings::save_to_path(&path, &Settings::default()).unwrap();
 
         let default_filter = DefaultFilter {
+            visibility_search: crate::search_query::VisibilitySearch::Hidden,
             scope: DefaultFilterScope::Global,
             sort: SortMode::Relevance,
             filters: SearchFilters {
@@ -862,6 +866,34 @@ mod tests {
         assert_eq!(saved_filter.scope, DefaultFilterScope::Global);
         assert_eq!(saved_filter.sort, SortMode::Relevance);
         assert_eq!(saved_filter.filters.branch.as_deref(), Some("main"));
+        assert_eq!(
+            saved_filter.visibility_search,
+            crate::search_query::VisibilitySearch::Hidden
+        );
+    }
+
+    #[test]
+    fn saved_search_content_defaults_to_visible_and_round_trips_all_modes() {
+        use crate::search_query::VisibilitySearch;
+
+        let legacy: DefaultFilter = serde_json::from_str(r#"{"scope":"global"}"#).unwrap();
+        assert_eq!(legacy.visibility_search, VisibilitySearch::Visible);
+        for (mode, name) in [
+            (VisibilitySearch::Visible, "visible"),
+            (VisibilitySearch::All, "all"),
+            (VisibilitySearch::Hidden, "hidden"),
+        ] {
+            let filter = DefaultFilter {
+                visibility_search: mode,
+                ..legacy.clone()
+            };
+            let json = serde_json::to_value(&filter).unwrap();
+            assert_eq!(json["visibility_search"], name);
+            assert_eq!(
+                serde_json::from_value::<DefaultFilter>(json).unwrap(),
+                filter
+            );
+        }
     }
 
     #[test]

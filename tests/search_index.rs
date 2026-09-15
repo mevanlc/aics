@@ -19,6 +19,7 @@ fn empty_query_returns_sessions_sorted_by_modified_time() -> Result<()> {
     let engine = manager.open_search_engine()?;
 
     let hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: String::new(),
         scope: Scope::Global,
         limit: 10,
@@ -42,6 +43,7 @@ fn search_query_returns_matching_sessions() -> Result<()> {
     let engine = manager.open_search_engine()?;
 
     let hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: "Express server".to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -66,6 +68,7 @@ fn quoted_phrase_search_highlights_each_normalized_token() -> Result<()> {
     let engine = manager.open_search_engine()?;
 
     let hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: "\"current git status\"".to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -92,6 +95,7 @@ fn search_excludes_codex_developer_messages() -> Result<()> {
     let engine = manager.open_search_engine()?;
 
     let developer_hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: "Filesystem sandboxing".to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -101,6 +105,7 @@ fn search_excludes_codex_developer_messages() -> Result<()> {
     assert!(developer_hits.is_empty());
 
     let user_hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: "health check endpoint".to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -123,6 +128,7 @@ fn search_excludes_claude_local_command_artifacts() -> Result<()> {
 
     for query in ["Caveat", "Bye"] {
         let hits = engine.search(&SearchRequest {
+            visibility_search: aics::search_query::VisibilitySearch::All,
             query: query.to_owned(),
             scope: Scope::Global,
             limit: 10,
@@ -144,6 +150,7 @@ fn multi_word_queries_default_to_and() -> Result<()> {
     let engine = manager.open_search_engine()?;
 
     let hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: "Express git".to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -164,6 +171,7 @@ fn explicit_or_operator_broadens_query() -> Result<()> {
     let engine = manager.open_search_engine()?;
 
     let hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: "Express OR git".to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -227,6 +235,7 @@ fn working_dir_field_and_wd_alias_match_component_prefixes() -> Result<()> {
     for query in ["wd:my/ja", "working_dir:my/ja", "wd:MY/JA"] {
         for sort in [SortMode::Relevance, SortMode::Time] {
             let hits = engine.search(&SearchRequest {
+                visibility_search: aics::search_query::VisibilitySearch::All,
                 query: query.to_owned(),
                 scope: Scope::Global,
                 limit: 10,
@@ -247,6 +256,7 @@ fn working_dir_field_and_wd_alias_match_component_prefixes() -> Result<()> {
     }
 
     let narrowed = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: "wd:my/jave7".to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -261,6 +271,7 @@ fn working_dir_field_and_wd_alias_match_component_prefixes() -> Result<()> {
         .is_some_and(|cwd| cwd.starts_with("/Users/mclark/p/my/jave7"))));
 
     let combined = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: "wd:my/ja marker".to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -275,6 +286,7 @@ fn working_dir_field_and_wd_alias_match_component_prefixes() -> Result<()> {
         .is_some_and(|cwd| cwd.contains("/p/my/ja"))));
 
     let grouped_alias = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: "wd:(my/ja OR gh/java)".to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -288,6 +300,7 @@ fn working_dir_field_and_wd_alias_match_component_prefixes() -> Result<()> {
         "working_dir:<.*codex/.*8ba3f7e.*>",
     ] {
         let regex_hits = engine.search(&SearchRequest {
+            visibility_search: aics::search_query::VisibilitySearch::All,
             query: query.to_owned(),
             scope: Scope::Global,
             limit: 10,
@@ -302,6 +315,7 @@ fn working_dir_field_and_wd_alias_match_component_prefixes() -> Result<()> {
     }
 
     let escaped_delimiter = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: r"wd:<c\>.*>".to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -315,6 +329,7 @@ fn working_dir_field_and_wd_alias_match_component_prefixes() -> Result<()> {
     );
 
     let default_content_regex = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: "<mark.*>".to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -498,6 +513,68 @@ fn internal_context_visibility_search_and_version_15_upgrade() -> Result<()> {
 }
 
 #[test]
+fn selected_search_content_and_query_overrides_follow_visibility() -> Result<()> {
+    use aics::search_query::VisibilitySearch;
+
+    let temp = TempDir::new()?;
+    write_semantic_field_codex_session(&temp)?;
+    let roots = SessionRoots {
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
+        trash: None,
+    };
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+    let options = DisplayOptions {
+        hide_agent_replies: true,
+        ..DisplayOptions::SHOW_ALL
+    };
+
+    for sort in [SortMode::Time, SortMode::Relevance] {
+        for mode in [
+            VisibilitySearch::Visible,
+            VisibilitySearch::All,
+            VisibilitySearch::Hidden,
+        ] {
+            let mut request = SearchRequest {
+                visibility_search: mode,
+                query: String::new(),
+                scope: Scope::Global,
+                limit: 10,
+                sort,
+                filters: SearchFilters::default(),
+            };
+            for (query, expected) in [
+                ("AgentFacetNeedle", mode != VisibilitySearch::Visible),
+                ("UserFacetNeedle", mode != VisibilitySearch::Hidden),
+                ("<agentfacet.*>", mode != VisibilitySearch::Visible),
+                ("all: AgentFacetNeedle", true),
+                ("hidden: AgentFacetNeedle", true),
+                ("visible: AgentFacetNeedle", false),
+                ("AgentFacetNeedle", mode != VisibilitySearch::Visible),
+                ("visible: <agentfacet.*>", false),
+                ("agent:AgentFacetNeedle", true),
+                ("visible: agent:AgentFacetNeedle", true),
+                ("hidden: user:UserFacetNeedle", true),
+                ("", true),
+                ("hidden:", true),
+            ] {
+                request.query = query.to_owned();
+                let hits = engine.search_with_display_options(&request, options)?;
+                assert_eq!(
+                    hits.len(),
+                    usize::from(expected),
+                    "{mode:?} {sort:?} {query:?}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn visibility_modifiers_follow_display_toggles_and_explicit_fields_override_them() -> Result<()> {
     let temp = TempDir::new()?;
     write_semantic_field_codex_session(&temp)?;
@@ -657,6 +734,7 @@ fn snippet_is_drawn_from_body_when_first_user_msg_does_not_match() -> Result<()>
     // "validation" only appears deeper in the assistant's reply ("Add input
     // validation"). The snippet should highlight the hit wherever it is.
     let hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: "validation".to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -724,6 +802,7 @@ fn search_query_matches_codex_thread_name() -> Result<()> {
     let engine = manager.open_search_engine()?;
 
     let hits = engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: "server rename".to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -904,6 +983,7 @@ fn write_semantic_field_codex_session(temp: &TempDir) -> Result<PathBuf> {
 
 fn search_hits(engine: &SearchEngine, query: &str) -> Result<Vec<SearchHit>> {
     engine.search(&SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
         query: query.to_owned(),
         scope: Scope::Global,
         limit: 10,
@@ -919,6 +999,7 @@ fn search_hits_with_options(
 ) -> Result<Vec<SearchHit>> {
     engine.search_with_display_options(
         &SearchRequest {
+            visibility_search: aics::search_query::VisibilitySearch::All,
             query: query.to_owned(),
             scope: Scope::Global,
             limit: 10,
