@@ -35,7 +35,7 @@ const RIGHT_PANEL_HORIZONTAL_CHROME: u16 = 3;
 const RIGHT_PANEL_MIN_WIDTH: u16 = RIGHT_PANEL_MIN_CONTENT_WIDTH + RIGHT_PANEL_HORIZONTAL_CHROME;
 const HELP_KEY_COLUMN_WIDTH: usize = 12;
 
-const SESSION_LIST_ITEMS: [HelpItem; 20] = [
+const SESSION_LIST_ITEMS: [HelpItem; 21] = [
     HelpItem::new(
         "Type",
         "filter sessions",
@@ -84,7 +84,12 @@ const SESSION_LIST_ITEMS: [HelpItem; 20] = [
     HelpItem::new(
         "^S",
         "settings",
-        "Open settings to change theme, CLI handoff commands, session separators, and snippet line count.",
+        "Open settings to change theme, CLI handoff commands, session separators, snippet line count, and search history count (0 disables history).",
+    ),
+    HelpItem::new(
+        "^R",
+        "search history",
+        "Save the current query and open fuzzy-filtered search history, initially filtered by that query. Up/Down or ^P/^N selects, Enter recalls, and Esc cancels without changing the search. By default, 100 unique queries are retained after a 1-second dwell; configure history_save_count and history_save_dwell_ms in settings.json. History is disabled when the count is 0.",
     ),
     HelpItem::new(
         "^T",

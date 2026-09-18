@@ -43,6 +43,7 @@ use crate::rules::{
     RuleProposal, RulesReport,
 };
 use crate::scan::{is_default_antigravity_home, AgentHomes, SessionRoots};
+use crate::search_history::{HistoryDwell, SearchHistory};
 use crate::search_query::VisibilitySearch;
 use crate::settings::{
     DefaultFilter, DefaultFilterScope, DisplayOptions, Settings, SettingsPatch, ThemeName,
@@ -59,6 +60,7 @@ use crate::tui::actions::{self, ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::ansi::strip_terminal_escapes;
 use crate::tui::filter::{FilterModalState, FilterOutcome, FilterUpdate};
 use crate::tui::help::{HelpModalState, HelpOutcome, HelpTab};
+use crate::tui::history::{HistoryModalState, HistoryOutcome};
 use crate::tui::profile;
 use crate::tui::rules_actions::{self, RulesAction, RulesActionMenuState, RulesActionOutcome};
 use crate::tui::settings::{SettingsModalState, SettingsOutcome};
@@ -114,6 +116,7 @@ enum Overlay {
     RulesActions(RulesActionMenuState),
     Viewer(ViewerState),
     Settings(SettingsModalState),
+    History(HistoryModalState),
     ConfirmDelete(DeleteMode),
     ConfirmRulesProcess(RulesProcessSummary),
     ConfirmRestore(RestorePrompt),
@@ -438,6 +441,8 @@ pub struct App {
     committed_query: String,
     pending_search: bool,
     last_edit_at: Option<Instant>,
+    history: Option<SearchHistory>,
+    history_dwell: HistoryDwell,
     next_search_id: u64,
     latest_search_id: Option<u64>,
     search_in_flight: bool,
@@ -467,17 +472,19 @@ pub struct App {
 }
 
 impl App {
-    const MAIN_HINTS: [keymap_hint::KeymapHint; 6] = [
+    const MAIN_HINTS: [keymap_hint::KeymapHint; 7] = [
         keymap_hint::KeymapHint::new("↑↓", "select"),
         keymap_hint::KeymapHint::new("⏎", "action menu"),
         keymap_hint::KeymapHint::new("^F", "filter"),
         keymap_hint::KeymapHint::new("^S", "settings"),
+        keymap_hint::KeymapHint::new("^R", "history"),
         keymap_hint::KeymapHint::new("^N/^P", "matches"),
         keymap_hint::KeymapHint::new("Esc", "back"),
     ];
-    const RULES_HINTS: [keymap_hint::KeymapHint; 6] = [
+    const RULES_HINTS: [keymap_hint::KeymapHint; 7] = [
         keymap_hint::KeymapHint::new("⏎", "rule actions"),
         keymap_hint::KeymapHint::new("^F", "filters"),
+        keymap_hint::KeymapHint::new("^R", "history"),
         keymap_hint::KeymapHint::new("^N/^P", "matches"),
         keymap_hint::KeymapHint::new("^D", "process"),
         keymap_hint::KeymapHint::new("Esc", "quit"),
@@ -532,6 +539,8 @@ impl App {
             committed_query: initial_request.query,
             pending_search: true,
             last_edit_at: None,
+            history: None,
+            history_dwell: HistoryDwell::new(Instant::now()),
             next_search_id: 0,
             latest_search_id: None,
             search_in_flight: false,
@@ -598,10 +607,14 @@ impl App {
         let mut terminal = setup_terminal()?;
         install_panic_hook();
         let run_result = (|| -> Result<AppExit> {
+            self.init_history();
             self.dispatch_search()?;
             let mut needs_redraw = true;
 
             while !self.should_quit {
+                if self.maybe_save_history(Instant::now()) {
+                    needs_redraw = true;
+                }
                 if self.expire_status_entries() {
                     needs_redraw = true;
                 }
@@ -645,6 +658,7 @@ impl App {
                 }
             }
 
+            self.maybe_save_history(Instant::now());
             if let Some(command) = self.handoff.take() {
                 return Ok(AppExit::Handoff(command));
             }
@@ -1117,6 +1131,7 @@ impl App {
                 }
             }
             Overlay::Settings(settings_state) => settings_state.render(frame, frame.area(), &theme),
+            Overlay::History(state) => state.render(frame, frame.area(), &theme),
             Overlay::ConfirmDelete(mode) => {
                 Self::render_delete_confirm(frame, frame.area(), &theme, active_hit.as_ref(), *mode)
             }
@@ -1143,7 +1158,12 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        self.maybe_save_history(Instant::now());
+        let previous_query = self.query.value().to_owned();
         let result = self.handle_key_inner(key);
+        if self.query.value() != previous_query {
+            self.history_dwell = HistoryDwell::new(Instant::now());
+        }
         self.release_closed_viewer();
         result
     }
@@ -1214,6 +1234,7 @@ impl App {
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_settings()
             }
+            KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => self.open_history(),
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.toggle_preview()
             }
@@ -1425,6 +1446,10 @@ impl App {
                     self.overlay = Overlay::None;
                 }
             },
+            Overlay::History(state) => {
+                let outcome = state.handle_key(key);
+                self.apply_history_outcome(outcome)?;
+            }
             Overlay::ConfirmDelete(mode) => match key.code {
                 KeyCode::Esc | KeyCode::Char('n') => self.overlay = Overlay::None,
                 KeyCode::Char('y') | KeyCode::Enter => {
@@ -1487,6 +1512,7 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
+        self.maybe_save_history(Instant::now());
         let result = self.handle_mouse_inner(mouse);
         self.release_closed_viewer();
         result
@@ -1602,6 +1628,10 @@ impl App {
             self.clamp_scroll_state(areas);
         }
         match &mut self.overlay {
+            Overlay::History(state) => {
+                let outcome = state.handle_mouse(self.last_frame_area, mouse);
+                self.apply_history_outcome(outcome)?;
+            }
             Overlay::Filters(state, viewer_before_filters) => {
                 match state.handle_mouse(self.last_frame_area, mouse.kind, mouse.column, mouse.row)
                 {
@@ -1960,6 +1990,12 @@ impl App {
     }
 
     fn poll_timeout(&self) -> Duration {
+        let timeout = self.search_poll_timeout();
+        self.history_remaining(Instant::now())
+            .map_or(timeout, |remaining| timeout.min(remaining))
+    }
+
+    fn search_poll_timeout(&self) -> Duration {
         if self.pending_search {
             if let Some(last_edit_at) = self.last_edit_at {
                 return SEARCH_DEBOUNCE.saturating_sub(last_edit_at.elapsed());
@@ -2200,6 +2236,7 @@ impl App {
     }
 
     fn apply_settings(&mut self, new_settings: Settings) -> Result<()> {
+        let previous_history_count = self.settings.history_save_count;
         let patch = SettingsPatch::settings_modal(&new_settings);
         patch.apply_to(&mut self.settings);
         self.settings.show_preview = self.preview_visible;
@@ -2213,6 +2250,95 @@ impl App {
             )));
         } else {
             self.statusline = Some(statusline::Entry::completed("settings saved"));
+        }
+        if previous_history_count != self.settings.history_save_count {
+            self.update_history(false);
+            if previous_history_count == 0 {
+                self.history_dwell = HistoryDwell::new(Instant::now());
+            }
+        }
+        Ok(())
+    }
+
+    fn init_history(&mut self) {
+        match crate::settings::config_dir() {
+            Ok(root) => {
+                self.history = Some(SearchHistory::new(root.join("search_history.json")));
+                self.update_history(false);
+            }
+            Err(err) => self.history_warning(format!("cannot locate search history: {err:#}")),
+        }
+        self.history_dwell = HistoryDwell::new(Instant::now());
+    }
+
+    fn history_warning(&mut self, message: String) {
+        warn!("{message}");
+        let message = match self.statusline.as_ref() {
+            Some(previous) if !previous.expired() => format!("{}; {message}", previous.label),
+            _ => message,
+        };
+        self.statusline = Some(statusline::Entry::failed(message));
+    }
+
+    fn update_history(&mut self, save_query: bool) {
+        if let Some(history) = self.history.as_mut() {
+            match history.update(
+                save_query.then(|| self.query.value()),
+                chrono::Utc::now(),
+                self.settings.history_save_count,
+            ) {
+                Ok(Some(warning)) => self.history_warning(warning),
+                Err(err) => self.history_warning(format!("search history error: {err:#}")),
+                Ok(None) => {}
+            }
+        }
+    }
+
+    fn history_remaining(&self, now: Instant) -> Option<Duration> {
+        if self.history.is_none()
+            || self.settings.history_save_count == 0
+            || self.query.value().trim().is_empty()
+        {
+            return None;
+        }
+        self.history_dwell
+            .remaining(now, self.settings.history_save_dwell_ms)
+    }
+
+    fn maybe_save_history(&mut self, now: Instant) -> bool {
+        if self.history_remaining(now) != Some(Duration::ZERO) {
+            return false;
+        }
+        self.update_history(true);
+        self.history_dwell.mark_recorded();
+        true
+    }
+
+    fn open_history(&mut self) {
+        if self.settings.history_save_count == 0 {
+            return;
+        }
+        self.update_history(true);
+        self.history_dwell.mark_recorded();
+        let entries = self
+            .history
+            .as_ref()
+            .map(|history| history.entries.clone())
+            .unwrap_or_default();
+        self.overlay = Overlay::History(HistoryModalState::new(entries, self.query.value()));
+    }
+
+    fn apply_history_outcome(&mut self, outcome: HistoryOutcome) -> Result<()> {
+        match outcome {
+            HistoryOutcome::Stay => {}
+            HistoryOutcome::Close => self.overlay = Overlay::None,
+            HistoryOutcome::Select(query) => {
+                self.query = Input::new(query);
+                self.history_dwell = HistoryDwell::new(Instant::now());
+                self.focus = Focus::Search;
+                self.overlay = Overlay::None;
+                self.dispatch_search()?;
+            }
         }
         Ok(())
     }
@@ -4735,6 +4861,7 @@ mod tests {
                 ("⏎", "action menu"),
                 ("^F", "filter"),
                 ("^S", "settings"),
+                ("^R", "history"),
                 ("^N/^P", "matches"),
                 ("Esc", "back"),
             ]
@@ -6632,6 +6759,153 @@ mod tests {
 
     fn test_app() -> App {
         test_app_with_response_sender().0
+    }
+
+    fn history_test_app(query: &str) -> (App, TempDir) {
+        let temp = TempDir::new().unwrap();
+        let mut app = test_app();
+        app.history = Some(crate::search_history::SearchHistory::new(
+            temp.path().join("search_history.json"),
+        ));
+        app.query = Input::new(query.to_owned());
+        app.pending_search = false;
+        app.last_edit_at = None;
+        (app, temp)
+    }
+
+    #[test]
+    fn history_dwell_saves_initial_query_once_and_wakes_idle_polling() {
+        use std::time::{Duration, Instant};
+        let (mut app, _temp) = history_test_app("initial");
+        let start = Instant::now();
+        app.history_dwell = crate::search_history::HistoryDwell::new(start);
+        assert!(app.poll_timeout() <= Duration::from_millis(1000));
+        assert!(!app.maybe_save_history(start + Duration::from_millis(999)));
+        assert!(app.maybe_save_history(start + Duration::from_millis(1000)));
+        let saved = app.history.as_ref().unwrap().entries.clone();
+        assert_eq!(saved[0].query, "initial");
+        assert!(!app.maybe_save_history(start + Duration::from_secs(50)));
+        assert_eq!(app.history.as_ref().unwrap().entries, saved);
+        assert_eq!(app.poll_timeout(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn history_edits_restart_dwell_but_navigation_and_overlays_do_not() {
+        use std::time::{Duration, Instant};
+        let (mut app, _temp) = history_test_app("alpha");
+        let start = Instant::now() - Duration::from_millis(800);
+        app.history_dwell = crate::search_history::HistoryDwell::new(start);
+        app.handle_key(crossterm_key(KeyCode::Left)).unwrap();
+        assert!(app.history_remaining(Instant::now()).unwrap() <= Duration::from_millis(200));
+        app.handle_key(crossterm_key(KeyCode::Char('b'))).unwrap();
+        assert!(app.history.as_ref().unwrap().entries.is_empty());
+        assert!(app.history_remaining(Instant::now()).unwrap() > Duration::from_millis(500));
+        app.open_settings();
+        app.maybe_save_history(Instant::now() + Duration::from_secs(1));
+        assert_eq!(app.history.as_ref().unwrap().entries[0].query, "alphba");
+    }
+
+    #[test]
+    fn history_saves_due_query_before_edit_and_zero_dwell_saves_immediately() {
+        use std::time::{Duration, Instant};
+        let (mut app, _temp) = history_test_app("old");
+        app.history_dwell =
+            crate::search_history::HistoryDwell::new(Instant::now() - Duration::from_secs(2));
+        app.handle_key(crossterm_key(KeyCode::Char('x'))).unwrap();
+        assert_eq!(app.history.as_ref().unwrap().entries[0].query, "old");
+        app.settings.history_save_dwell_ms = 0;
+        assert!(app.maybe_save_history(Instant::now()));
+        assert_eq!(app.history.as_ref().unwrap().entries[0].query, "oldx");
+    }
+
+    #[test]
+    fn history_ctrl_r_saves_immediately_and_escape_preserves_query_cursor_and_focus() {
+        let (mut app, _temp) = history_test_app("current");
+        app.settings.history_save_dwell_ms = 60_000;
+        app.handle_key(crossterm_key(KeyCode::Left)).unwrap();
+        app.focus = super::Focus::List;
+        let cursor = app.query.cursor();
+        let search_id = app.latest_search_id;
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert_eq!(app.history.as_ref().unwrap().entries[0].query, "current");
+        assert!(matches!(app.overlay, super::Overlay::History(_)));
+        app.handle_key(crossterm_key(KeyCode::Char('x'))).unwrap();
+        assert_eq!(app.query.value(), "current");
+        app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
+        assert!(matches!(app.overlay, super::Overlay::None));
+        assert_eq!(app.query.value(), "current");
+        assert_eq!(app.query.cursor(), cursor);
+        assert_eq!(app.focus, super::Focus::List);
+        assert_eq!(app.latest_search_id, search_id);
+        assert_eq!(app.history.as_ref().unwrap().entries.len(), 1);
+    }
+
+    #[test]
+    fn history_enter_recalls_dispatches_and_starts_a_new_dwell() {
+        let (mut app, _temp) = history_test_app("");
+        let history = app.history.as_mut().unwrap();
+        history
+            .update(Some("recall me"), chrono::Utc::now(), 100)
+            .unwrap();
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
+        assert_eq!(app.query.value(), "recall me");
+        assert_eq!(app.committed_query(), "recall me");
+        assert!(app.latest_search_id.is_some());
+        assert_eq!(app.focus, super::Focus::Search);
+        assert!(app.history_remaining(std::time::Instant::now()).is_some());
+    }
+
+    #[test]
+    fn history_count_reduction_prunes_and_zero_disables_recall_and_saving() {
+        let (mut app, _temp) = history_test_app("current");
+        let history = app.history.as_mut().unwrap();
+        for second in 1..=3 {
+            history
+                .update(
+                    Some(&format!("query {second}")),
+                    chrono::DateTime::from_timestamp(second, 0).unwrap(),
+                    100,
+                )
+                .unwrap();
+        }
+        app.apply_settings(Settings {
+            history_save_count: 1,
+            ..app.settings.clone()
+        })
+        .unwrap();
+        assert_eq!(app.history.as_ref().unwrap().entries.len(), 1);
+        assert_eq!(app.history.as_ref().unwrap().entries[0].query, "query 3");
+        app.apply_settings(Settings {
+            history_save_count: 0,
+            ..app.settings.clone()
+        })
+        .unwrap();
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert!(matches!(app.overlay, super::Overlay::None));
+        assert_eq!(app.query.value(), "current");
+        assert!(
+            !app.maybe_save_history(std::time::Instant::now() + std::time::Duration::from_secs(60))
+        );
+        assert!(app.history.as_ref().unwrap().entries.is_empty());
+        app.apply_settings(Settings {
+            history_save_count: 10,
+            ..app.settings.clone()
+        })
+        .unwrap();
+        assert!(app.history_remaining(std::time::Instant::now()).is_some());
     }
 
     fn test_app_with_response_sender() -> (App, mpsc::Sender<SearchResponse>) {

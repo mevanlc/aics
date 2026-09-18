@@ -19,6 +19,7 @@ directories = "6.0.0"
 env_filter = "2"
 indicatif = "0.18.6"
 log = "0.4"
+nucleo = "0.5"
 log4rs = { version = "1.4", default-features = false, features = [
     "compound_policy",
     "config_parsing",

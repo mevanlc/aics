@@ -27,6 +27,7 @@ enum SettingsField {
     Theme,
     SessionSeparator,
     SnippetLineCount,
+    HistorySaveCount,
     ClaudeCommand,
     ClaudeArgs,
     CodexCommand,
@@ -42,6 +43,7 @@ pub struct SettingsModalState {
     theme: RingCursor<ThemeName>,
     separator_input: Input,
     snippet_line_count_input: Input,
+    history_save_count_input: Input,
     claude_command_input: Input,
     claude_args_input: Input,
     codex_command_input: Input,
@@ -67,6 +69,8 @@ impl SettingsModalState {
             separator_input: Input::default().with_value(settings.session_separator.clone()),
             snippet_line_count_input: Input::default()
                 .with_value(settings.snippet_line_count.to_string()),
+            history_save_count_input: Input::default()
+                .with_value(settings.history_save_count.to_string()),
             claude_command_input: Input::default().with_value(settings.claude_command.clone()),
             claude_args_input: Input::default().with_value(settings.claude_args.clone()),
             codex_command_input: Input::default().with_value(settings.codex_command.clone()),
@@ -131,6 +135,9 @@ impl SettingsModalState {
             }
             SettingsField::SnippetLineCount => {
                 self.snippet_line_count_input.handle_event(&Event::Key(key));
+            }
+            SettingsField::HistorySaveCount => {
+                self.history_save_count_input.handle_event(&Event::Key(key));
             }
             SettingsField::ClaudeCommand => {
                 self.claude_command_input.handle_event(&Event::Key(key));
@@ -210,6 +217,7 @@ impl SettingsModalState {
                         }
                         SettingsField::SessionSeparator
                         | SettingsField::SnippetLineCount
+                        | SettingsField::HistorySaveCount
                         | SettingsField::ClaudeCommand
                         | SettingsField::ClaudeArgs
                         | SettingsField::CodexCommand
@@ -278,6 +286,15 @@ impl SettingsModalState {
             "Snippet Lines",
             &self.snippet_line_count_input,
             snip_focused,
+        );
+
+        render_inline_text_field(
+            frame,
+            rows[7],
+            theme,
+            "Search History Count",
+            &self.history_save_count_input,
+            self.field == SettingsField::HistorySaveCount,
         );
 
         frame.render_widget(
@@ -505,6 +522,11 @@ impl SettingsModalState {
             antigravity_args: self.antigravity_args_input.value().to_owned(),
             session_separator: self.separator_input.value().to_owned(),
             snippet_line_count,
+            history_save_count: self
+                .history_save_count_input
+                .value()
+                .parse()
+                .unwrap_or(self.base.history_save_count),
             summarize_command: self.base.summarize_command.clone(),
             summarize_prompt: self.base.summarize_prompt.clone(),
             ..self.base.clone()
@@ -545,7 +567,7 @@ fn settings_rows_from_inner(inner: Rect) -> Vec<Rect> {
         Constraint::Length(1), // 4  spacing
         Constraint::Length(1), // 5  Session Separator inline
         Constraint::Length(1), // 6  Snippet Lines inline
-        Constraint::Length(1), // 7  spacing
+        Constraint::Length(1), // 7  Search History Count inline
         Constraint::Length(1), // 8  divider
         Constraint::Length(1), // 9  spacing
         Constraint::Length(1), // 10 Claude Code Command inline
@@ -574,6 +596,7 @@ fn settings_field_at(area: Rect, column: u16, row: u16) -> Option<SettingsField>
         (1, SettingsField::Theme),
         (5, SettingsField::SessionSeparator),
         (6, SettingsField::SnippetLineCount),
+        (7, SettingsField::HistorySaveCount),
         (10, SettingsField::ClaudeCommand),
         (11, SettingsField::ClaudeArgs),
         (13, SettingsField::CodexCommand),
@@ -595,6 +618,7 @@ fn settings_field_cursor(selected: SettingsField) -> RingCursor<SettingsField> {
         SettingsField::Theme,
         SettingsField::SessionSeparator,
         SettingsField::SnippetLineCount,
+        SettingsField::HistorySaveCount,
         SettingsField::ClaudeCommand,
         SettingsField::ClaudeArgs,
         SettingsField::CodexCommand,
@@ -2233,6 +2257,44 @@ mod tests {
         let outcome = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
 
         assert!(matches!(outcome, SettingsOutcome::Stay));
+    }
+
+    #[test]
+    fn history_count_field_supports_navigation_mouse_edit_save_and_cancel() {
+        let settings = Settings {
+            history_save_count: 25,
+            history_save_dwell_ms: 3210,
+            ..Settings::default()
+        };
+        let mut state = SettingsModalState::new(&settings);
+        state.field.set(&SettingsField::SnippetLineCount);
+        state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(*state.field.current(), SettingsField::HistorySaveCount);
+        let area = Rect::new(0, 0, 120, 40);
+        let row = super::settings_rows(area)[7];
+        state.field.set(&SettingsField::Theme);
+        state.handle_mouse(
+            area,
+            MouseEventKind::Down(MouseButton::Left),
+            row.x + 2,
+            row.y,
+        );
+        assert_eq!(*state.field.current(), SettingsField::HistorySaveCount);
+        state.history_save_count_input = tui_input::Input::new("0".into());
+        let SettingsOutcome::Apply(saved) =
+            state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        else {
+            panic!("expected settings");
+        };
+        assert_eq!(saved.history_save_count, 0);
+        assert_eq!(saved.history_save_dwell_ms, 3210);
+        state.history_save_count_input = tui_input::Input::new("invalid".into());
+        assert_eq!(state.build_settings().history_save_count, 25);
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            SettingsOutcome::Close
+        ));
+        assert_eq!(state.base.history_save_count, 25);
     }
 
     #[test]

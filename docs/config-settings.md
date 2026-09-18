@@ -34,6 +34,10 @@ stderr and in the TUI status line.
 - `preview_width_pct`: the preview panel's percentage width
 - `session_separator`: separator shown between session messages
 - `snippet_line_count`: number of lines shown in session-card snippets
+- `history_save_count`: maximum saved searches, default `100`; also editable in
+  `Ctrl+S` as **Search History Count**. `0` clears and disables history.
+- `history_save_dwell_ms`: milliseconds a main search query must remain active
+  before automatic recording, default `1000`; JSON-only. `0` saves immediately.
 - `summarize_command`: command used to generate a session summary
 - `summarize_prompt`: prompt template supplied to the summarizer
 - `display_options`: visibility of skill injection, tool calls, tool results,
@@ -57,6 +61,31 @@ in `Ctrl+F` (mnemonic `7`) shows or hides user messages consisting entirely of
 `<codex_internal_context …>` or `<goal_context>` blocks. Messages with ordinary
 prose outside the blocks or incomplete wrappers remain visible. Other generated
 context, such as environment blocks, keeps its existing visibility behavior.
+
+## Search history
+
+History lives in `search_history.json` beside `settings.json`, including when
+`AICS_CONFIG_ROOT` is set. It is a JSON array of `query` and `saved_at` entries;
+`saved_at` is the UTC RFC3339 time the search was recorded. Saves sort entries
+newest first and keep at most `history_save_count` unique searches. An exact
+repeat refreshes the existing entry's timestamp. Query text is preserved;
+blank queries are omitted.
+
+A query records once after its dwell, including while viewing a session or
+using another modal. Changing its text restarts the timer; moving the cursor,
+changing filters, and browsing results do not. `Ctrl+R` records the current query
+immediately before opening history. Recall starts a new dwell. Quitting does not
+force an unfinished dwell to save.
+
+Reducing the count through `Ctrl+S` prunes immediately. JSON changes apply on the
+next TUI startup, which also prunes existing history. A count of zero empties an
+existing history file and makes main-screen `Ctrl+R` inert. Increasing the count
+cannot restore pruned searches.
+
+History writes use an atomic replacement and a sibling lock file to merge
+concurrent saves. Invalid entries are skipped with a warning; an entirely
+corrupt file is preserved as `search_history.json.corrupt-<timestamp>` before
+starting fresh. Disk errors are reported without closing the TUI.
 
 ## Viewer filter exclusion
 

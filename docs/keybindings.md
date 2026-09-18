@@ -17,6 +17,7 @@ In the tables below, `^` means Ctrl.
 | `^F` | Open filters and display options; `^S` in the modal applies them and saves them as startup defaults |
 | `^G` | Toggle between global and current-directory scope |
 | `^S` | Open settings |
+| `^R` | Save the current search and open fuzzy-filtered search history |
 | `^T` | Show or hide the preview panel |
 | `^N` / `^P` | Jump to the next or previous highlighted preview match |
 | `Shift+↑` / `Shift+↓` | Jump to the previous or next message/event in the preview |
@@ -34,6 +35,24 @@ In `^F`, **Search content** (`v`) cycles Visible / All / Hidden with Space or a
 repeated mnemonic. Visible is the interactive default and follows the Visibility
 toggles. `all:`, `visible:`, and `hidden:` in the query temporarily override this
 selection. `^R` resets it to Visible; Escape cancels modal edits.
+
+## Search history
+
+`^R` immediately saves the current nonblank query, bypassing the automatic-save
+dwell, and opens history with that query as its filter. Type to filter using
+nucleo's fzf-style matching: spaces separate terms, with smart case and support
+for prefix (`^`), suffix (`$`), exact (`'`), and exclusion (`!`) patterns.
+Matching searches are ranked by score, then newest first. Clear the filter to
+list all searches newest first.
+
+Use `↑` / `↓` or `^P` / `^N` to select and `PgUp` / `PgDn` to page. `Enter`
+recalls the selected query and runs it immediately. Mouse scrolling and clicking
+select entries; double-click recalls. `Esc` cancels without changing the main
+query or its cursor. Editing the history filter does not record new searches.
+
+History covers the main search, including rules preview, but not the viewer's
+find text or noninteractive commands. `^R` does nothing on the main screen when
+`history_save_count` is zero. Its reset action inside Filters is unchanged.
 
 ## Session viewer
 

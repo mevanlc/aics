@@ -74,6 +74,10 @@ pub struct Settings {
     pub session_separator: String,
     #[serde(default = "default_snippet_line_count")]
     pub snippet_line_count: usize,
+    #[serde(default = "default_history_save_count")]
+    pub history_save_count: usize,
+    #[serde(default = "default_history_save_dwell_ms")]
+    pub history_save_dwell_ms: u64,
     #[serde(default)]
     pub summarize_command: String,
     #[serde(default = "default_summarize_prompt")]
@@ -137,6 +141,7 @@ pub struct SettingsPatch {
     preview_width_pct: Option<u16>,
     session_separator: Option<String>,
     snippet_line_count: Option<usize>,
+    history_save_count: Option<usize>,
     summarize_command: Option<String>,
     summarize_prompt: Option<String>,
     display_options: Option<DisplayOptions>,
@@ -163,6 +168,7 @@ impl SettingsPatch {
             antigravity_args: Some(settings.antigravity_args.clone()),
             session_separator: Some(settings.session_separator.clone()),
             snippet_line_count: Some(settings.snippet_line_count),
+            history_save_count: Some(settings.history_save_count),
             summarize_command: Some(settings.summarize_command.clone()),
             summarize_prompt: Some(settings.summarize_prompt.clone()),
             ..Self::default()
@@ -235,6 +241,9 @@ impl SettingsPatch {
         }
         if let Some(value) = self.snippet_line_count {
             settings.snippet_line_count = value;
+        }
+        if let Some(value) = self.history_save_count {
+            settings.history_save_count = value;
         }
         if let Some(value) = self.summarize_command.as_ref() {
             settings.summarize_command.clone_from(value);
@@ -316,6 +325,14 @@ fn default_snippet_line_count() -> usize {
     3
 }
 
+fn default_history_save_count() -> usize {
+    100
+}
+
+fn default_history_save_dwell_ms() -> u64 {
+    1000
+}
+
 fn default_hide_project_docs_autodump() -> bool {
     true
 }
@@ -342,6 +359,8 @@ impl Default for Settings {
             preview_width_pct: default_preview_width_pct(),
             session_separator: default_session_separator(),
             snippet_line_count: default_snippet_line_count(),
+            history_save_count: default_history_save_count(),
+            history_save_dwell_ms: default_history_save_dwell_ms(),
             summarize_command: String::new(),
             summarize_prompt: default_summarize_prompt(),
             display_options: DisplayOptions::default(),
@@ -508,7 +527,7 @@ fn write_settings_value(path: &Path, value: &Value) -> Result<()> {
 
 /// Write `contents` to `path` atomically: write a temp sibling, fsync, then
 /// rename over the destination so readers never observe a partial file.
-fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -533,7 +552,7 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
 
 /// Move an unreadable/unparseable settings file aside so it is preserved for
 /// inspection and cannot be silently overwritten with defaults.
-fn backup_corrupt_settings(path: &Path) -> Result<PathBuf> {
+pub(crate) fn backup_corrupt_settings(path: &Path) -> Result<PathBuf> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -577,6 +596,8 @@ const SETTINGS_FIELD_NAMES: &[&str] = &[
     "preview_width_pct",
     "session_separator",
     "snippet_line_count",
+    "history_save_count",
+    "history_save_dwell_ms",
     "summarize_command",
     "summarize_prompt",
     "display_options",
@@ -630,6 +651,33 @@ mod tests {
     use super::*;
     use crate::ring_cursor::RingCursor;
     use tempfile::TempDir;
+
+    #[test]
+    fn history_settings_defaults_and_modal_patch_preserve_json_only_dwell() {
+        let defaults: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.history_save_count, 100);
+        assert_eq!(defaults.history_save_dwell_ms, 1000);
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"history_save_count":20,"history_save_dwell_ms":2345,"custom":"keep"}"#,
+        )
+        .unwrap();
+        let draft = Settings {
+            history_save_count: 7,
+            ..Settings::default()
+        };
+        let saved =
+            Settings::save_patch_to_path(&path, &SettingsPatch::settings_modal(&draft)).unwrap();
+        assert_eq!(saved.history_save_count, 7);
+        assert_eq!(saved.history_save_dwell_ms, 2345);
+        let raw: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["custom"], "keep");
+        let loaded = Settings::load_from_path(&path).unwrap();
+        assert_eq!(loaded.history_save_count, 7);
+        assert_eq!(loaded.history_save_dwell_ms, 2345);
+    }
 
     #[test]
     fn viewer_exclusion_preference_round_trip_and_patch_preserve_other_settings() {
