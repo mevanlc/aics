@@ -10,7 +10,7 @@ use aics::rules::{
     RulesMode, RulesOptions, RulesProgress,
 };
 use aics::scan::SessionRoots;
-use aics::trash::{TrashPaths, TrashStore};
+use aics::trash::{TrashPaths, TrashReason, TrashStore};
 use anyhow::Result;
 use tempfile::TempDir;
 
@@ -511,7 +511,13 @@ fn apply_rules_restores_matching_trashed_session() -> Result<()> {
     let original = roots.claude_session.clone();
     let data_root = temp.path().join("data");
     let trash_paths = TrashPaths::from_data_root(&data_root);
-    let entry = TrashStore::new(trash_paths.clone()).trash_file(&original, Agent::Claude)?;
+    let entry = TrashStore::new(trash_paths.clone()).trash_file(
+        &original,
+        Agent::Claude,
+        &TrashReason::KeyBinding {
+            key: "F8".to_owned(),
+        },
+    )?;
     let trashed = entry.trash_path(&trash_paths);
     let rules = write_rules(
         &temp,
@@ -633,6 +639,14 @@ fn rule_proposals_trash_and_untrash_antigravity_bundles() -> Result<()> {
     assert!(skipped.is_empty());
     assert!(!transcript.exists());
     assert!(!database.exists());
+    let records = TrashStore::new(trash_paths.clone()).reasons()?;
+    assert_eq!(
+        records["conversation-123.antigravity"].reason,
+        TrashReason::Rule {
+            name: "trash antigravity".to_owned(),
+            reason: Some("cleanup".to_owned()),
+        }
+    );
     let entry = TrashStore::new(trash_paths.clone())
         .sync()?
         .into_iter()
@@ -657,6 +671,7 @@ fn rule_proposals_trash_and_untrash_antigravity_bundles() -> Result<()> {
     assert!(skipped.is_empty());
     assert!(transcript.exists());
     assert!(database.exists());
+    assert!(TrashStore::new(trash_paths).reasons()?.is_empty());
     Ok(())
 }
 

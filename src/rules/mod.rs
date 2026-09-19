@@ -22,7 +22,7 @@ use crate::parse::{
 };
 use crate::scan::{scan_session_files, SessionFile, SessionRoots};
 use crate::settings::config_dir;
-use crate::trash::TrashStore;
+use crate::trash::{TrashReason, TrashStore};
 
 mod cache;
 
@@ -1213,7 +1213,7 @@ pub fn apply_rule_proposals(
     let store = TrashStore::new(paths);
     for proposal in proposals {
         match &proposal.action {
-            RuleAction::Trash { .. } => {
+            RuleAction::Trash { reason } => {
                 if proposal.path.starts_with(store.paths().trash_dir.as_path()) {
                     skipped.push(SkippedRuleAction {
                         rule: proposal.rule.clone(),
@@ -1225,7 +1225,11 @@ pub fn apply_rule_proposals(
                     });
                     continue;
                 }
-                match store.trash_session(&proposal.path, proposal.agent) {
+                let reason = TrashReason::Rule {
+                    name: proposal.rule.clone(),
+                    reason: reason.clone(),
+                };
+                match store.trash_session(&proposal.path, proposal.agent, &reason) {
                     Ok(_) => applied.push(AppliedRuleAction {
                         rule: proposal.rule.clone(),
                         session_id: proposal.session_id.clone(),

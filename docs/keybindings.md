@@ -18,12 +18,12 @@ In the tables below, `^` means Ctrl.
 | `^G` | Toggle between global and current-directory scope |
 | `^S` | Open settings |
 | `^R` | Save the current search and open fuzzy-filtered search history |
-| `^T` | Show or hide the preview panel |
+| `^V` | Show or hide the preview panel |
 | `^N` / `^P` | Jump to the next or previous highlighted preview match |
 | `Shift+↑` / `Shift+↓` | Jump to the previous or next message/event in the preview |
 | `^Shift+↑` / `^Shift+↓` | Jump to the previous or next user message in the preview |
 | `^Y` | Cycle the session-card snippet between session text and available summaries |
-| `^D` | Move the selected session to AICS trash, including the complete local Antigravity bundle; in rules preview, process marked proposals |
+| `^T` or `Enter` → `d` | Move the selected session to AICS trash, including the complete local Antigravity bundle; in rules preview, ^T processes marked proposals |
 | `Shift+←` / `Shift+→` | Resize the list/preview split |
 | `^L` | Open contextual help |
 | `Esc` | Clear a non-empty query; quit when the query is empty |
@@ -67,7 +67,7 @@ find text or noninteractive commands. `^R` does nothing on the main screen when
 | `^N` / `^P` | Jump to the next or previous highlighted match |
 | `^U` / `^E` | Use readline-style editing in the search box |
 | `^F` | Open filters and display options |
-| `^D` | Move the current session to AICS trash, including the complete local Antigravity bundle |
+| `^T` or `Enter` → `d` | Move the current session to AICS trash, including the complete local Antigravity bundle |
 | `⏎` | Open the current session's actions menu |
 | `^L` | Open contextual help on the Viewer tab |
 | `Esc` | Close the viewer |

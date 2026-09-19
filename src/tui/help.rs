@@ -35,7 +35,7 @@ const RIGHT_PANEL_HORIZONTAL_CHROME: u16 = 3;
 const RIGHT_PANEL_MIN_WIDTH: u16 = RIGHT_PANEL_MIN_CONTENT_WIDTH + RIGHT_PANEL_HORIZONTAL_CHROME;
 const HELP_KEY_COLUMN_WIDTH: usize = 12;
 
-const SESSION_LIST_ITEMS: [HelpItem; 21] = [
+const SESSION_LIST_ITEMS: [HelpItem; 22] = [
     HelpItem::new(
         "Type",
         "filter sessions",
@@ -72,6 +72,11 @@ const SESSION_LIST_ITEMS: [HelpItem; 21] = [
         "Open the session actions menu for the selected result. From there you can view, export the complete session or only content visible under the active ^F display options, copy metadata, delete, resume, or fork the session.",
     ),
     HelpItem::new(
+        "^T / Enter d",
+        "trash session",
+        "Move the selected session to AICS trash with ^T, or press Enter then d in the actions menu. In rules preview, ^T opens confirmation to process marked proposals. Trashing an item already in trash permanently deletes it.",
+    ),
+    HelpItem::new(
         "^F",
         "filters",
         "Open the filter modal to change search filters and preview/viewer display toggles. Enter applies the current modal values; ^S applies them and also saves them as startup defaults.",
@@ -92,7 +97,7 @@ const SESSION_LIST_ITEMS: [HelpItem; 21] = [
         "Save the current query and open fuzzy-filtered search history, initially filtered by that query. Up/Down or ^P/^N selects, Enter recalls, and Esc cancels without changing the search. By default, 100 unique queries are retained after a 1-second dwell; configure history_save_count and history_save_dwell_ms in settings.json. History is disabled when the count is 0.",
     ),
     HelpItem::new(
-        "^T",
+        "^V",
         "preview",
         "Show or hide the preview pane. This preference is saved so the next launch uses the same preview visibility.",
     ),
@@ -143,7 +148,12 @@ const SESSION_LIST_ITEMS: [HelpItem; 21] = [
     ),
 ];
 
-const VIEWER_ITEMS: [HelpItem; 22] = [
+const VIEWER_ITEMS: [HelpItem; 23] = [
+    HelpItem::new(
+        "^T / Enter d",
+        "trash session",
+        "Move the current session to AICS trash and close the viewer with ^T, or press Enter then d in the actions menu. Trashing an item already in trash permanently deletes it.",
+    ),
     HelpItem::new("Left click", "select one block", "Select one whole message, tool event, summary, context, or metrics block. Clicking empty conversation space clears selection."),
     HelpItem::new("Ctrl+click (+Alt)", "toggle block selection", "Ctrl-click or Alt+Ctrl-click adds or removes the clicked block and establishes the range anchor. The terminal must forward the modified mouse event; Alt-click alone is ignored."),
     HelpItem::new("Shift+click (+Alt)", "select block range", "Shift-click or Alt+Shift-click replaces the selection with the inclusive range from the anchor. Repeated range clicks retain the anchor; without an anchor, select the clicked block. The terminal must forward the modified mouse event."),

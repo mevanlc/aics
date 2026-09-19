@@ -17,7 +17,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Ctrl/Shift-click block selection, optional Alt-modified alternatives, and Alt+C copying as source Markdown
 - Multiple themes (lazygit, aics, sunset, late), configurable via settings modal
 - Configurable Claude, Codex, and Antigravity launch commands so `aics` can hand off to resume a session
-- AICS trash, restore, and permanent deletion for session files and complete Antigravity bundles
+- AICS trash, restore, and permanent deletion for session files and complete Antigravity bundles, with recorded trash reasons
 - `--json` mode for scripting, and `--export DIR` to batch-export matching sessions as Markdown
 - JavaScript rules for previewing or applying batch session cleanup actions
 - Cross-platform: Windows, macOS, Linux, Android (Termux), FreeBSD, and NetBSD
@@ -87,6 +87,7 @@ JavaScript rules automate repeatable session cleanup. Rules live at
 | --- | --- |
 | `↑` / `↓` (Arrows) | Move selection |
 | `⏎` (Enter) | Show actions for selected session |
+| `^T` or `Enter` → `d` | Move selected session to trash |
 | `PgUp` / `PgDn` | Preview/viewer page scroll |
 | `Home` / `End` | Preview/viewer jump to beginning/end |
 | `Esc` | Cancel / close modal / go back |
@@ -97,6 +98,8 @@ JavaScript rules automate repeatable session cleanup. Rules live at
 | `^C` | Quit |
 
 [See detailed session-list and viewer keybindings.](docs/keybindings.md)
+
+[See trash recovery and recorded reasons.](docs/trash.md)
 
 ### Session summaries
 

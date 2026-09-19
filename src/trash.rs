@@ -18,6 +18,7 @@ pub struct TrashPaths {
     pub data_root: PathBuf,
     pub trash_dir: PathBuf,
     pub metadata_file: PathBuf,
+    pub reasons_file: PathBuf,
 }
 
 impl TrashPaths {
@@ -39,6 +40,7 @@ impl TrashPaths {
         Self {
             trash_dir: data_root.join("trash"),
             metadata_file: data_root.join("trash.jsonl"),
+            reasons_file: data_root.join("trash.json"),
             data_root,
         }
     }
@@ -50,6 +52,30 @@ pub struct TrashEntry {
     pub nm: String,
     pub op: String,
     pub tn: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum TrashReason {
+    KeyBinding {
+        key: String,
+    },
+    ActionMenu {
+        action: String,
+    },
+    Rule {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrashRecord {
+    pub trashed_at: String,
+    pub original_path: String,
+    pub agent: String,
+    pub reason: TrashReason,
 }
 
 impl TrashEntry {
@@ -114,14 +140,24 @@ impl TrashStore {
         Ok(entries)
     }
 
-    pub fn trash_session(&self, path: &Path, agent: Agent) -> Result<TrashEntry> {
+    pub fn trash_session(
+        &self,
+        path: &Path,
+        agent: Agent,
+        reason: &TrashReason,
+    ) -> Result<TrashEntry> {
         match agent {
-            Agent::Antigravity => self.trash_antigravity_bundle(path),
-            Agent::Claude | Agent::Codex => self.trash_file(path, agent),
+            Agent::Antigravity => self.trash_antigravity_bundle(path, reason),
+            Agent::Claude | Agent::Codex => self.trash_file(path, agent, reason),
         }
     }
 
-    pub fn trash_file(&self, path: &Path, agent: Agent) -> Result<TrashEntry> {
+    pub fn trash_file(
+        &self,
+        path: &Path,
+        agent: Agent,
+        reason: &TrashReason,
+    ) -> Result<TrashEntry> {
         let mut entries = self.sync()?;
         fs::create_dir_all(&self.paths.trash_dir)
             .with_context(|| format!("failed to create {}", self.paths.trash_dir.display()))?;
@@ -155,6 +191,7 @@ impl TrashStore {
         };
         entries.push(entry.clone());
         write_metadata(&self.paths.metadata_file, &entries)?;
+        self.record_reason(&entry, reason)?;
         fs::remove_file(path)
             .with_context(|| format!("failed to delete original {}", path.display()))?;
         Ok(entry)
@@ -198,7 +235,8 @@ impl TrashStore {
             });
         }
 
-        entries.remove(entry_index);
+        let removed = entries.remove(entry_index);
+        self.forget_reason(&removed.nm);
         if let Err(error) = write_metadata(&self.paths.metadata_file, &entries) {
             warn!(
                 "failed to update trash metadata after restoring {}: {error:#}",
@@ -228,7 +266,8 @@ impl TrashStore {
             if let Some(entry_index) = find_entry_index(&entries, &self.paths, path) {
                 let trash_path = entries[entry_index].trash_path(&self.paths);
                 remove_path(&trash_path)?;
-                entries.remove(entry_index);
+                let removed = entries.remove(entry_index);
+                self.forget_reason(&removed.nm);
                 if let Err(error) = write_metadata(&self.paths.metadata_file, &entries) {
                     warn!(
                         "failed to update trash metadata after deleting {}: {error:#}",
@@ -246,7 +285,7 @@ impl TrashStore {
         }
     }
 
-    fn trash_antigravity_bundle(&self, path: &Path) -> Result<TrashEntry> {
+    fn trash_antigravity_bundle(&self, path: &Path, reason: &TrashReason) -> Result<TrashEntry> {
         let bundle = AntigravityBundlePaths::from_transcript(path)?;
         let original_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let mut entries = self.sync()?;
@@ -285,6 +324,7 @@ impl TrashStore {
         entries.push(entry.clone());
         write_metadata(&self.paths.metadata_file, &entries)
             .context("failed to record Antigravity trash metadata")?;
+        self.record_reason(&entry, reason)?;
 
         if let Err(error) = move_all_or_rollback(&moves) {
             if moves
@@ -292,6 +332,7 @@ impl TrashStore {
                 .all(|(source, target)| source.exists() && !target.exists())
             {
                 entries.pop();
+                self.forget_reason(&entry.nm);
                 let _ = fs::remove_dir_all(&archive);
                 if let Err(metadata_error) = write_metadata(&self.paths.metadata_file, &entries) {
                     warn!(
@@ -356,7 +397,8 @@ impl TrashStore {
         })?;
 
         let _ = fs::remove_dir_all(&archive);
-        entries.remove(entry_index);
+        let removed = entries.remove(entry_index);
+        self.forget_reason(&removed.nm);
         if let Err(error) = write_metadata(&self.paths.metadata_file, &entries) {
             warn!(
                 "failed to update trash metadata after restoring {}: {error:#}",
@@ -364,6 +406,65 @@ impl TrashStore {
             );
         }
         Ok(original)
+    }
+
+    /// Older trash items have no reason record. Restoration uses trash.jsonl
+    /// independently, so missing or unreadable reasons never prevent recovery.
+    pub fn reasons(&self) -> Result<BTreeMap<String, TrashRecord>> {
+        match fs::read_to_string(&self.paths.reasons_file) {
+            Ok(contents) => serde_json::from_str(&contents)
+                .with_context(|| format!("failed to parse {}", self.paths.reasons_file.display())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(error) => Err(error)
+                .with_context(|| format!("failed to read {}", self.paths.reasons_file.display())),
+        }
+    }
+
+    fn update_reasons(
+        &self,
+        update: impl FnOnce(&mut BTreeMap<String, TrashRecord>),
+    ) -> Result<()> {
+        fs::create_dir_all(&self.paths.data_root)?;
+        // Atomic replacement changes the JSON inode; serialize updates using
+        // a stable sibling so separate AICS processes preserve each other's records.
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.paths.reasons_file.with_extension("json.lock"))?;
+        lock.lock().context("failed to lock trash reasons")?;
+        let mut records = self.reasons()?;
+        update(&mut records);
+        crate::settings::write_atomic(
+            &self.paths.reasons_file,
+            &serde_json::to_string_pretty(&records)?,
+        )
+    }
+
+    fn record_reason(&self, entry: &TrashEntry, reason: &TrashReason) -> Result<()> {
+        self.update_reasons(|records| {
+            records.insert(
+                entry.nm.clone(),
+                TrashRecord {
+                    trashed_at: entry.ts.clone(),
+                    original_path: entry.op.clone(),
+                    agent: entry.tn.clone(),
+                    reason: reason.clone(),
+                },
+            );
+        })
+    }
+
+    fn forget_reason(&self, name: &str) {
+        if !self.paths.reasons_file.exists() {
+            return;
+        }
+        if let Err(error) = self.update_reasons(|records| {
+            records.remove(name);
+        }) {
+            warn!("failed to remove trash reason for {name}: {error:#}");
+        }
     }
 }
 
@@ -753,7 +854,7 @@ fn now_timestamp() -> String {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{delete_session_immediately, TrashPaths, TrashStore};
+    use super::{delete_session_immediately, TrashPaths, TrashReason, TrashStore};
     use crate::parse::Agent;
     use anyhow::Result;
     use tempfile::TempDir;
@@ -786,12 +887,18 @@ mod tests {
         std::fs::write(&original, "{}\n")?;
         let expected_original = original.canonicalize()?;
 
-        let entry = TrashStore::new(paths.clone()).trash_file(&original, Agent::Codex)?;
+        let entry =
+            TrashStore::new(paths.clone()).trash_file(&original, Agent::Codex, &test_reason())?;
 
         assert!(!original.exists());
         assert_eq!(entry.nm, "session.jsonl");
         assert_eq!(entry.op, expected_original.to_string_lossy());
         assert_eq!(entry.tn, "codex");
+        let records = TrashStore::new(paths.clone()).reasons()?;
+        assert_eq!(records[&entry.nm].reason, test_reason());
+        assert_eq!(records[&entry.nm].trashed_at, entry.ts);
+        assert_eq!(records[&entry.nm].original_path, entry.op);
+        assert_eq!(records[&entry.nm].agent, "codex");
         assert_eq!(
             std::fs::read_to_string(paths.trash_dir.join(entry.nm))?,
             "{}\n"
@@ -808,7 +915,7 @@ mod tests {
         let original = temp.path().join("session.jsonl");
         std::fs::write(&original, "{}\n")?;
         let store = TrashStore::new(paths.clone());
-        let entry = store.trash_file(&original, Agent::Codex)?;
+        let entry = store.trash_file(&original, Agent::Codex, &test_reason())?;
         let trashed = entry.trash_path(&paths);
 
         let restored = store.restore_file(&trashed)?;
@@ -816,6 +923,7 @@ mod tests {
         assert_eq!(restored, original.canonicalize()?);
         assert_eq!(std::fs::read_to_string(&restored)?, "{}\n");
         assert!(!trashed.exists());
+        assert!(store.reasons()?.is_empty());
         assert_eq!(std::fs::read_to_string(paths.metadata_file)?, "");
         Ok(())
     }
@@ -831,7 +939,8 @@ mod tests {
         let wal = temp.path().join("conversations/conversation-123.db-wal");
         let store = TrashStore::new(paths.clone());
 
-        let entry = store.trash_session(&transcript, Agent::Antigravity)?;
+        let entry = store.trash_session(&transcript, Agent::Antigravity, &test_reason())?;
+        assert_eq!(store.reasons()?[&entry.nm].reason, test_reason());
         let archive = entry.trash_path(&paths);
         let archived_transcript =
             archive.join("brain/conversation-123/.system_generated/logs/transcript.jsonl");
@@ -853,6 +962,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(database)?, "database");
         assert_eq!(std::fs::read_to_string(wal)?, "wal");
         assert!(!archive.exists());
+        assert!(store.reasons()?.is_empty());
         assert_eq!(std::fs::read_to_string(paths.metadata_file)?, "");
         Ok(())
     }
@@ -882,7 +992,7 @@ mod tests {
         let paths = TrashPaths::from_data_root(temp.path().join("data"));
         let transcript = create_antigravity_bundle(temp.path(), "conversation-789")?;
         let store = TrashStore::new(paths.clone());
-        let entry = store.trash_session(&transcript, Agent::Antigravity)?;
+        let entry = store.trash_session(&transcript, Agent::Antigravity, &test_reason())?;
         let archive = entry.trash_path(&paths);
         let archived_transcript =
             archive.join("brain/conversation-789/.system_generated/logs/transcript.jsonl");
@@ -890,6 +1000,7 @@ mod tests {
         store.delete_session(&archived_transcript, Agent::Antigravity, true)?;
 
         assert!(!archive.exists());
+        assert!(store.reasons()?.is_empty());
         assert_eq!(std::fs::read_to_string(paths.metadata_file)?, "");
         assert!(!temp.path().join("brain/conversation-789").exists());
         assert!(!temp
@@ -897,6 +1008,92 @@ mod tests {
             .join("conversations/conversation-789.db")
             .exists());
         Ok(())
+    }
+
+    #[test]
+    fn legacy_trash_restores_with_missing_reason_file_or_entry() -> Result<()> {
+        for contents in [None, Some("{}"), Some("malformed JSON")] {
+            let temp = TempDir::new()?;
+            let paths = TrashPaths::from_data_root(temp.path().join("data"));
+            let original = temp.path().join("session.jsonl");
+            std::fs::write(&original, "legacy session")?;
+            let store = TrashStore::new(paths.clone());
+            let entry = store.trash_file(&original, Agent::Codex, &test_reason())?;
+            if let Some(contents) = contents {
+                std::fs::write(&paths.reasons_file, contents)?;
+            } else {
+                std::fs::remove_file(&paths.reasons_file)?;
+            }
+            assert_eq!(store.sync()?.len(), 1);
+            store.restore_file(&entry.trash_path(&paths))?;
+            assert_eq!(std::fs::read_to_string(&original)?, "legacy session");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reasons_follow_collision_names_and_survive_failed_restore() -> Result<()> {
+        let temp = TempDir::new()?;
+        let paths = TrashPaths::from_data_root(temp.path().join("data"));
+        let original = temp.path().join("session.jsonl");
+        let store = TrashStore::new(paths.clone());
+        std::fs::write(&original, "first")?;
+        let first = store.trash_file(&original, Agent::Codex, &test_reason())?;
+        std::fs::write(&original, "second")?;
+        let menu_reason = TrashReason::ActionMenu {
+            action: "Move session to Trash".to_owned(),
+        };
+        let second = store.trash_file(&original, Agent::Codex, &menu_reason)?;
+        assert_ne!(first.nm, second.nm);
+        let records = store.reasons()?;
+        assert_eq!(records[&first.nm].reason, test_reason());
+        assert_eq!(records[&second.nm].reason, menu_reason);
+
+        std::fs::write(&original, "occupied")?;
+        assert!(store.restore_file(&second.trash_path(&paths)).is_err());
+        assert_eq!(store.reasons()?, records);
+        store.delete_session(&first.trash_path(&paths), Agent::Codex, true)?;
+        let records = store.reasons()?;
+        assert_eq!(records.len(), 1);
+        assert!(records.contains_key(&second.nm));
+        std::fs::remove_file(&original)?;
+        store.restore_file(&second.trash_path(&paths))?;
+        assert_eq!(std::fs::read_to_string(&original)?, "second");
+        assert!(store.reasons()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn failed_reason_write_preserves_original_and_existing_record() -> Result<()> {
+        let temp = TempDir::new()?;
+        let paths = TrashPaths::from_data_root(temp.path().join("data"));
+        let store = TrashStore::new(paths.clone());
+        std::fs::create_dir_all(&paths.data_root)?;
+        std::fs::write(&paths.reasons_file, "malformed JSON")?;
+        let original = temp.path().join("session.jsonl");
+        std::fs::write(&original, "keep me")?;
+        assert!(store
+            .trash_file(&original, Agent::Codex, &test_reason())
+            .is_err());
+        assert_eq!(std::fs::read_to_string(&original)?, "keep me");
+        assert_eq!(
+            std::fs::read_to_string(&paths.reasons_file)?,
+            "malformed JSON"
+        );
+
+        let transcript = create_antigravity_bundle(temp.path(), "failed")?;
+        assert!(store
+            .trash_session(&transcript, Agent::Antigravity, &test_reason())
+            .is_err());
+        assert!(transcript.exists());
+        assert!(temp.path().join("conversations/failed.db").exists());
+        Ok(())
+    }
+
+    fn test_reason() -> TrashReason {
+        TrashReason::KeyBinding {
+            key: "^T".to_owned(),
+        }
     }
 
     fn create_antigravity_bundle(home: &Path, session_id: &str) -> Result<PathBuf> {

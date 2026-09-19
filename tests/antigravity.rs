@@ -7,7 +7,7 @@ use aics::parse::{
     SessionCell,
 };
 use aics::scan::{scan_session_files, SessionRoots};
-use aics::trash::{TrashPaths, TrashStore};
+use aics::trash::{TrashPaths, TrashReason, TrashStore};
 use anyhow::Result;
 use tempfile::TempDir;
 
@@ -186,7 +186,13 @@ fn trashed_antigravity_bundle_remains_searchable_with_original_metadata() -> Res
         .join(".system_generated/logs/transcript.jsonl");
     let expected_original = transcript.canonicalize()?;
 
-    TrashStore::new(trash_paths.clone()).trash_session(&transcript, Agent::Antigravity)?;
+    TrashStore::new(trash_paths.clone()).trash_session(
+        &transcript,
+        Agent::Antigravity,
+        &TrashReason::KeyBinding {
+            key: "F8".to_owned(),
+        },
+    )?;
     let mut roots = roots_for(antigravity_home);
     roots.trash = Some(trash_paths);
     let files = scan_session_files(&roots)?;

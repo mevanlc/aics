@@ -55,7 +55,7 @@ use crate::summary::{
     AicsSummaryPreview, ClaudeAutosummaryPreview, CodexAutosummaryPreview, SummaryCommand,
     SummaryEvent, SummarySidecar, SummarySources, SummaryWorker,
 };
-use crate::trash::TrashStore;
+use crate::trash::{TrashReason, TrashStore};
 use crate::tui::actions::{self, ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::ansi::strip_terminal_escapes;
 use crate::tui::filter::{FilterModalState, FilterOutcome, FilterUpdate};
@@ -486,7 +486,7 @@ impl App {
         keymap_hint::KeymapHint::new("^F", "filters"),
         keymap_hint::KeymapHint::new("^R", "history"),
         keymap_hint::KeymapHint::new("^N/^P", "matches"),
-        keymap_hint::KeymapHint::new("^D", "process"),
+        keymap_hint::KeymapHint::new("^T", "process"),
         keymap_hint::KeymapHint::new("Esc", "quit"),
         keymap_hint::KeymapHint::new("^C", "quit"),
     ];
@@ -1188,11 +1188,16 @@ impl App {
             return self.handle_overlay_key(key);
         }
 
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('d') {
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('t') {
             if self.rules_preview.is_some() {
                 self.open_rules_process_confirmation();
             } else {
-                self.delete_selected_session(DeleteMode::Trash)?;
+                self.delete_selected_session(
+                    DeleteMode::Trash,
+                    &TrashReason::KeyBinding {
+                        key: "^T".to_owned(),
+                    },
+                )?;
             }
             return Ok(());
         }
@@ -1235,7 +1240,7 @@ impl App {
                 self.open_settings()
             }
             KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => self.open_history(),
-            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.toggle_preview()
             }
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1343,10 +1348,15 @@ impl App {
 
         if matches!(self.overlay, Overlay::Viewer(_))
             && key.modifiers == KeyModifiers::CONTROL
-            && key.code == KeyCode::Char('d')
+            && key.code == KeyCode::Char('t')
         {
             self.overlay = Overlay::None;
-            self.delete_selected_session(DeleteMode::Trash)?;
+            self.delete_selected_session(
+                DeleteMode::Trash,
+                &TrashReason::KeyBinding {
+                    key: "^T".to_owned(),
+                },
+            )?;
             return Ok(());
         }
 
@@ -1455,7 +1465,12 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Enter => {
                     let mode = *mode;
                     self.overlay = Overlay::None;
-                    if let Err(error) = self.delete_selected_session(mode) {
+                    if let Err(error) = self.delete_selected_session(
+                        mode,
+                        &TrashReason::ActionMenu {
+                            action: "Delete immediately".to_owned(),
+                        },
+                    ) {
                         self.statusline = Some(statusline::Entry::failed(format!("{error:#}")));
                     }
                 }
@@ -3154,7 +3169,12 @@ impl App {
                 self.copy_to_clipboard(&value, "session directory")?;
             }
             SessionAction::UndoTrash => self.undo_trash_selected_session()?,
-            SessionAction::Delete => self.delete_selected_session(DeleteMode::Trash)?,
+            SessionAction::Delete => self.delete_selected_session(
+                DeleteMode::Trash,
+                &TrashReason::ActionMenu {
+                    action: "Move session to Trash".to_owned(),
+                },
+            )?,
             SessionAction::DeleteImmediately => {
                 self.overlay = Overlay::ConfirmDelete(DeleteMode::Immediate)
             }
@@ -3398,7 +3418,7 @@ impl App {
         Ok(())
     }
 
-    fn delete_selected_session(&mut self, mode: DeleteMode) -> Result<()> {
+    fn delete_selected_session(&mut self, mode: DeleteMode, reason: &TrashReason) -> Result<()> {
         let Some(hit) = self.selected_hit() else {
             return Ok(());
         };
@@ -3409,7 +3429,7 @@ impl App {
             mode,
             hit.session.file_path.display()
         );
-        let file_already_missing = match self.delete_file_for_mode(&hit, mode) {
+        let file_already_missing = match self.delete_file_for_mode(&hit, mode, reason) {
             Ok(()) => false,
             Err(error) if error.kind() == io::ErrorKind::NotFound => true,
             Err(error) => {
@@ -3474,18 +3494,25 @@ impl App {
         Ok(())
     }
 
-    fn delete_file_for_mode(&self, hit: &SearchHit, mode: DeleteMode) -> io::Result<()> {
+    fn delete_file_for_mode(
+        &self,
+        hit: &SearchHit,
+        mode: DeleteMode,
+        reason: &TrashReason,
+    ) -> io::Result<()> {
         if hit.session.agent != Agent::Antigravity {
             if matches!(mode, DeleteMode::Trash) && !hit.session.trashed {
                 let Some(paths) = self.roots.trash.clone() else {
                     return fs::remove_file(&hit.session.file_path);
                 };
                 return TrashStore::new(paths)
-                    .trash_session(&hit.session.file_path, hit.session.agent)
+                    .trash_session(&hit.session.file_path, hit.session.agent, reason)
                     .map(|_| ())
                     .map_err(io::Error::other);
             }
-            return fs::remove_file(&hit.session.file_path);
+            if !hit.session.trashed {
+                return fs::remove_file(&hit.session.file_path);
+            }
         }
 
         if matches!(mode, DeleteMode::Trash) && !hit.session.trashed {
@@ -3497,7 +3524,7 @@ impl App {
                 .map_err(io::Error::other);
             };
             return TrashStore::new(paths)
-                .trash_session(&hit.session.file_path, hit.session.agent)
+                .trash_session(&hit.session.file_path, hit.session.agent, reason)
                 .map(|_| ())
                 .map_err(io::Error::other);
         }
@@ -5287,7 +5314,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_d_moves_selected_session_to_trash_without_confirmation() {
+    fn ctrl_t_moves_selected_session_to_trash_without_confirmation() {
         let temp = TempDir::new().unwrap();
         let data_root = temp.path().join("data");
         let source = temp.path().join("session.jsonl");
@@ -5297,7 +5324,7 @@ mod tests {
         app.results = vec![sample_hit_with_path(Agent::Claude, source.clone())];
 
         app.handle_key(crossterm_key_mods(
-            KeyCode::Char('d'),
+            KeyCode::Char('t'),
             KeyModifiers::CONTROL,
         ))
         .unwrap();
@@ -5308,10 +5335,81 @@ mod tests {
         assert_eq!(trash_entries, 1);
         let metadata = fs::read_to_string(data_root.join("trash.jsonl")).unwrap();
         assert!(metadata.contains("\"tn\":\"claude\""));
+        let records = TrashStore::new(TrashPaths::from_data_root(&data_root))
+            .reasons()
+            .unwrap();
+        assert_eq!(
+            records["session.jsonl"].reason,
+            super::TrashReason::KeyBinding {
+                key: "^T".to_owned()
+            }
+        );
     }
 
     #[test]
-    fn ctrl_d_moves_antigravity_bundle_and_database_to_trash() {
+    fn action_menu_records_trash_reason_and_cleans_it_on_permanent_delete() {
+        let temp = TempDir::new().unwrap();
+        let paths = TrashPaths::from_data_root(temp.path().join("data"));
+        let source = temp.path().join("session.jsonl");
+        fs::write(&source, "{}\n").unwrap();
+        let mut app = test_app();
+        app.roots.trash = Some(paths.clone());
+        app.results = vec![sample_hit_with_path(Agent::Codex, source.clone())];
+        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
+        app.handle_key(crossterm_key(KeyCode::Char('d'))).unwrap();
+        assert!(!source.exists());
+        let store = TrashStore::new(paths.clone());
+        assert_eq!(
+            store.reasons().unwrap()["session.jsonl"].reason,
+            super::TrashReason::ActionMenu {
+                action: "Move session to Trash".to_owned(),
+            }
+        );
+
+        let trashed = paths.trash_dir.join("session.jsonl");
+        let mut hit = sample_hit_with_path(Agent::Codex, trashed.clone());
+        hit.session.trashed = true;
+        app.results = vec![hit];
+        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
+        app.handle_key(crossterm_key(KeyCode::Char('d'))).unwrap();
+        assert!(!trashed.exists());
+        assert!(store.reasons().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ctrl_d_keeps_session_on_disk_in_list_and_viewer() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("session.jsonl");
+        fs::write(&source, "{}\n").unwrap();
+        let mut app = test_app();
+        app.roots.trash = Some(TrashPaths::from_data_root(temp.path().join("data")));
+        app.results = vec![sample_hit_with_path(Agent::Codex, source.clone())];
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert!(source.exists());
+        app.open_viewer();
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert!(source.exists());
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert!(source.exists());
+        assert!(matches!(app.overlay, super::Overlay::Actions(_)));
+    }
+
+    #[test]
+    fn ctrl_t_moves_antigravity_bundle_and_database_to_trash() {
         let temp = TempDir::new().unwrap();
         let source = temp
             .path()
@@ -5327,7 +5425,7 @@ mod tests {
         app.results = vec![sample_hit_with_path(Agent::Antigravity, source.clone())];
 
         app.handle_key(crossterm_key_mods(
-            KeyCode::Char('d'),
+            KeyCode::Char('t'),
             KeyModifiers::CONTROL,
         ))
         .unwrap();
@@ -5346,12 +5444,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_t_toggles_preview_visibility() {
+    fn ctrl_v_toggles_preview_visibility() {
         let mut app = test_app();
         let visible_before = app.preview_visible;
 
         app.handle_key(crossterm_key_mods(
-            KeyCode::Char('t'),
+            KeyCode::Char('v'),
             KeyModifiers::CONTROL,
         ))
         .unwrap();
@@ -5719,7 +5817,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_d_from_viewer_deletes_and_closes_viewer() {
+    fn ctrl_t_from_viewer_deletes_and_closes_viewer() {
         let temp = TempDir::new().unwrap();
         let source = temp.path().join("session.jsonl");
         fs::write(&source, "{}\n").unwrap();
@@ -5728,7 +5826,7 @@ mod tests {
         app.open_viewer();
 
         app.handle_key(crossterm_key_mods(
-            KeyCode::Char('d'),
+            KeyCode::Char('t'),
             KeyModifiers::CONTROL,
         ))
         .unwrap();
@@ -6471,8 +6569,13 @@ mod tests {
         app.results = vec![sample_hit_with_path(Agent::Claude, missing_path.clone())];
         app.selected = 0;
 
-        app.delete_selected_session(super::DeleteMode::Trash)
-            .unwrap();
+        app.delete_selected_session(
+            super::DeleteMode::Trash,
+            &super::TrashReason::KeyBinding {
+                key: "^T".to_owned(),
+            },
+        )
+        .unwrap();
 
         assert!(app.results.is_empty());
         assert_eq!(app.selected_index(), None);
@@ -6497,8 +6600,13 @@ mod tests {
         app.latest_search_id = Some(4);
         app.next_search_id = 5;
 
-        app.delete_selected_session(super::DeleteMode::Trash)
-            .unwrap();
+        app.delete_selected_session(
+            super::DeleteMode::Trash,
+            &super::TrashReason::KeyBinding {
+                key: "^T".to_owned(),
+            },
+        )
+        .unwrap();
 
         assert!(app.results.is_empty());
         assert!(!app.pending_search);
@@ -6624,7 +6732,13 @@ mod tests {
         let original = transcript.canonicalize().unwrap();
         let trash_paths = TrashPaths::from_data_root(temp.path().join("data"));
         let entry = TrashStore::new(trash_paths.clone())
-            .trash_session(&transcript, Agent::Antigravity)
+            .trash_session(
+                &transcript,
+                Agent::Antigravity,
+                &super::TrashReason::KeyBinding {
+                    key: "^T".to_owned(),
+                },
+            )
             .unwrap();
         let archive = entry.trash_path(&trash_paths);
         let trash_source =

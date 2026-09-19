@@ -112,7 +112,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         .border_style(theme.border_style(false))
         .title(block_title(Line::from(vec![
             Span::styled(app.preview_title(), Style::default().fg(theme.accent)),
-            Span::styled(" (^T)", Style::default().fg(theme.muted)),
+            Span::styled(" (^V)", Style::default().fg(theme.muted)),
         ])))
         .title(right_block_title(Line::from(Span::styled(
             "PgUp/PgDn",

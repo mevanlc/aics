@@ -1,4 +1,4 @@
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -257,6 +257,9 @@ impl ActionMenuState {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> ActionOutcome {
+        if !(key.modifiers - KeyModifiers::SHIFT).is_empty() {
+            return ActionOutcome::Stay;
+        }
         match key.code {
             KeyCode::Esc => ActionOutcome::Close,
             KeyCode::Enter => ActionOutcome::Run(*self.selected.current()),

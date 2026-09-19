@@ -59,6 +59,8 @@ To evaluate trashed sessions for `untrash`, use `--trashed yes` or `--trashed bo
 Applying `untrash` to a normal session is skipped as already untrashed.
 For Antigravity, `trash` moves the complete conversation artifact directory and
 its local SQLite database companions; `untrash` restores the same bundle.
+Applied trash actions record the rule name and its optional explanation in
+[`trash.json`](trash.md). A successful `untrash` removes that record.
 
 Rules receive session metadata such as `session.model`,
 `session.modelProvider`, `session.reasoningEffort`, `session.approvalPolicy`, and
