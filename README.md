@@ -64,7 +64,8 @@ aics --preview-rules -g
 
 The optional `QUERY` starts a search immediately or prefills the TUI. Searches
 default to the current directory; use `-g` / `--global` to search all indexed
-sessions. Run `aics --help` for a compact flag list.
+sessions. Run `aics --help` for a compact flag list, or `aics --manpage` for the
+full reference manual.
 
 Interactive searches default to **Visible** content, following the `^F`
 Visibility toggles. Choose **Search content** in `^F` and use `^S` to save a

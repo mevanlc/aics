@@ -18,6 +18,7 @@ use aics::index::{
 };
 use aics::live::LiveSessionTracker;
 use aics::logging::{LoggingHandle, LoggingMode};
+use aics::manpage::render_manpage;
 use aics::parse::{parse_session_file, Agent};
 use aics::rules::{
     default_rules_path, print_report, run_rules_with_progress, write_default_rules_dts,
@@ -27,146 +28,224 @@ use aics::scan::ResolvedPaths;
 use aics::settings::{DefaultFilter, DefaultFilterScope, DisplayOptions, LoadedSettings, Settings};
 use aics::tui::theme::{PaletteEntry, Theme};
 use aics::tui::{run_app, run_rules_preview_app};
+use clap::builder::styling::{AnsiColor, Effects, Styles};
+
+fn clap_styles() -> Styles {
+    Styles::styled()
+        .header(AnsiColor::Yellow.on_default() | Effects::BOLD)
+        .usage(AnsiColor::Yellow.on_default() | Effects::BOLD)
+        .literal(AnsiColor::Green.on_default())
+        .placeholder(AnsiColor::Cyan.on_default())
+        .error(AnsiColor::Red.on_default() | Effects::BOLD)
+        .valid(AnsiColor::Green.on_default())
+        .invalid(AnsiColor::Yellow.on_default())
+}
 
 #[derive(Debug, Parser)]
 #[command(
     name = "aics",
     version,
     about = "Search local Claude Code, Codex CLI, and Antigravity session history",
-    after_help = "Examples:\n  aics deploy\n      Search sessions for the current directory and open the TUI.\n\n  aics -g --agent claude --after 2026-03-01 deploy\n      Search all Claude sessions after 2026-03-01.\n\n  aics --json -g --sort-by relevance \"vector db\"\n      Print matching sessions as JSONL instead of launching the TUI.\n\n  aics -g --export ./transcripts \"vector db\"\n      Write every matching session to ./transcripts as Markdown.\n\nDate filters:\n  --after and --before accept YYYY-MM-DD or RFC3339 timestamps.\n\nScope:\n  By default, searches are scoped to the current directory.\n  Use --global to search everything, --no-global to override a saved global startup scope,\n  or --dir PATH[:BRANCH] to target a project."
+    styles = clap_styles(),
+    next_line_help = true,
+    before_long_help = "NOTE FOR AI AGENTS & SCRIPTS:\n  `aics` launches an interactive TUI by default. In non-interactive contexts\n  or shell pipelines, you MUST pass `--json` (streaming JSONL hits) or\n  `--export <DIR>` (Markdown files); otherwise aics will exit with an error.\n",
+    after_help = "Use 'aics --help' for full help, side-effect notes, and examples.\nUse 'aics --manpage' for the comprehensive Markdown manual.",
+    after_long_help = "Examples:\n  aics deploy\n      Search sessions for the current directory and open the TUI.\n\n  aics -g --agent claude --after 2026-03-01 deploy\n      Search all Claude sessions after 2026-03-01.\n\n  aics --json -g --sort-by relevance \"vector db\"\n      Print matching sessions as JSONL instead of launching the TUI.\n\n  aics -g --export ./transcripts \"vector db\"\n      Write every matching session to ./transcripts as Markdown.\n\nDate filters:\n  --after and --before accept YYYY-MM-DD or RFC3339 timestamps.\n\nScope:\n  By default, searches are scoped to the current directory.\n  Use --global to search everything, --no-global to override a saved global startup scope,\n  or --dir PATH[:BRANCH] to target a project.\n\nFull manual:\n  Run `aics --manpage` to view the comprehensive Markdown reference manual."
 )]
 struct Cli {
+    // === Non-Interactive / Scripting (No TUI) ===
     #[arg(
-        long = "print-palettes",
-        help = "Print built-in theme palettes as ANSI color cards and exit"
+        long = "json",
+        help_heading = "Non-Interactive / Scripting (No TUI)",
+        help = "Print JSONL hits or rule records to stdout",
+        long_help = "[Read-only] Print JSONL hits or rule records to stdout instead of launching the interactive TUI"
     )]
-    print_palettes: bool,
+    json: bool,
+    #[arg(
+        long = "export",
+        value_name = "DIR",
+        help_heading = "Non-Interactive / Scripting (No TUI)",
+        conflicts_with_all = ["json", "preview_rules", "apply_rules", "benchmark_rules"],
+        help = "Write matching sessions to DIR as Markdown",
+        long_help = "[Side-effect: writes files] Write every matching session to DIR as Markdown instead of launching the TUI"
+    )]
+    export: Option<PathBuf>,
+    #[arg(
+        long = "progress",
+        help_heading = "Non-Interactive / Scripting (No TUI)",
+        value_enum,
+        default_value_t = CliProgress::Stderr
+    )]
+    progress: CliProgress,
+
+    // === Interactive TUI Overrides ===
+    #[arg(
+        long = "no-global",
+        help_heading = "Interactive TUI Overrides",
+        conflicts_with = "global",
+        help = "Start in project-local mode (override saved global default)",
+        long_help = "Start in project-local mode even when the saved default scope is global (only affects TUI)"
+    )]
+    no_global: bool,
+    #[arg(
+        long = "preview-rules",
+        help_heading = "Interactive TUI Overrides",
+        conflicts_with = "apply_rules",
+        help = "Evaluate rules and review proposed actions",
+        long_help = "[Read-only] Evaluate JavaScript rules and review proposed actions without changing files (opens review TUI, or emits JSONL if combined with --json)"
+    )]
+    preview_rules: bool,
+
+    // === Search Scope & Target ===
     #[arg(
         short = 'g',
         long = "global",
+        help_heading = "Search Scope & Target",
         help = "Search across all indexed sessions instead of scoping to the current directory"
     )]
     global: bool,
     #[arg(
-        long = "no-global",
-        conflicts_with = "global",
-        help = "Start in project-local mode even when the saved default scope is global"
-    )]
-    no_global: bool,
-    #[arg(
         long = "dir",
         value_name = "PATH[:BRANCH]",
+        help_heading = "Search Scope & Target",
         help = "Search sessions for a specific project directory; append :BRANCH to also filter by branch"
     )]
     dir: Option<String>,
     #[arg(
         long = "branch",
+        help_heading = "Search Scope & Target",
         help = "Limit results to a branch name; conflicts with a different branch embedded in --dir"
     )]
     branch: Option<String>,
     #[arg(
-        short = 'n',
-        long = "num-results",
-        default_value_t = 2000,
-        help = "Maximum number of results to load into the TUI or emit as JSONL"
+        long = "session",
+        value_name = "SESSIONID",
+        help_heading = "Search Scope & Target",
+        help = "Only include the session with this exact session id"
     )]
-    num_results: usize,
+    session: Option<String>,
+
+    // === Search Filters (Read-Only) ===
     #[arg(
         long = "agent",
+        help_heading = "Search Filters (Read-Only)",
         value_parser = ["claude", "codex", "antigravity", "agy"],
         help = "Only include sessions recorded by one agent"
     )]
     agent: Option<String>,
     #[arg(
-        long = "session",
-        value_name = "SESSIONID",
-        help = "Only include the session with this exact session id"
-    )]
-    session: Option<String>,
-    #[arg(
         long = "after",
+        help_heading = "Search Filters (Read-Only)",
         help = "Only include sessions on or after this date or timestamp"
     )]
     after: Option<String>,
     #[arg(
         long = "before",
+        help_heading = "Search Filters (Read-Only)",
         help = "Only include sessions on or before this date or timestamp"
     )]
     before: Option<String>,
     #[arg(
         long = "min-lines",
+        help_heading = "Search Filters (Read-Only)",
         help = "Only include sessions with at least this many content lines"
     )]
     min_lines: Option<usize>,
-    #[arg(long = "no-original", help = "Exclude original/root sessions")]
+    #[arg(
+        short = 'n',
+        long = "num-results",
+        help_heading = "Search Filters (Read-Only)",
+        default_value_t = 2000,
+        help = "Maximum number of results to load into the TUI or emit as JSONL"
+    )]
+    num_results: usize,
+    #[arg(
+        long = "live",
+        help_heading = "Search Filters (Read-Only)",
+        help = "Only include sessions that currently appear to be live"
+    )]
+    live: bool,
+    #[arg(
+        long = "no-original",
+        help_heading = "Search Filters (Read-Only)",
+        help = "Exclude original/root sessions"
+    )]
     no_original: bool,
-    #[arg(long = "no-trimmed", help = "Exclude trimmed sessions")]
+    #[arg(
+        long = "no-trimmed",
+        help_heading = "Search Filters (Read-Only)",
+        help = "Exclude trimmed sessions"
+    )]
     no_trimmed: bool,
     #[arg(
         long = "no-rollover",
+        help_heading = "Search Filters (Read-Only)",
         visible_alias = "no-continued",
         help = "Exclude continued sessions (also called rollover sessions)"
     )]
     no_rollover: bool,
     #[arg(
         long = "sub-agent",
+        help_heading = "Search Filters (Read-Only)",
         help = "Include sub-agent or sidechain sessions in the result set"
     )]
     sub_agent: bool,
     #[arg(
-        long = "live",
-        help = "Only include sessions that currently appear to be live"
-    )]
-    live: bool,
-    #[arg(
-        long = "trashed",
-        value_enum,
-        help = "Search trashed sessions: no, yes, or both"
-    )]
-    trashed: Option<CliTrashFilter>,
-    #[arg(
         long = "superseded",
+        help_heading = "Search Filters (Read-Only)",
         value_enum,
         help = "Search sessions collapsed by fork succession: no, yes, or both"
     )]
     superseded: Option<CliSupersededFilter>,
     #[arg(
-        long = "json",
-        help = "Print JSONL hits or rule records to stdout instead of launching the interactive TUI"
+        long = "trashed",
+        help_heading = "Search Filters (Read-Only)",
+        value_enum,
+        help = "Search trashed sessions: no, yes, or both"
     )]
-    json: bool,
+    trashed: Option<CliTrashFilter>,
+
+    // === Result Ordering & Display ===
     #[arg(
-        long = "export",
-        value_name = "DIR",
-        conflicts_with_all = ["json", "preview_rules", "apply_rules", "benchmark_rules"],
-        help = "Write every matching session to DIR as Markdown instead of launching the TUI"
+        long = "sort-by",
+        help_heading = "Result Ordering & Display",
+        value_enum,
+        help = "Order results by time or text relevance"
     )]
-    export: Option<PathBuf>,
+    sort_by: Option<CliSort>,
     #[arg(
         long = "hide",
         value_name = "ITEM",
+        help_heading = "Result Ordering & Display",
         value_enum,
-        help = "Hide a transcript part; repeatable. Adds to saved display options in the TUI, and is the only thing hidden from an export"
+        help = "Hide a transcript part (repeatable)",
+        long_help = "Hide a transcript part; repeatable. Adds to saved display options in the TUI, and is the only thing hidden from an export"
     )]
     hide: Vec<CliHideItem>,
-    #[arg(
-        long = "preview-rules",
-        conflicts_with = "apply_rules",
-        help = "Evaluate JavaScript rules and review proposed actions without changing files"
-    )]
-    preview_rules: bool,
+
+    // === JavaScript Rules & Automation ===
     #[arg(
         long = "apply-rules",
+        help_heading = "JavaScript Rules & Automation",
         conflicts_with = "preview_rules",
-        help = "Evaluate JavaScript rules and apply supported actions"
+        help = "Evaluate rules and apply supported actions",
+        long_help = "[Side-effect: mutates session files] Evaluate JavaScript rules and apply supported actions"
     )]
     apply_rules: bool,
     #[arg(
         long = "no-apply-rules",
+        help_heading = "JavaScript Rules & Automation",
         conflicts_with_all = ["preview_rules", "apply_rules", "benchmark_rules", "rules"],
         help = "Disable automatic application of rules configured with applyAtStartup: true"
     )]
     no_apply_rules: bool,
+    #[arg(
+        long = "rules",
+        value_name = "PATH",
+        help_heading = "JavaScript Rules & Automation",
+        help = "Use a custom JavaScript rules file without reading or writing the rules cache"
+    )]
+    rules: Option<PathBuf>,
     #[arg(
         long = "benchmark-rules",
         hide = true,
@@ -174,54 +253,71 @@ struct Cli {
     )]
     benchmark_rules: bool,
     #[arg(
-        long = "rules",
-        value_name = "PATH",
-        help = "Use a custom JavaScript rules file without reading or writing the rules cache"
-    )]
-    rules: Option<PathBuf>,
-    #[arg(
         long = "write-rules-dts",
-        help = "Write JavaScript rules TypeScript declarations to ~/.config/aics/rules.d.ts and exit"
+        help_heading = "JavaScript Rules & Automation",
+        help = "Write rules TypeScript declarations and exit",
+        long_help = "[Side-effect: writes file] Write JavaScript rules TypeScript declarations to ~/.config/aics/rules.d.ts and exit"
     )]
     write_rules_dts: bool,
-    #[arg(
-        long = "sort-by",
-        value_enum,
-        help = "Order results by time or text relevance"
-    )]
-    sort_by: Option<CliSort>,
+
+    // === Index & Storage Management ===
     #[arg(
         long = "rebuild-index",
-        help = "Rebuild the local search index before searching"
+        help_heading = "Index & Storage Management",
+        help = "Rebuild local search index before searching",
+        long_help = "[Side-effect: re-indexes cache] Rebuild the local search index before searching"
     )]
     rebuild_index: bool,
     #[arg(
+        long = "delete-index",
+        help_heading = "Index & Storage Management",
+        conflicts_with = "rebuild_index",
+        help = "Delete selected index profile and exit",
+        long_help = "[Side-effect: deletes cache] Delete the selected index profile and exit immediately"
+    )]
+    delete_index: bool,
+    #[arg(
         long = "claude-home",
         value_name = "PATH",
+        help_heading = "Index & Storage Management",
         help = "Override the Claude Code home directory for this run"
     )]
     claude_home: Option<PathBuf>,
     #[arg(
         long = "codex-home",
         value_name = "PATH",
+        help_heading = "Index & Storage Management",
         help = "Override the Codex CLI home directory for this run"
     )]
     codex_home: Option<PathBuf>,
     #[arg(
         long = "antigravity-home",
         value_name = "PATH",
+        help_heading = "Index & Storage Management",
         help = "Override the Antigravity CLI home directory for this run"
     )]
     antigravity_home: Option<PathBuf>,
-    #[arg(long = "delete-index", conflicts_with = "rebuild_index")]
-    delete_index: bool,
+
+    // === Information & Utilities ===
     #[arg(
-        long = "progress",
-        value_enum,
-        default_value_t = CliProgress::Stderr
+        long = "manpage",
+        help_heading = "Information & Utilities",
+        help = "Print Markdown reference manual and exit",
+        long_help = "Print the comprehensive Markdown reference manual and exit"
     )]
-    progress: CliProgress,
-    #[arg(help = "Optional search query to run immediately or prefill in the TUI")]
+    manpage: bool,
+    #[arg(
+        long = "print-palettes",
+        help_heading = "Information & Utilities",
+        help = "Print built-in theme palettes as ANSI color cards and exit"
+    )]
+    print_palettes: bool,
+
+    // === Query Argument ===
+    #[arg(
+        help = "Search query to run immediately or prefill in TUI",
+        long_help = "Optional search query to run immediately or prefill in the TUI"
+    )]
     query: Option<String>,
 }
 
@@ -329,6 +425,7 @@ impl Cli {
             && !self.write_rules_dts
             && !self.delete_index
             && !self.print_palettes
+            && !self.manpage
     }
 
     /// Modes that own stdout, so progress bars and other chatter must not go there.
@@ -350,6 +447,10 @@ fn main() -> Result<()> {
     let logging = aics::logging::init(cli.logging_mode())?;
     if cli.print_palettes {
         print!("{}", render_palettes());
+        return Ok(());
+    }
+    if cli.manpage {
+        print!("{}", render_manpage());
         return Ok(());
     }
     if cli.write_rules_dts {
@@ -640,6 +741,9 @@ fn validate_terminal_mode(cli: &Cli) -> Result<()> {
         && !cli.json
         && cli.export.is_none()
         && rules_mode(cli).is_none()
+        && !cli.manpage
+        && !cli.print_palettes
+        && !cli.write_rules_dts
         && !std::io::stdout().is_terminal()
     {
         bail!("stdout is not a terminal; use --json for non-interactive output");
@@ -1183,8 +1287,9 @@ mod tests {
 
     use super::{
         apply_default_filter_to_request, build_request, hidden_from, palette_pairs,
-        parse_after_date, parse_before_date, parse_dir_arg, render_palettes, rules_mode,
-        scope_for_current_dir, validate_terminal_mode, Cli, CliProgress, DisplayOptions,
+        parse_after_date, parse_before_date, parse_dir_arg, render_manpage, render_palettes,
+        rules_mode, scope_for_current_dir, validate_terminal_mode, Cli, CliProgress,
+        DisplayOptions,
     };
     use aics::index::{Scope, SearchFilters, SortMode, SupersededFilter, TrashFilter};
     use aics::parse::Agent;
@@ -1713,17 +1818,55 @@ mod tests {
     #[test]
     fn help_text_includes_descriptions_and_examples() {
         let mut command = Cli::command();
-        let help = command.render_help().to_string();
+        let short_help = command.render_help().to_string();
+        let long_help = command.render_long_help().to_string();
 
-        assert!(help.contains("Search across all indexed sessions"));
-        assert!(help.contains("Optional search query to run immediately"));
-        assert!(help.contains("--claude-home <PATH>"));
-        assert!(help.contains("--codex-home <PATH>"));
-        assert!(help.contains("--no-apply-rules"));
-        assert!(help.contains("--export <DIR>"));
-        assert!(!help.contains("--benchmark-rules"));
-        assert!(help.contains("Examples:"));
-        assert!(help.contains("YYYY-MM-DD or RFC3339"));
+        // Short help (-h) is compact and directs users to full help
+        assert!(!short_help.contains("NOTE FOR AI AGENTS & SCRIPTS:"));
+        assert!(!short_help.contains("Examples:"));
+        assert!(short_help.contains("Use 'aics --help' for full help"));
+        assert!(short_help.contains("Use 'aics --manpage' for the comprehensive Markdown manual"));
+        assert!(!short_help.contains("[Read-only]"));
+        assert!(!short_help.contains("[Side-effect:"));
+
+        // Long help (--help) includes the full agent note, side-effect annotations, and examples
+        assert!(long_help.contains("NOTE FOR AI AGENTS & SCRIPTS:"));
+        assert!(long_help.contains("[Read-only] Print JSONL hits"));
+        assert!(long_help.contains("[Side-effect: writes files]"));
+        assert!(long_help.contains("[Side-effect: mutates session files]"));
+        assert!(long_help.contains("[Side-effect: re-indexes cache]"));
+        assert!(long_help.contains("[Side-effect: deletes cache]"));
+        assert!(long_help.contains("Non-Interactive / Scripting (No TUI):"));
+        assert!(long_help.contains("Interactive TUI Overrides:"));
+        assert!(long_help.contains("Search Scope & Target:"));
+        assert!(long_help.contains("Search Filters (Read-Only):"));
+        assert!(long_help.contains("Result Ordering & Display:"));
+        assert!(long_help.contains("JavaScript Rules & Automation:"));
+        assert!(long_help.contains("Index & Storage Management:"));
+        assert!(long_help.contains("Information & Utilities:"));
+        assert!(long_help.contains("Search across all indexed sessions"));
+        assert!(long_help.contains("Optional search query to run immediately"));
+        assert!(long_help.contains("--claude-home <PATH>"));
+        assert!(long_help.contains("--codex-home <PATH>"));
+        assert!(long_help.contains("--no-apply-rules"));
+        assert!(long_help.contains("--export <DIR>"));
+        assert!(long_help.contains("--manpage"));
+        assert!(!long_help.contains("--benchmark-rules"));
+        assert!(long_help.contains("Examples:"));
+        assert!(long_help.contains("YYYY-MM-DD or RFC3339"));
+    }
+
+    #[test]
+    fn manpage_flag_and_content() {
+        let cli = Cli::parse_from(["aics", "--manpage"]);
+        assert!(cli.manpage);
+        assert!(!cli.will_enter_tui());
+
+        let manual = render_manpage();
+        assert!(manual.contains("# Command-line usage"));
+        assert!(manual.contains("Automation and AI agent guidelines"));
+        assert!(manual.contains("Side-effect and safety matrix"));
+        assert!(manual.contains("`aics --json [FILTERS] [QUERY]`"));
     }
 
     #[test]

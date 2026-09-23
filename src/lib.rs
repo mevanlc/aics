@@ -4,6 +4,7 @@ pub mod fs_safename;
 pub mod index;
 pub mod live;
 pub mod logging;
+pub mod manpage;
 pub mod parse;
 pub mod ring_cursor;
 pub mod rules;
