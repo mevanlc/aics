@@ -293,14 +293,15 @@ impl FilterModalState {
         let popup = popup_area(area);
         frame.render_widget(Clear, popup);
 
-        let visibility_title_gap =
-            "─".repeat(FILTER_COLUMN_WIDTH.saturating_sub("Filters".len() as u16) as usize);
+        let turn_visibility_title_gap = "─".repeat(
+            (FILTER_COLUMN_WIDTH + 1).saturating_sub("Session Filters".len() as u16) as usize,
+        );
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(theme.border_style(true))
             .title(block_title(format!(
-                "Filters{visibility_title_gap}Visibility"
+                "Session Filters{turn_visibility_title_gap}Turn Visibility"
             )));
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
@@ -311,7 +312,7 @@ impl FilterModalState {
         let mut rows = Vec::new();
         for field in FIELD_ORDER {
             let selected = self.selected_side == FilterSide::Filters && self.selected == field;
-            let prefix = if selected { "› " } else { "  " };
+            let prefix = if selected { "›" } else { " " };
             let style = if selected {
                 Style::default()
                     .fg(theme.text)
@@ -355,7 +356,7 @@ impl FilterModalState {
                     Style::default().fg(theme.text)
                 };
                 Line::from(vec![
-                    Span::styled(format!("{prefix} "), style),
+                    Span::styled(prefix, style),
                     Span::styled(format!("[{}] ", field.mnemonic()), style),
                     Span::styled(format!("{:<DISPLAY_LABEL_WIDTH$}", field.label()), style),
                     Span::styled(field.value(self.display_options), style),
@@ -1053,24 +1054,36 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let left = field_rows_area(area);
         let right = display_rows_area(area);
-        let visibility_header = (0.."Visibility".len() as u16)
-            .map(|offset| buffer[(right.x + offset, left.y - 1)].symbol())
+        let filters_header = (0.."Session Filters".len() as u16)
+            .map(|offset| buffer[(left.x + 1 + offset, left.y - 1)].symbol())
             .collect::<String>();
-        let mnemonic_x = right.x + 2;
-        let first_value_x = right.x + 6 + super::DISPLAY_LABEL_WIDTH as u16;
-        assert_eq!(visibility_header, "Visibility");
+        let visibility_header = (0.."Turn Visibility".len() as u16)
+            .map(|offset| buffer[(right.x + 1 + offset, left.y - 1)].symbol())
+            .collect::<String>();
+        let left_mnemonic_x = left.x + 1;
+        let right_mnemonic_x = right.x + 1;
+        let first_value_x = right_mnemonic_x + 4 + super::DISPLAY_LABEL_WIDTH as u16;
+        assert_eq!(filters_header, "Session Filters");
+        assert_eq!(visibility_header, "Turn Visibility");
+        assert_eq!(buffer[(left.x, left.y - 1)].symbol(), "─");
+        assert_eq!(buffer[(right.x, left.y - 1)].symbol(), "─");
         assert_eq!(right.x, left.right() + 1);
+        assert_eq!(buffer[(left.x, left.y)].symbol(), "›");
+        assert_eq!(buffer[(left_mnemonic_x, left.y)].symbol(), "[");
+        assert_eq!(buffer[(left_mnemonic_x + 1, left.y)].symbol(), "s");
+        assert_eq!(buffer[(left_mnemonic_x + 2, left.y)].symbol(), "]");
         for (row_offset, mnemonic) in ('1'..='7').enumerate() {
+            assert_eq!(buffer[(right.x, right.y + row_offset as u16)].symbol(), " ");
             assert_eq!(
-                buffer[(mnemonic_x, right.y + row_offset as u16)].symbol(),
+                buffer[(right_mnemonic_x, right.y + row_offset as u16)].symbol(),
                 "["
             );
             assert_eq!(
-                buffer[(mnemonic_x + 1, right.y + row_offset as u16)].symbol(),
+                buffer[(right_mnemonic_x + 1, right.y + row_offset as u16)].symbol(),
                 mnemonic.to_string()
             );
             assert_eq!(
-                buffer[(mnemonic_x + 2, right.y + row_offset as u16)].symbol(),
+                buffer[(right_mnemonic_x + 2, right.y + row_offset as u16)].symbol(),
                 "]"
             );
         }
