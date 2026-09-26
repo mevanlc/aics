@@ -357,6 +357,8 @@ enum CliHideItem {
     SkillTextInjection,
     ToolCalls,
     ToolResults,
+    UserToolCalls,
+    UserToolResults,
     AgentReplies,
     UserMessages,
     InternalContext,
@@ -372,6 +374,8 @@ impl CliHideItem {
             Self::SkillTextInjection => options.hide_skill_text_injection = true,
             Self::ToolCalls => options.hide_tool_calls = true,
             Self::ToolResults => options.hide_tool_results = true,
+            Self::UserToolCalls => options.hide_user_tool_calls = true,
+            Self::UserToolResults => options.hide_user_tool_results = true,
             Self::AgentReplies => options.hide_agent_replies = true,
             Self::UserMessages => options.hide_user_messages = true,
             Self::InternalContext => options.hide_internal_context = true,
@@ -1718,6 +1722,10 @@ mod tests {
             "--hide",
             "tool-results",
             "--hide",
+            "user-tool-calls",
+            "--hide",
+            "user-tool-results",
+            "--hide",
             "agent-replies",
             "--hide",
             "user-messages",
@@ -1731,6 +1739,8 @@ mod tests {
         assert!(options.hide_skill_text_injection);
         assert!(options.hide_tool_calls);
         assert!(options.hide_tool_results);
+        assert!(options.hide_user_tool_calls);
+        assert!(options.hide_user_tool_results);
         assert!(options.hide_agent_replies);
         assert!(options.hide_user_messages);
         assert!(options.hide_internal_context);

@@ -40,11 +40,13 @@ const FIELD_ORDER: [FilterField; 16] = [
     FilterField::Sort,
 ];
 
-const DISPLAY_ORDER: [DisplayField; 7] = [
+const DISPLAY_ORDER: [DisplayField; 9] = [
     DisplayField::ProjectDocsAutodump,
     DisplayField::SkillTextInjection,
     DisplayField::ToolCalls,
     DisplayField::ToolResults,
+    DisplayField::UserToolCalls,
+    DisplayField::UserToolResults,
     DisplayField::AgentReplies,
     DisplayField::UserMessages,
     DisplayField::InternalContext,
@@ -80,6 +82,8 @@ enum DisplayField {
     SkillTextInjection,
     ToolCalls,
     ToolResults,
+    UserToolCalls,
+    UserToolResults,
     AgentReplies,
     UserMessages,
     InternalContext,
@@ -492,6 +496,14 @@ impl FilterModalState {
             DisplayField::ToolResults => {
                 self.display_options.hide_tool_results = !self.display_options.hide_tool_results;
             }
+            DisplayField::UserToolCalls => {
+                self.display_options.hide_user_tool_calls =
+                    !self.display_options.hide_user_tool_calls;
+            }
+            DisplayField::UserToolResults => {
+                self.display_options.hide_user_tool_results =
+                    !self.display_options.hide_user_tool_results;
+            }
             DisplayField::AgentReplies => {
                 self.display_options.hide_agent_replies = !self.display_options.hide_agent_replies;
             }
@@ -873,9 +885,11 @@ impl DisplayField {
             Self::SkillTextInjection => '2',
             Self::ToolCalls => '3',
             Self::ToolResults => '4',
-            Self::AgentReplies => '5',
-            Self::UserMessages => '6',
-            Self::InternalContext => '7',
+            Self::UserToolCalls => '5',
+            Self::UserToolResults => '6',
+            Self::AgentReplies => '7',
+            Self::UserMessages => '8',
+            Self::InternalContext => '9',
         }
     }
 
@@ -891,6 +905,8 @@ impl DisplayField {
             Self::SkillTextInjection => "Skill Text Injection",
             Self::ToolCalls => "Tool Calls",
             Self::ToolResults => "Tool Results",
+            Self::UserToolCalls => "User Tool Calls",
+            Self::UserToolResults => "User Tool Results",
             Self::AgentReplies => "Agent Replies",
             Self::UserMessages => "User Messages",
             Self::InternalContext => "Internal Context",
@@ -905,6 +921,8 @@ impl DisplayField {
             Self::SkillTextInjection => "Hide skill definition text injected into session context.",
             Self::ToolCalls => "Hide tool call request blocks from previews and viewers.",
             Self::ToolResults => "Hide tool result blocks from previews and viewers.",
+            Self::UserToolCalls => "Hide user shell command executions from previews and viewers.",
+            Self::UserToolResults => "Hide user shell command outputs from previews and viewers.",
             Self::AgentReplies => "Hide assistant reply messages from previews and viewers.",
             Self::UserMessages => "Hide user messages from previews and viewers.",
             Self::InternalContext => {
@@ -919,6 +937,8 @@ impl DisplayField {
             DisplayField::SkillTextInjection => options.hide_skill_text_injection,
             DisplayField::ToolCalls => options.hide_tool_calls,
             DisplayField::ToolResults => options.hide_tool_results,
+            DisplayField::UserToolCalls => options.hide_user_tool_calls,
+            DisplayField::UserToolResults => options.hide_user_tool_results,
             DisplayField::AgentReplies => options.hide_agent_replies,
             DisplayField::UserMessages => options.hide_user_messages,
             DisplayField::InternalContext => options.hide_internal_context,
@@ -1028,8 +1048,12 @@ mod tests {
         assert_eq!(DisplayField::SkillTextInjection.value(defaults), "on");
         assert_eq!(DisplayField::ToolResults.label(), "Tool Results");
         assert_eq!(DisplayField::ToolResults.value(defaults), "on");
+        assert_eq!(DisplayField::UserToolCalls.label(), "User Tool Calls");
+        assert_eq!(DisplayField::UserToolCalls.value(defaults), "on");
+        assert_eq!(DisplayField::UserToolResults.label(), "User Tool Results");
+        assert_eq!(DisplayField::UserToolResults.value(defaults), "on");
         assert_eq!(DisplayField::InternalContext.value(defaults), "off");
-        for (field, mnemonic) in super::DISPLAY_ORDER.into_iter().zip('1'..='7') {
+        for (field, mnemonic) in super::DISPLAY_ORDER.into_iter().zip('1'..='9') {
             assert_eq!(field.mnemonic(), mnemonic);
         }
     }
@@ -1436,7 +1460,7 @@ mod tests {
         for _ in 0..2 {
             state
                 .handle_key(
-                    KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE),
+                    KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE),
                     &scope,
                 )
                 .unwrap();

@@ -290,6 +290,7 @@ fn should_hide_message(role: MessageRole, content: &str, options: SessionRenderO
 fn should_hide_cell(cell: &SessionCell, options: SessionRenderOptions) -> bool {
     match cell {
         SessionCell::Message { role, content, .. } => should_hide_message(*role, content, options),
+        SessionCell::Exec { is_user: true, .. } => options.display_options.hide_user_tool_calls,
         _ => false,
     }
 }
@@ -1103,9 +1104,15 @@ fn render_cell_into(
             duration_ms,
             status,
             timestamp,
+            is_user,
             ..
         } => {
-            if display_options.hide_tool_calls {
+            let hide_calls = if *is_user {
+                display_options.hide_user_tool_calls
+            } else {
+                display_options.hide_tool_calls
+            };
+            if hide_calls {
                 return;
             }
             render_exec_into(
@@ -1122,6 +1129,7 @@ fn render_cell_into(
                 theme,
                 highlight_query,
                 display_options,
+                *is_user,
             );
         }
         SessionCell::Patch {
@@ -1473,6 +1481,7 @@ fn render_exec_into(
     theme: &Theme,
     highlight_query: Option<&str>,
     display_options: DisplayOptions,
+    is_user: bool,
 ) {
     let display = parsed_summary
         .filter(|s| !s.is_empty())
@@ -1508,11 +1517,21 @@ fn render_exec_into(
         label_color,
         suffix,
         timestamp,
-        StickyHeader::new("Exec", header_timestamp_string(timestamp), &display),
+        StickyHeader::new(
+            if is_user { "User Exec" } else { "Exec" },
+            header_timestamp_string(timestamp),
+            &display,
+        ),
         theme,
     );
 
-    if !display_options.hide_tool_results {
+    let hide_results = if is_user {
+        display_options.hide_user_tool_results
+    } else {
+        display_options.hide_tool_results
+    };
+
+    if !hide_results {
         let stdout_style = Style::default().fg(theme.muted);
         for line in stdout.lines() {
             let mut spans = vec![Span::styled("  ", Style::default())];
@@ -2156,6 +2175,7 @@ mod tests {
                 duration_ms: Some(120),
                 status: ExecStatus::Completed,
                 timestamp: None,
+                is_user: false,
             },
             SessionCell::Patch {
                 files: vec![PatchFile {
@@ -2275,6 +2295,7 @@ mod tests {
                     duration_ms: None,
                     status: ExecStatus::Completed,
                     timestamp: None,
+                    is_user: false,
                 },
             ],
         );
@@ -2319,6 +2340,7 @@ mod tests {
                 duration_ms: None,
                 status: ExecStatus::Completed,
                 timestamp: None,
+                is_user: false,
             }],
         );
 
@@ -2341,6 +2363,78 @@ mod tests {
 
         assert!(joined.contains("$ ls"));
         assert!(!joined.contains("exec stdout"));
+    }
+
+    #[test]
+    fn display_options_filter_user_tool_calls_and_results_independently() {
+        let theme = Theme::default();
+        let session = empty_session(
+            Agent::Codex,
+            vec![SessionCell::Exec {
+                command: vec!["vvv".to_owned()],
+                cwd: None,
+                parsed_summary: Some("vvv".to_owned()),
+                stdout: "zsh:1: command not found: vvv".to_owned(),
+                stderr: String::new(),
+                exit_code: Some(127),
+                duration_ms: Some(75),
+                status: ExecStatus::Failed,
+                timestamp: None,
+                is_user: true,
+            }],
+        );
+
+        // 1. Fully visible: header and result shown
+        let doc = super::render_session_document_with_options(
+            &session,
+            &theme,
+            None,
+            SessionRenderOptions {
+                display_options: DisplayOptions::SHOW_ALL,
+                ..SessionRenderOptions::default()
+            },
+        );
+        let joined = rendered_lines(&doc.text).join("\n");
+        assert!(joined.contains("$ vvv (75ms, exit 127)"));
+        assert!(joined.contains("command not found: vvv"));
+        assert!(doc
+            .sticky_markers
+            .iter()
+            .any(|m| m.header.from == "User Exec"));
+
+        // 2. hide_user_tool_results: header shown, result hidden
+        let doc = super::render_session_document_with_options(
+            &session,
+            &theme,
+            None,
+            SessionRenderOptions {
+                display_options: DisplayOptions {
+                    hide_user_tool_results: true,
+                    ..DisplayOptions::SHOW_ALL
+                },
+                ..SessionRenderOptions::default()
+            },
+        );
+        let joined = rendered_lines(&doc.text).join("\n");
+        assert!(joined.contains("$ vvv (75ms, exit 127)"));
+        assert!(!joined.contains("command not found: vvv"));
+
+        // 3. hide_user_tool_calls: entire cell hidden
+        let doc = super::render_session_document_with_options(
+            &session,
+            &theme,
+            None,
+            SessionRenderOptions {
+                display_options: DisplayOptions {
+                    hide_user_tool_calls: true,
+                    ..DisplayOptions::SHOW_ALL
+                },
+                ..SessionRenderOptions::default()
+            },
+        );
+        let joined = rendered_lines(&doc.text).join("\n");
+        assert!(!joined.contains("$ vvv"));
+        assert!(!joined.contains("command not found: vvv"));
     }
 
     #[test]

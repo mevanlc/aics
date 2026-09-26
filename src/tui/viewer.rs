@@ -1657,6 +1657,7 @@ mod tests {
                 duration_ms: None,
                 status: crate::parse::ExecStatus::Completed,
                 timestamp: None,
+                is_user: false,
             },
             SessionCell::Message {
                 role: MessageRole::User,
@@ -1754,6 +1755,7 @@ mod tests {
                 duration_ms: None,
                 status: ExecStatus::Completed,
                 timestamp: None,
+                is_user: false,
             },
             SessionCell::Metrics(RuntimeMetrics {
                 total_tokens: 20,

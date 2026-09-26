@@ -116,6 +116,7 @@ impl SessionBuilder {
                 duration_ms: None,
                 status: ExecStatus::Pending,
                 timestamp,
+                is_user: false,
             });
         } else {
             self.cells.push(SessionCell::ToolCall {

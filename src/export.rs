@@ -531,11 +531,18 @@ fn push_cell(
             duration_ms,
             status,
             timestamp,
+            is_user,
         } => {
-            if display_options.hide_tool_calls {
+            let hide_calls = if *is_user {
+                display_options.hide_user_tool_calls
+            } else {
+                display_options.hide_tool_calls
+            };
+            if hide_calls {
                 return;
             }
-            push_heading(output, "exec", *timestamp);
+            let heading = if *is_user { "user exec" } else { "exec" };
+            push_heading(output, heading, *timestamp);
             push_meta(
                 output,
                 &[
@@ -566,7 +573,12 @@ fn push_cell(
             if summary.trim() != command_line.trim() {
                 push_block(output, "Summary", "text", summary);
             }
-            if !display_options.hide_tool_results {
+            let hide_results = if *is_user {
+                display_options.hide_user_tool_results
+            } else {
+                display_options.hide_tool_results
+            };
+            if !hide_results {
                 push_block(output, "stdout", "text", stdout);
                 push_block(output, "stderr", "text", stderr);
             }
@@ -1163,6 +1175,7 @@ mod tests {
             duration_ms: Some(1_500),
             status: ExecStatus::Failed,
             timestamp: None,
+            is_user: false,
         }];
 
         let rendered = session_to_markdown(&session);
@@ -1190,6 +1203,7 @@ mod tests {
             duration_ms: Some(0),
             status: ExecStatus::Completed,
             timestamp: None,
+            is_user: false,
         }];
 
         let rendered = session_to_markdown(&session);
@@ -1415,6 +1429,7 @@ mod tests {
                 duration_ms: None,
                 status: ExecStatus::Completed,
                 timestamp: None,
+                is_user: false,
             },
             SessionCell::Patch {
                 files: Vec::new(),
@@ -1590,6 +1605,8 @@ mod tests {
             hide_skill_text_injection: true,
             hide_tool_calls: true,
             hide_tool_results: true,
+            hide_user_tool_calls: true,
+            hide_user_tool_results: true,
             hide_agent_replies: true,
             hide_user_messages: true,
             hide_project_docs_autodump: true,

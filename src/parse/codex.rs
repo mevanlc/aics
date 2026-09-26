@@ -529,7 +529,17 @@ fn handle_response_item(
                 maybe_capture_response_item_preview(role, &text, fallback_preview_first_user);
                 match role {
                     "user" => {
-                        if let Some(text) = authored_user_text(&text) {
+                        if let Some(SessionCell::Exec {
+                            command, stdout, ..
+                        }) = super::session::parse_user_shell_command(&text, timestamp)
+                        {
+                            for cmd in &command {
+                                search_fields.push_tool_call_text(cmd);
+                            }
+                            if !stdout.is_empty() {
+                                search_fields.push_tool_result_text(stdout);
+                            }
+                        } else if let Some(text) = authored_user_text(&text) {
                             search_fields.push_user(text);
                         }
                     }
@@ -669,7 +679,17 @@ fn handle_event_msg(
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             maybe_capture_event_preview(message, resume_preview_first_user);
-            if let Some(text) = authored_user_text(message) {
+            if let Some(SessionCell::Exec {
+                command, stdout, ..
+            }) = super::session::parse_user_shell_command(message, timestamp)
+            {
+                for cmd in &command {
+                    search_fields.push_tool_call_text(cmd);
+                }
+                if !stdout.is_empty() {
+                    search_fields.push_tool_result_text(stdout);
+                }
+            } else if let Some(text) = authored_user_text(message) {
                 search_fields.push_user(text);
             }
             if should_skip_display_message("user", message) {
@@ -1055,6 +1075,32 @@ impl CodexCellBuilder {
         if trimmed.is_empty() {
             return;
         }
+
+        if role == MessageRole::User {
+            if let Some(exec_cell) = super::session::parse_user_shell_command(trimmed, timestamp) {
+                if let Some(SessionCell::Exec {
+                    is_user: true,
+                    command: prev_cmd,
+                    stdout: prev_stdout,
+                    ..
+                }) = self.cells.last()
+                {
+                    if let SessionCell::Exec {
+                        command: new_cmd,
+                        stdout: new_stdout,
+                        ..
+                    } = &exec_cell
+                    {
+                        if prev_cmd == new_cmd && prev_stdout == new_stdout {
+                            return;
+                        }
+                    }
+                }
+                self.cells.push(exec_cell);
+                return;
+            }
+        }
+
         // De-dup against last cell if it's the same role+content (a Codex rollout
         // may carry the same user/agent message both as a `response_item.message`
         // and as an `event_msg.user_message`/`agent_message`).
@@ -1130,6 +1176,7 @@ impl CodexCellBuilder {
                 duration_ms: None,
                 status: ExecStatus::Pending,
                 timestamp,
+                is_user: false,
             };
             let index = self.cells.len();
             self.cells.push(cell);

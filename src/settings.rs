@@ -99,6 +99,10 @@ pub struct DisplayOptions {
     #[serde(default)]
     pub hide_tool_results: bool,
     #[serde(default)]
+    pub hide_user_tool_calls: bool,
+    #[serde(default)]
+    pub hide_user_tool_results: bool,
+    #[serde(default)]
     pub hide_agent_replies: bool,
     #[serde(default)]
     pub hide_user_messages: bool,
@@ -268,6 +272,8 @@ impl DisplayOptions {
         hide_skill_text_injection: false,
         hide_tool_calls: false,
         hide_tool_results: false,
+        hide_user_tool_calls: false,
+        hide_user_tool_results: false,
         hide_agent_replies: false,
         hide_user_messages: false,
         hide_project_docs_autodump: false,

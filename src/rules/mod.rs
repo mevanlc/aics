@@ -1728,6 +1728,7 @@ impl RuleTurns {
                     stderr: _,
                     exit_code,
                     timestamp,
+                    is_user,
                     ..
                 } => {
                     turns.exec.push(ExecTurn {
@@ -1736,6 +1737,7 @@ impl RuleTurns {
                         cwd: cwd.clone(),
                         exit_code: *exit_code,
                         timestamp: timestamp.map(|timestamp| timestamp.to_rfc3339()),
+                        is_user: *is_user,
                     });
                 }
                 SessionCell::Patch {
@@ -1836,6 +1838,12 @@ struct ExecTurn {
     cwd: Option<String>,
     exit_code: Option<i32>,
     timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    is_user: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2105,6 +2113,7 @@ mod tests {
                 duration_ms: None,
                 status: ExecStatus::Completed,
                 timestamp: None,
+                is_user: false,
             },
             SessionCell::Patch {
                 files: vec![PatchFile {

@@ -328,6 +328,8 @@ pub enum SessionCell {
         status: ExecStatus,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<DateTime<Utc>>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_user: bool,
     },
     Patch {
         files: Vec<PatchFile>,
@@ -584,6 +586,103 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
         .contains(&needle.to_ascii_lowercase())
 }
 
+pub fn parse_user_shell_command(
+    text: &str,
+    timestamp: Option<DateTime<Utc>>,
+) -> Option<SessionCell> {
+    let trimmed = text.trim();
+    if !starts_with_marked_block("<user_shell_command>", "</user_shell_command>", trimmed) {
+        return None;
+    }
+
+    let inner = extract_tag_content(trimmed, "user_shell_command")?;
+    let command_str = extract_tag_content(inner, "command")?.trim().to_owned();
+    if command_str.is_empty() {
+        return None;
+    }
+
+    let mut exit_code: Option<i32> = None;
+    let mut duration_ms: Option<u64> = None;
+    let mut stdout = String::new();
+
+    if let Some(result_str) = extract_tag_content(inner, "result") {
+        let mut lines = result_str.lines().peekable();
+        while let Some(line) = lines.next() {
+            let line_trimmed = line.trim();
+            if let Some(rest) = line_trimmed.strip_prefix("Exit code:") {
+                if let Ok(code) = rest.trim().parse::<i32>() {
+                    exit_code = Some(code);
+                }
+            } else if let Some(rest) = line_trimmed.strip_prefix("Process exited with code") {
+                if let Ok(code) = rest.trim().parse::<i32>() {
+                    exit_code = Some(code);
+                }
+            } else if let Some(rest) = line_trimmed.strip_prefix("Duration:") {
+                let secs = rest.trim_end_matches(" seconds").trim();
+                if let Ok(secs_f) = secs.parse::<f64>() {
+                    duration_ms = Some((secs_f * 1000.0).round() as u64);
+                }
+            } else if let Some(rest) = line_trimmed.strip_prefix("Wall time:") {
+                let secs = rest.trim_end_matches(" seconds").trim();
+                if let Ok(secs_f) = secs.parse::<f64>() {
+                    duration_ms = Some((secs_f * 1000.0).round() as u64);
+                }
+            } else if let Some(rest) = line_trimmed.strip_prefix("Output:") {
+                let first_line = rest.trim();
+                let mut remaining: Vec<&str> = lines.by_ref().collect();
+                let mut all_lines = Vec::new();
+                if !first_line.is_empty() {
+                    all_lines.push(first_line);
+                }
+                all_lines.append(&mut remaining);
+                stdout = all_lines.join("\n").trim().to_owned();
+                break;
+            }
+        }
+    }
+
+    let status = match exit_code {
+        Some(0) | None => ExecStatus::Completed,
+        Some(_) => ExecStatus::Failed,
+    };
+    let parsed_summary = Some(
+        command_str
+            .lines()
+            .next()
+            .unwrap_or(&command_str)
+            .to_owned(),
+    );
+    let command = vec![command_str];
+
+    Some(SessionCell::Exec {
+        command,
+        cwd: None,
+        parsed_summary,
+        stdout,
+        stderr: String::new(),
+        exit_code,
+        duration_ms,
+        status,
+        timestamp,
+        is_user: true,
+    })
+}
+
+fn extract_tag_content<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open_tag = format!("<{tag}>");
+    let close_tag = format!("</{tag}>");
+    let open_pos = find_ignore_ascii_case(text, &open_tag)?;
+    let start = open_pos + open_tag.len();
+    let close_pos = find_ignore_ascii_case(&text[start..], &close_tag)?;
+    Some(&text[start..start + close_pos])
+}
+
+fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .to_ascii_lowercase()
+        .find(&needle.to_ascii_lowercase())
+}
+
 pub fn strip_project_docs_autodump_preamble(content: &str) -> Option<&str> {
     let trimmed = content.trim_start();
     strip_project_docs_header_line(trimmed).or_else(|| strip_bare_instructions_block(trimmed))
@@ -782,10 +881,21 @@ pub fn cells_from_messages(messages: &[SessionMessage]) -> Vec<SessionCell> {
                     timestamp: message.timestamp,
                 });
             }
-            MessageRole::User
-            | MessageRole::Assistant
-            | MessageRole::System
-            | MessageRole::Summary => {
+            MessageRole::User => {
+                last_tool_call_summary = None;
+                if let Some(exec_cell) =
+                    parse_user_shell_command(&message.content, message.timestamp)
+                {
+                    cells.push(exec_cell);
+                } else {
+                    cells.push(SessionCell::Message {
+                        role: message.role,
+                        content: message.content.clone(),
+                        timestamp: message.timestamp,
+                    });
+                }
+            }
+            MessageRole::Assistant | MessageRole::System | MessageRole::Summary => {
                 last_tool_call_summary = None;
                 cells.push(SessionCell::Message {
                     role: message.role,
@@ -1068,6 +1178,47 @@ mod tests {
                 !super::is_internal_context_injection(MessageRole::User, content),
                 "{content}"
             );
+        }
+    }
+
+    #[test]
+    fn parses_user_shell_command_blocks_into_exec_cells() {
+        let text = r#"
+<user_shell_command>
+<command>
+vvv
+</command>
+<result>
+Exit code: 127
+Duration: 0.0748 seconds
+Output:
+zsh:1: command not found: vvv
+
+</result></user_shell_command>"#;
+
+        let cell = super::parse_user_shell_command(text, None).expect("should parse");
+        match cell {
+            super::SessionCell::Exec {
+                command,
+                parsed_summary,
+                stdout,
+                stderr,
+                exit_code,
+                duration_ms,
+                status,
+                is_user,
+                ..
+            } => {
+                assert_eq!(command, vec!["vvv"]);
+                assert_eq!(parsed_summary.as_deref(), Some("vvv"));
+                assert_eq!(stdout, "zsh:1: command not found: vvv");
+                assert!(stderr.is_empty());
+                assert_eq!(exit_code, Some(127));
+                assert_eq!(duration_ms, Some(75));
+                assert_eq!(status, super::ExecStatus::Failed);
+                assert!(is_user);
+            }
+            _ => panic!("expected SessionCell::Exec"),
         }
     }
 }

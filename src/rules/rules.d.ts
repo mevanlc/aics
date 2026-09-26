@@ -170,6 +170,9 @@ interface AicsExecTurn {
   /** RFC 3339 timestamp, or `null` when unavailable. */
   timestamp: string | null;
 
+  /** Whether this execution was invoked by the user rather than the agent. */
+  isUser?: boolean;
+
   /**
    * Lazily returns captured standard output.
    * @param limit Maximum source-text UTF-8 bytes before truncation. Omit for the runtime default.

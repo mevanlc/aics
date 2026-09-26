@@ -4709,7 +4709,7 @@ mod tests {
             let original_row = second_user_row(&app);
             app.viewer_state_mut().unwrap().scroll = original_row + 3;
             app.open_filters();
-            app.handle_key(crossterm_key(KeyCode::Char('5'))).unwrap();
+            app.handle_key(crossterm_key(KeyCode::Char('7'))).unwrap();
             app.handle_key(crossterm_key(KeyCode::Char(' '))).unwrap();
             app.handle_key(key).unwrap();
             assert_eq!(app.selected_hit().unwrap().session.file_path, path);
@@ -4743,7 +4743,7 @@ mod tests {
             app.viewer_state_mut().unwrap().scroll = original;
             app.open_filters();
             if action == "cancel" {
-                app.handle_key(crossterm_key(KeyCode::Char('5'))).unwrap();
+                app.handle_key(crossterm_key(KeyCode::Char('7'))).unwrap();
                 app.handle_key(crossterm_key(KeyCode::Char(' '))).unwrap();
                 app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
             } else {
