@@ -751,6 +751,13 @@ impl App {
         "Preview"
     }
 
+    pub fn selected_session_id(&self) -> Option<&str> {
+        self.results
+            .get(self.selected)
+            .map(|hit| hit.session.session_id.trim())
+            .filter(|id| !id.is_empty())
+    }
+
     pub fn selected_preview(&mut self) -> Option<&Session> {
         let hit = self.results.get(self.selected)?;
         let path = hit.session.file_path.clone();
@@ -1033,9 +1040,12 @@ impl App {
             self,
             areas.list,
             &theme,
-            &session_separator,
-            snippet_line_count,
-            extra_row_count,
+            list::ListOptions {
+                separator: &session_separator,
+                snippet_line_count,
+                extra_row_count,
+                preview_open: areas.preview.is_some(),
+            },
         );
 
         if let Some(preview_area) = areas.preview {
@@ -4912,6 +4922,146 @@ mod tests {
 
         assert!(list_top.contains("Sessions"));
         assert!(!list_top.contains("↑↓ select"));
+    }
+
+    #[test]
+    fn bottom_border_displays_session_id_in_preview_or_list() {
+        let mut app = test_app();
+        let expected_id = "01a0de86-f044-7590-8583-142af6a3e0b2";
+        let mut hit = sample_hit(Agent::Claude);
+        hit.session.session_id = expected_id.to_owned();
+        app.results = vec![hit];
+        app.selected = 0;
+
+        let area = Rect::new(0, 0, 120, 24);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // 1. With preview open: preview bottom border has session id, list bottom border does not.
+        app.preview_visible = true;
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let areas = layout::split(area, app.preview_width_pct, app.preview_visible);
+        let preview_area = areas.preview.expect("preview should be open");
+        let rendered = terminal.backend().buffer();
+
+        let preview_bottom = (0..preview_area.width)
+            .map(|offset| rendered[(preview_area.x + offset, preview_area.bottom() - 1)].symbol())
+            .collect::<String>();
+        assert!(
+            preview_bottom.contains(expected_id),
+            "preview bottom border should contain session id: {preview_bottom}"
+        );
+
+        let list_bottom = (0..areas.list.width)
+            .map(|offset| rendered[(areas.list.x + offset, areas.list.bottom() - 1)].symbol())
+            .collect::<String>();
+        assert!(
+            !list_bottom.contains(expected_id),
+            "list bottom border should not contain session id when preview is open: {list_bottom}"
+        );
+
+        // 2. With preview closed: list bottom border has session id, preview is not rendered.
+        app.preview_visible = false;
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let areas_closed = layout::split(area, app.preview_width_pct, app.preview_visible);
+        assert!(areas_closed.preview.is_none());
+        let rendered_closed = terminal.backend().buffer();
+
+        let list_bottom_closed = (0..areas_closed.list.width)
+            .map(|offset| {
+                rendered_closed[(areas_closed.list.x + offset, areas_closed.list.bottom() - 1)]
+                    .symbol()
+            })
+            .collect::<String>();
+        assert!(
+            list_bottom_closed.contains(expected_id),
+            "list bottom border should contain session id when preview is closed: {list_bottom_closed}"
+        );
+
+        // 3. When results are empty: neither preview nor list bottom border shows a session id.
+        app.results.clear();
+        app.preview_visible = true;
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let rendered_empty = terminal.backend().buffer();
+        let preview_bottom_empty = (0..preview_area.width)
+            .map(|offset| {
+                rendered_empty[(preview_area.x + offset, preview_area.bottom() - 1)].symbol()
+            })
+            .collect::<String>();
+        assert!(!preview_bottom_empty.contains(expected_id));
+
+        app.preview_visible = false;
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rendered_empty_closed = terminal.backend().buffer();
+        let list_bottom_empty = (0..areas_closed.list.width)
+            .map(|offset| {
+                rendered_empty_closed
+                    [(areas_closed.list.x + offset, areas_closed.list.bottom() - 1)]
+                    .symbol()
+            })
+            .collect::<String>();
+        assert!(!list_bottom_empty.contains(expected_id));
+    }
+
+    #[test]
+    fn bottom_border_session_id_truncates_when_narrow() {
+        let mut app = test_app();
+        let long_id = "01a0de86-f044-7590-8583-142af6a3e0b2";
+        let mut hit = sample_hit(Agent::Claude);
+        hit.session.session_id = long_id.to_owned();
+        app.results = vec![hit];
+        app.selected = 0;
+
+        // Narrow terminal where list width is small
+        let area = Rect::new(0, 0, 30, 24);
+        app.preview_visible = false;
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let areas = layout::split(area, app.preview_width_pct, app.preview_visible);
+        let rendered = terminal.backend().buffer();
+        let list_bottom = (0..areas.list.width)
+            .map(|offset| rendered[(areas.list.x + offset, areas.list.bottom() - 1)].symbol())
+            .collect::<String>();
+
+        assert!(
+            list_bottom.contains('…'),
+            "bottom border should truncate with ellipsis: {list_bottom}"
+        );
+        assert!(
+            !list_bottom.contains(long_id),
+            "bottom border should not contain full ID: {list_bottom}"
+        );
+
+        // With preview open where preview width is narrow
+        let area_preview = Rect::new(0, 0, 50, 24);
+        app.preview_visible = true;
+        app.preview_width_pct = 25;
+        let backend_preview = TestBackend::new(area_preview.width, area_preview.height);
+        let mut terminal_preview = Terminal::new(backend_preview).unwrap();
+        terminal_preview.draw(|frame| app.draw(frame)).unwrap();
+
+        let areas_preview = layout::split(area_preview, app.preview_width_pct, app.preview_visible);
+        let preview_area = areas_preview.preview.expect("preview should be open");
+        let rendered_preview = terminal_preview.backend().buffer();
+        let preview_bottom = (0..preview_area.width)
+            .map(|offset| {
+                rendered_preview[(preview_area.x + offset, preview_area.bottom() - 1)].symbol()
+            })
+            .collect::<String>();
+
+        assert!(
+            preview_bottom.contains('…'),
+            "preview bottom border should truncate with ellipsis: {preview_bottom}"
+        );
+        assert!(
+            !preview_bottom.contains(long_id),
+            "preview bottom border should not contain full ID: {preview_bottom}"
+        );
     }
 
     #[test]

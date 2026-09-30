@@ -9,7 +9,8 @@ use crate::index::SearchHit;
 use crate::tui::app::App;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
-    agent_badge, block_title, format_line_count, list_title, relative_time, truncate_plain,
+    agent_badge, block_title, bottom_border_session_id, format_line_count, list_title,
+    relative_time, truncate_plain, truncate_with_ellipsis,
 };
 
 fn card_height(snippet_line_count: usize, separator: &str, extra_row_count: usize) -> usize {
@@ -38,16 +39,22 @@ fn effective_item_height(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ListOptions<'a> {
+    pub separator: &'a str,
+    pub snippet_line_count: usize,
+    pub extra_row_count: usize,
+    pub preview_open: bool,
+}
+
 pub fn render(
     frame: &mut Frame,
     app: &mut App,
     area: Rect,
     theme: &Theme,
-    separator: &str,
-    snippet_line_count: usize,
-    extra_row_count: usize,
+    options: ListOptions<'_>,
 ) {
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme.border_style(false))
@@ -56,7 +63,20 @@ pub fn render(
             Style::default().fg(theme.accent),
         )));
 
-    let compact = effective_item_height(area, snippet_line_count, separator, extra_row_count) == 1;
+    if !options.preview_open {
+        if let Some(session_id) = app.selected_session_id() {
+            if let Some(title) = bottom_border_session_id(session_id, area.width, theme) {
+                block = block.title_bottom(title);
+            }
+        }
+    }
+
+    let compact = effective_item_height(
+        area,
+        options.snippet_line_count,
+        options.separator,
+        options.extra_row_count,
+    ) == 1;
     let items = if app.results.is_empty() {
         let empty_state = if app.is_searching() {
             "Searching..."
@@ -68,7 +88,12 @@ pub fn render(
             Style::default().fg(theme.muted),
         )))]
     } else {
-        let visible_slots = visible_slots(area, snippet_line_count, separator, extra_row_count);
+        let visible_slots = visible_slots(
+            area,
+            options.snippet_line_count,
+            options.separator,
+            options.extra_row_count,
+        );
         let (visible_hits, selected_within) = app.list_window(visible_slots);
         let visible_hits = visible_hits.to_vec();
         let content_width = area.width.saturating_sub(3) as usize;
@@ -88,7 +113,7 @@ pub fn render(
                     let item_separator = if i + 1 == visible_hits.len() {
                         ""
                     } else {
-                        separator
+                        options.separator
                     };
                     let snippet = app.list_snippet_line(hit, theme);
                     let decision = app.list_rule_decision(hit);
@@ -98,7 +123,7 @@ pub fn render(
                         width: content_width,
                         selected: selected_within == Some(i),
                         separator: item_separator,
-                        snippet_line_count,
+                        snippet_line_count: options.snippet_line_count,
                     };
                     render_item(hit, snippet, decision.as_deref(), extra_line, &render_ctx)
                 })
@@ -113,7 +138,12 @@ pub fn render(
     let selected = if app.results.is_empty() {
         None
     } else {
-        let visible_slots = visible_slots(area, snippet_line_count, separator, extra_row_count);
+        let visible_slots = visible_slots(
+            area,
+            options.snippet_line_count,
+            options.separator,
+            options.extra_row_count,
+        );
         let (_, selected) = app.list_window(visible_slots);
         selected
     };
@@ -403,20 +433,6 @@ fn render_item_compact(
             theme.list_header_bg
         })),
     )
-}
-
-fn truncate_with_ellipsis(value: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    if UnicodeWidthStr::width(value) <= width {
-        return truncate_plain(value, width);
-    }
-    if width == 1 {
-        return "…".to_owned();
-    }
-    let truncated = truncate_plain(value, width.saturating_sub(1));
-    format!("{truncated}…")
 }
 
 fn wrap_line(line: Line<'static>, width: usize, max_lines: usize) -> Vec<Line<'static>> {

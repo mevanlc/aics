@@ -328,6 +328,42 @@ pub fn truncate_plain(value: &str, width: usize) -> String {
     truncated.to_owned()
 }
 
+pub fn truncate_with_ellipsis(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if Span::raw(value).width() <= width {
+        return truncate_plain(value, width);
+    }
+    if width == 1 {
+        return "…".to_owned();
+    }
+    let mut budget = width.saturating_sub(1);
+    let mut truncated = truncate_plain(value, budget);
+    while Span::raw(&truncated).width() + Span::raw("…").width() > width && !truncated.is_empty()
+    {
+        budget = budget.saturating_sub(1);
+        truncated = truncate_plain(value, budget);
+    }
+    format!("{truncated}…")
+}
+
+pub fn bottom_border_session_id<'a>(
+    session_id: &str,
+    width: u16,
+    theme: &Theme,
+) -> Option<Line<'a>> {
+    let slot_width = width.saturating_sub(2) as usize;
+    if slot_width == 0 || session_id.trim().is_empty() {
+        return None;
+    }
+    let display_id = truncate_with_ellipsis(session_id.trim(), slot_width);
+    if display_id.is_empty() {
+        return None;
+    }
+    Some(Line::from(Span::styled(display_id, Style::default().fg(theme.muted))).centered())
+}
+
 pub fn wrapped_text_height(text: &Text<'_>, width: u16) -> usize {
     use ratatui::widgets::{Paragraph, Wrap};
     Paragraph::new(text.clone())
@@ -526,13 +562,15 @@ mod tests {
     use ratatui::text::Text;
 
     use super::{
-        abbreviate_home_path_with, block_title, highlight_spans, highlight_styled_spans,
-        list_title, parse_highlighted_html, right_block_title, session_display_title,
-        sticky_header_for_scroll, sticky_rows_from_line_markers, truncate_plain,
-        wrapped_text_height, FullLineBackgroundParagraph, StickyHeader, StickyLineMarker,
+        abbreviate_home_path_with, block_title, bottom_border_session_id, highlight_spans,
+        highlight_styled_spans, list_title, parse_highlighted_html, right_block_title,
+        session_display_title, sticky_header_for_scroll, sticky_rows_from_line_markers,
+        truncate_plain, truncate_with_ellipsis, wrapped_text_height, FullLineBackgroundParagraph,
+        StickyHeader, StickyLineMarker,
     };
     use crate::index::{SearchHit, StoredSession};
     use crate::parse::{Agent, DerivationType};
+    use crate::tui::theme::Theme;
 
     #[test]
     fn highlight_parser_handles_literal_angle_brackets() {
@@ -846,5 +884,75 @@ mod tests {
             .collect::<String>();
 
         assert_eq!(top_border, "┌──────^L help─┐");
+    }
+
+    #[test]
+    fn bottom_border_session_id_centers_and_truncates() {
+        let theme = Theme::default();
+        let session_id = "01a0de86-f044-7590-8583-142af6a3e0b2";
+
+        // Full display without truncation when width allows (slot = 66)
+        let backend = TestBackend::new(68, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let mut block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(ratatui::widgets::BorderType::Rounded);
+                if let Some(title) =
+                    bottom_border_session_id(session_id, frame.area().width, &theme)
+                {
+                    block = block.title_bottom(title);
+                }
+                frame.render_widget(block, frame.area());
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let bottom_border = (0..buffer.area.width)
+            .map(|x| buffer[(x, 2)].symbol())
+            .collect::<String>();
+        assert_eq!(
+            bottom_border,
+            "╰───────────────01a0de86-f044-7590-8583-142af6a3e0b2───────────────╯"
+        );
+
+        // Truncated with ellipsis when slot width is smaller than ID (slot = 18)
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let mut block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(ratatui::widgets::BorderType::Rounded);
+                if let Some(title) =
+                    bottom_border_session_id(session_id, frame.area().width, &theme)
+                {
+                    block = block.title_bottom(title);
+                }
+                frame.render_widget(block, frame.area());
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let bottom_border = (0..buffer.area.width)
+            .map(|x| buffer[(x, 2)].symbol())
+            .collect::<String>();
+        assert_eq!(bottom_border, "╰01a0de86-f044-759…╯");
+
+        // Returns None when width is too small or session_id is empty
+        assert!(bottom_border_session_id(session_id, 2, &theme).is_none());
+        assert!(bottom_border_session_id(session_id, 1, &theme).is_none());
+        assert!(bottom_border_session_id("", 68, &theme).is_none());
+        assert!(bottom_border_session_id("   ", 68, &theme).is_none());
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_various_widths() {
+        assert_eq!(truncate_with_ellipsis("hello world", 0), "");
+        assert_eq!(truncate_with_ellipsis("hello world", 1), "…");
+        assert_eq!(truncate_with_ellipsis("hello world", 5), "hell…");
+        assert_eq!(truncate_with_ellipsis("hello world", 11), "hello world");
+        assert_eq!(truncate_with_ellipsis("hello world", 15), "hello world");
     }
 }

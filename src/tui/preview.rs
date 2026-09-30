@@ -22,9 +22,9 @@ use crate::tui::markdown::{render_markdown_message, render_markdown_message_with
 use crate::tui::profile;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
-    block_title, right_block_title, session_message_label, wrapped_text_height,
-    FullLineBackgroundParagraph, StickyHeader, StickyHeaderWidget, StickyLineMarker,
-    STICKY_HEADER_HEIGHT,
+    block_title, bottom_border_session_id, right_block_title, session_message_label,
+    wrapped_text_height, FullLineBackgroundParagraph, StickyHeader, StickyHeaderWidget,
+    StickyLineMarker, STICKY_HEADER_HEIGHT,
 };
 
 #[derive(Debug, Clone)]
@@ -106,7 +106,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         let width = area.width.saturating_sub(2);
         crate::tui::viewer::highlight_active_match(&mut text, row, width, theme);
     }
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme.border_style(false))
@@ -120,6 +120,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ))));
+
+    if let Some(session_id) = app.selected_session_id() {
+        if let Some(title) = bottom_border_session_id(session_id, area.width, theme) {
+            block = block.title_bottom(title);
+        }
+    }
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
