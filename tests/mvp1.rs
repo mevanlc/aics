@@ -9,6 +9,21 @@ use anyhow::Result;
 use tempfile::TempDir;
 
 #[test]
+fn parses_claude_latest_custom_title_in_preference_to_slug() -> Result<()> {
+    let temp = TempDir::new()?;
+    let path = copy_fixture(
+        &temp,
+        "tests/fixtures/sessions/claude/named_session.jsonl",
+        ".claude/projects/named-project/named-session.jsonl",
+    )?;
+    let session = parse_claude_session_file(&path)?.expect("expected Claude session");
+    assert_eq!(session.custom_title.as_deref(), Some("Renamed session"));
+    assert_eq!(session.messages.len(), 2);
+    assert!(!session.content.contains("Original name"));
+    Ok(())
+}
+
+#[test]
 fn parses_claude_basic_session() -> Result<()> {
     let temp = TempDir::new()?;
     let path = copy_fixture(

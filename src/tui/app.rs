@@ -777,6 +777,16 @@ impl App {
             .filter(|id| !id.is_empty())
     }
 
+    pub fn selected_session_name(&self) -> Option<&str> {
+        self.results
+            .get(self.selected)?
+            .session
+            .custom_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    }
+
     pub fn selected_preview(&mut self) -> Option<&Session> {
         let hit = self.results.get(self.selected)?;
         let path = hit.session.file_path.clone();
@@ -4664,7 +4674,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
-    use ratatui::text::{Line, Text};
+    use ratatui::text::{Line, Span, Text};
     use ratatui::Terminal;
     use tempfile::TempDir;
     use tui_input::Input;
@@ -5023,6 +5033,61 @@ mod tests {
             })
             .collect::<String>();
         assert!(!list_bottom_empty.contains(expected_id));
+    }
+
+    #[test]
+    fn top_border_displays_selected_session_name_in_preview_or_list() {
+        let area = Rect::new(0, 0, 120, 24);
+        let expected_name = "Named session";
+        for agent in [Agent::Codex, Agent::Claude, Agent::Antigravity] {
+            let mut app = test_app();
+            let mut named_hit = sample_hit(agent);
+            named_hit.session.custom_title = Some(format!("  {expected_name}  "));
+            app.results = vec![named_hit, sample_hit(agent)];
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+
+            for preview_open in [true, false] {
+                app.preview_visible = preview_open;
+                app.selected = 0;
+                terminal.draw(|frame| app.draw(frame)).unwrap();
+                let areas = layout::split(area, app.preview_width_pct, app.preview_visible);
+                let target = areas.preview.unwrap_or(areas.list);
+                let border_text = |buffer: &ratatui::buffer::Buffer, panel: Rect| {
+                    (panel.x..panel.right())
+                        .map(|x| buffer[(x, panel.y)].symbol())
+                        .collect::<String>()
+                };
+                let rendered = terminal.backend().buffer();
+                let top = border_text(rendered, target);
+                assert!(top.contains(expected_name), "{agent}: {top}");
+                let name_start = (target.width as usize - Span::raw(expected_name).width()) / 2;
+                assert_eq!(
+                    rendered[(target.x + name_start as u16, target.y)].symbol(),
+                    "N"
+                );
+                if preview_open {
+                    assert!(top.contains("Preview (^V)"), "{top}");
+                    assert!(top.contains("PgUp/PgDn"), "{top}");
+                    assert!(!border_text(rendered, areas.list).contains(expected_name));
+                } else {
+                    assert!(top.contains("Sessions"), "{top}");
+                }
+
+                // Selection changes and unnamed sessions must clear the old title.
+                app.selected = 1;
+                terminal.draw(|frame| app.draw(frame)).unwrap();
+                assert!(!border_text(terminal.backend().buffer(), target).contains(expected_name));
+                app.results[1].session.custom_title = Some(" \n\t ".to_owned());
+                assert!(app.selected_session_name().is_none());
+                app.results.clear();
+                terminal.draw(|frame| app.draw(frame)).unwrap();
+                assert!(!border_text(terminal.backend().buffer(), target).contains(expected_name));
+
+                let mut named_hit = sample_hit(agent);
+                named_hit.session.custom_title = Some(expected_name.to_owned());
+                app.results = vec![named_hit, sample_hit(agent)];
+            }
+        }
     }
 
     #[test]

@@ -31,6 +31,14 @@ In the tables below, `^` means Ctrl.
 | Double click | Open a session directly in the full viewer |
 | Mouse wheel | Scroll the session list or preview under the pointer |
 
+The selected session's name appears centered in the preview's top border when
+available, with its session ID centered in the bottom border. Hiding the preview
+with `^V` moves both to the session-list borders. Long names and IDs are truncated
+with an ellipsis to fit; names leave room for the panel controls. Names come from
+Codex's session-name index, Claude Code's custom title (falling back to its slug),
+or Antigravity's conversation title. Codex name changes are picked up during the
+next index sync even when the transcript has not changed.
+
 In `^F`, **Search content** (`v`) cycles Visible / All / Hidden with Space or a
 repeated mnemonic. Visible is the interactive default and follows the Visibility
 toggles. `all:`, `visible:`, and `hidden:` in the query temporarily override this

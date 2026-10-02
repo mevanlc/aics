@@ -5,9 +5,72 @@ use aics::index::{
     IndexManager, IndexPaths, Scope, SearchFilters, SearchRequest, SortMode, SyncOutcome,
     SyncProgress,
 };
+use aics::parse::Agent;
 use aics::scan::SessionRoots;
 use anyhow::Result;
 use tempfile::TempDir;
+
+#[test]
+fn codex_renames_refresh_only_the_affected_session_without_rollout_changes() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    let request = SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
+        query: String::new(),
+        scope: Scope::Global,
+        limit: 20,
+        sort: SortMode::Relevance,
+        filters: SearchFilters::default(),
+    };
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+    let codex_session = engine
+        .search(&request)?
+        .into_iter()
+        .find(|hit| hit.session.agent == Agent::Codex)
+        .expect("Codex fixture")
+        .session;
+    let rollout_before = fs::read(&codex_session.file_path)?;
+    let names_path = temp.path().join(".codex/session_index.jsonl");
+
+    for name in [Some("Original name"), Some("Renamed session"), None] {
+        if let Some(name) = name {
+            use std::io::Write;
+            let entry = serde_json::json!({
+                "id": codex_session.session_id,
+                "thread_name": name,
+                "updated_at": "2026-10-02T10:00:00Z",
+            });
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&names_path)?;
+            writeln!(file, "{entry}")?;
+        } else {
+            fs::remove_file(&names_path)?;
+        }
+        let stats = manager.sync_with_roots(&roots, false)?;
+        assert_eq!(stats.updated, 1);
+        assert_eq!(stats.skipped, 1);
+        let updated = engine
+            .search(&request)?
+            .into_iter()
+            .find(|hit| hit.session.agent == Agent::Codex)
+            .expect("Codex session remains indexed");
+        assert_eq!(updated.session.custom_title.as_deref(), name);
+        assert_eq!(fs::read(&codex_session.file_path)?, rollout_before);
+    }
+
+    fs::write(
+        &names_path,
+        "{\"id\":\"unrelated\",\"thread_name\":\"Other session\"}\n",
+    )?;
+    let stats = manager.sync_with_roots(&roots, false)?;
+    assert_eq!(stats.updated, 0);
+    assert_eq!(stats.skipped, 2);
+    Ok(())
+}
 
 #[test]
 fn rebuild_reindexes_sessions_even_when_fingerprints_match() -> Result<()> {

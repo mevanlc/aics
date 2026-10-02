@@ -1943,6 +1943,13 @@ fn find_codex_thread_name(path: &Path, session_id: &str) -> Option<String> {
     names.get(session_id).cloned()
 }
 
+pub(crate) fn read_codex_thread_names(sessions_root: &Path) -> Result<HashMap<String, String>> {
+    let Some(home) = sessions_root.parent() else {
+        return Ok(HashMap::new());
+    };
+    load_thread_name_cache(&home.join(SESSION_INDEX_FILE))
+}
+
 fn codex_session_index_path(path: &Path) -> Option<std::path::PathBuf> {
     let sessions_dir = path.ancestors().find(|ancestor| {
         ancestor

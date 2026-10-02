@@ -23,8 +23,8 @@ use crate::tui::profile;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
     block_title, bottom_border_session_id, right_block_title, session_message_label,
-    wrapped_text_height, FullLineBackgroundParagraph, StickyHeader, StickyHeaderWidget,
-    StickyLineMarker, STICKY_HEADER_HEIGHT,
+    top_border_session_name, wrapped_text_height, FullLineBackgroundParagraph, StickyHeader,
+    StickyHeaderWidget, StickyLineMarker, STICKY_HEADER_HEIGHT,
 };
 
 #[derive(Debug, Clone)]
@@ -106,21 +106,35 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         let width = area.width.saturating_sub(2);
         crate::tui::viewer::highlight_active_match(&mut text, row, width, theme);
     }
+    let left_title = block_title(Line::from(vec![
+        Span::styled(app.preview_title(), Style::default().fg(theme.accent)),
+        Span::styled(" (^V)", Style::default().fg(theme.muted)),
+    ]));
+    let right_title = right_block_title(Line::from(Span::styled(
+        "PgUp/PgDn",
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    let name_title = app.selected_session_name().and_then(|name| {
+        top_border_session_name(
+            name,
+            area.width,
+            left_title.width(),
+            right_title.width(),
+            theme,
+        )
+    });
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme.border_style(false))
-        .title(block_title(Line::from(vec![
-            Span::styled(app.preview_title(), Style::default().fg(theme.accent)),
-            Span::styled(" (^V)", Style::default().fg(theme.muted)),
-        ])))
-        .title(right_block_title(Line::from(Span::styled(
-            "PgUp/PgDn",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ))));
+        .title(left_title)
+        .title(right_title);
 
+    if let Some(title) = name_title {
+        block = block.title_top(title);
+    }
     if let Some(session_id) = app.selected_session_id() {
         if let Some(title) = bottom_border_session_id(session_id, area.width, theme) {
             block = block.title_bottom(title);

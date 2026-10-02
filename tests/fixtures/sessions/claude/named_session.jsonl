@@ -1,0 +1,7 @@
+{"type":"user","uuid":"user-1","sessionId":"named-session","cwd":"/tmp/named-project","timestamp":"2026-10-02T10:00:00Z","message":{"role":"user","content":"Help name this session"}}
+{"type":"custom-title","customTitle":"Original name","sessionId":"named-session"}
+{"type":"assistant","uuid":"assistant-1","sessionId":"named-session","slug":"generated-slug","timestamp":"2026-10-02T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"The name is saved."}]}}
+{"type":"custom-title","customTitle":"  Renamed session  ","sessionId":"named-session"}
+{"type":"custom-title","customTitle":123,"sessionId":"named-session"}
+{"type":"custom-title","customTitle":"   ","sessionId":"named-session"}
+{"type":"system","subtype":"turn_duration","slug":"newer-generated-slug","sessionId":"named-session","timestamp":"2026-10-02T10:00:02Z","durationMs":2000}

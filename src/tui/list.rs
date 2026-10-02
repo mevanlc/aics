@@ -10,7 +10,7 @@ use crate::tui::app::App;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
     agent_badge, block_title, bottom_border_session_id, format_line_count, list_title,
-    relative_time, truncate_plain, truncate_with_ellipsis,
+    relative_time, top_border_session_name, truncate_plain, truncate_with_ellipsis,
 };
 
 fn card_height(snippet_line_count: usize, separator: &str, extra_row_count: usize) -> usize {
@@ -54,16 +54,21 @@ pub fn render(
     theme: &Theme,
     options: ListOptions<'_>,
 ) {
+    let left_title = block_title(Span::styled("Sessions", Style::default().fg(theme.accent)));
+    let left_title_width = left_title.width();
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme.border_style(false))
-        .title(block_title(Span::styled(
-            "Sessions",
-            Style::default().fg(theme.accent),
-        )));
+        .title(left_title);
 
     if !options.preview_open {
+        if let Some(title) = app
+            .selected_session_name()
+            .and_then(|name| top_border_session_name(name, area.width, left_title_width, 0, theme))
+        {
+            block = block.title_top(title);
+        }
         if let Some(session_id) = app.selected_session_id() {
             if let Some(title) = bottom_border_session_id(session_id, area.width, theme) {
                 block = block.title_bottom(title);

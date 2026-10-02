@@ -16,6 +16,7 @@ use tantivy::{Index, TantivyDocument, TantivyError, Term};
 use crate::index::reader::SearchEngine;
 use crate::index::schema::IndexSchema;
 use crate::live::LiveSessionTracker;
+use crate::parse::codex::read_codex_thread_names;
 use crate::parse::search_fields::readable_tool_text;
 use crate::parse::{
     is_internal_context_injection, is_project_docs_autodump, is_skill_text_injection,
@@ -353,6 +354,11 @@ impl IndexManager {
             let mut scan_progress = ScanToSyncProgress { progress };
             scan_session_files_with_progress(roots, &mut scan_progress)?
         };
+        // Codex /rename updates its name index without touching the rollout.
+        // Compare each session's name so unrelated rollouts can still be skipped.
+        let codex_thread_names = read_codex_thread_names(&roots.codex_sessions)
+            .inspect_err(|error| warn!("failed to read Codex session names: {error:#}"))
+            .ok();
         let mut next_state = IndexState {
             format_version: INDEX_FORMAT_VERSION,
             files: BTreeMap::new(),
@@ -375,6 +381,15 @@ impl IndexManager {
                 .files
                 .get(&key)
                 .filter(|state| state.fingerprint() == fingerprint)
+                .filter(|state| {
+                    file.agent != Agent::Codex
+                        || file.trashed
+                        || !state.indexed
+                        || codex_thread_names.as_ref().is_none_or(|names| {
+                            state.session_id.as_ref().and_then(|id| names.get(id))
+                                == state.custom_title.as_ref()
+                        })
+                })
             {
                 next_state.files.insert(key, previous.clone());
                 stats.skipped += 1;
@@ -863,7 +878,7 @@ fn working_dir_search_terms(cwd: &str) -> Vec<String> {
 
 /// Bump when indexed/stored fields or searchable-content semantics change so old
 /// state files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 16;
+const INDEX_FORMAT_VERSION: u32 = 17;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {
@@ -885,6 +900,8 @@ struct IndexedFileState {
     #[serde(default)]
     session_id: Option<String>,
     #[serde(default)]
+    custom_title: Option<String>,
+    #[serde(default)]
     lineage: SessionLineage,
     #[serde(default)]
     superseded_by: Option<String>,
@@ -905,6 +922,7 @@ impl IndexedFileState {
             source_signature: file.source_signature,
             indexed,
             session_id: None,
+            custom_title: None,
             lineage: SessionLineage::default(),
             superseded_by: None,
         }
@@ -913,6 +931,7 @@ impl IndexedFileState {
     fn from_session(file: &SessionFile, session: &Session) -> Self {
         let mut state = Self::from_file(file, true);
         state.session_id = Some(session.session_id.clone());
+        state.custom_title.clone_from(&session.custom_title);
         state.lineage = session.lineage.clone();
         state
     }

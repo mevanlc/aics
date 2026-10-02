@@ -364,6 +364,33 @@ pub fn bottom_border_session_id<'a>(
     Some(Line::from(Span::styled(display_id, Style::default().fg(theme.muted))).centered())
 }
 
+pub fn top_border_session_name(
+    session_name: &str,
+    width: u16,
+    left_title_width: usize,
+    right_title_width: usize,
+    theme: &Theme,
+) -> Option<Line<'static>> {
+    // Reserve equal space at both ends to keep the name centered on the panel,
+    // with one border cell separating it from either existing title.
+    let side_width = left_title_width.max(right_title_width).saturating_add(1);
+    let slot_width = usize::from(width)
+        .saturating_sub(2)
+        .saturating_sub(side_width.saturating_mul(2));
+    let name = session_name
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if slot_width == 0 || name.is_empty() {
+        return None;
+    }
+    let display_name = truncate_with_ellipsis(&name, slot_width);
+    if display_name.is_empty() {
+        return None;
+    }
+    Some(Line::from(Span::styled(display_name, Style::default().fg(theme.text))).centered())
+}
+
 pub fn wrapped_text_height(text: &Text<'_>, width: u16) -> usize {
     use ratatui::widgets::{Paragraph, Wrap};
     Paragraph::new(text.clone())
@@ -565,8 +592,8 @@ mod tests {
         abbreviate_home_path_with, block_title, bottom_border_session_id, highlight_spans,
         highlight_styled_spans, list_title, parse_highlighted_html, right_block_title,
         session_display_title, sticky_header_for_scroll, sticky_rows_from_line_markers,
-        truncate_plain, truncate_with_ellipsis, wrapped_text_height, FullLineBackgroundParagraph,
-        StickyHeader, StickyLineMarker,
+        top_border_session_name, truncate_plain, truncate_with_ellipsis, wrapped_text_height,
+        FullLineBackgroundParagraph, StickyHeader, StickyLineMarker,
     };
     use crate::index::{SearchHit, StoredSession};
     use crate::parse::{Agent, DerivationType};
@@ -945,6 +972,64 @@ mod tests {
         assert!(bottom_border_session_id(session_id, 1, &theme).is_none());
         assert!(bottom_border_session_id("", 68, &theme).is_none());
         assert!(bottom_border_session_id("   ", 68, &theme).is_none());
+    }
+
+    #[test]
+    fn top_border_session_name_centers_without_overlapping_controls() {
+        let theme = Theme::default();
+        let left = block_title("Preview (^V)");
+        let right = right_block_title("PgUp/PgDn");
+
+        for (width, name, expected) in [
+            (68, "Named task", "Named task"),
+            (40, "a long session name", "a long se…"),
+            (40, "名前名前名前名前", "名前名前…"),
+            (68, "  Named\n\ttask  ", "Named task"),
+        ] {
+            let title = top_border_session_name(name, width, left.width(), right.width(), &theme)
+                .expect("room for session name");
+            assert_eq!(title.to_string(), expected);
+            let title_width = title.width() as u16;
+            let mut terminal = Terminal::new(TestBackend::new(width, 3)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .title(left.clone())
+                        .title(right.clone())
+                        .title_top(title.clone());
+                    frame.render_widget(block, frame.area());
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let border = (0..width)
+                .map(|x| buffer[(x, 0)].symbol())
+                .collect::<String>();
+            assert!(border.contains("Preview (^V)"), "{border}");
+            assert!(border.contains("PgUp/PgDn"), "{border}");
+            let start = (width - title_width) / 2;
+            assert_eq!(buffer[(start - 1, 0)].symbol(), "─");
+            assert_eq!(buffer[(start + title_width, 0)].symbol(), "─");
+            let mut x = start;
+            for grapheme in expected.graphemes(true) {
+                assert_eq!(buffer[(x, 0)].symbol(), grapheme);
+                x += Span::raw(grapheme).width() as u16;
+            }
+        }
+
+        for width in 0..=30 {
+            assert!(top_border_session_name(
+                "Named task",
+                width,
+                left.width(),
+                right.width(),
+                &theme
+            )
+            .is_none());
+        }
+        assert!(
+            top_border_session_name(" \n\t ", 68, left.width(), right.width(), &theme).is_none()
+        );
     }
 
     #[test]

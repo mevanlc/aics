@@ -41,6 +41,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
         .components()
         .any(|component| component.as_os_str() == "subagents");
     let mut custom_title = None::<String>;
+    let mut slug = None::<String>;
     let mut model = None::<String>;
     let mut reasoning_effort = None::<String>;
     let mut messages = Vec::new();
@@ -86,8 +87,13 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             continue;
         };
 
-        if let Some(title) = value.get("slug").and_then(Value::as_str) {
-            custom_title = Some(title.to_owned());
+        if let Some(title) = string_field(&value, "slug").and_then(nonempty_trimmed) {
+            slug = Some(title);
+        }
+        if entry_type == "custom-title" {
+            if let Some(title) = string_field(&value, "customTitle").and_then(nonempty_trimmed) {
+                custom_title = Some(title);
+            }
         }
 
         session_id = session_id.or_else(|| string_field(&value, "sessionId"));
@@ -294,7 +300,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
         first_user_msg_content: first_user_message(&messages),
         derivation_type,
         is_sidechain,
-        custom_title,
+        custom_title: custom_title.or(slug),
         content: content_chunks.join("\n\n"),
         search_fields,
         messages,
