@@ -237,7 +237,8 @@ top of an exported file — is not part of the transcript and is never hidden.
 `--preview-rules` opens a review TUI unless combined with `--json`.
 `--preview-rules` and `--apply-rules` conflict. Explicit preview/apply modes do
 not accept `QUERY`, `--live`, or `--superseded` and always evaluate every
-registered rule.
+registered rule. Live or locked sessions are automatically excluded from rules
+processing, and rule actions recheck activity immediately before changing files.
 `--no-apply-rules` conflicts with explicit preview/apply modes and with
 `--rules PATH`.
 
@@ -258,7 +259,8 @@ and caching.
 | `--antigravity-home PATH` | Override the Antigravity CLI home for this run |
 
 `--rebuild-index` and `--delete-index` conflict. Home overrides affect session
-discovery and select a cache profile based on the resulting session-root set.
+discovery and live/lock detection. They select a cache profile based on the
+resulting session-root set.
 Antigravity resume is available only for the default
 `~/.gemini/antigravity-cli` home because `agy` does not expose a data-root
 override.

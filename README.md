@@ -79,6 +79,7 @@ override. JSON/export searches default to All and ignore saved filters.
 JavaScript rules automate repeatable session cleanup. Rules live at
 `~/.config/aics/rules.js` by default; preview their proposed actions with
 `--preview-rules` or apply them with `--apply-rules`.
+Rules automatically exclude live or locked Claude, Codex, and Antigravity sessions.
 
 [Learn more about writing and running JavaScript rules.](docs/rules-js.md)
 

@@ -590,12 +590,31 @@ impl App {
             roots,
         );
         app.worker = None;
+        let excluded = report.processing_skips.len();
+        let uncertain = report
+            .processing_skips
+            .iter()
+            .any(|skip| skip.indeterminate);
+        for skip in report
+            .processing_skips
+            .iter()
+            .filter(|skip| skip.indeterminate)
+        {
+            log::warn!("rules excluded {}: {}", skip.path.display(), skip.reason);
+        }
         let preview_state = RulesPreviewState::from_report(report);
         if !preview_state.errors.is_empty() {
             app.statusline = Some(statusline::Entry::failed(format!(
                 "{} rule errors",
                 preview_state.errors.len()
             )));
+        } else if excluded > 0 {
+            let message = format!("{excluded} live/locked sessions excluded");
+            app.statusline = Some(if uncertain {
+                statusline::Entry::failed(message)
+            } else {
+                statusline::Entry::completed(message)
+            });
         }
         app.result_limit = preview_state.total().max(1);
         app.rules_preview = Some(preview_state);
@@ -6306,6 +6325,68 @@ mod tests {
     }
 
     #[test]
+    fn rules_process_marked_rechecks_activity_after_preview() {
+        for agent in [Agent::Claude, Agent::Codex, Agent::Antigravity] {
+            let temp = TempDir::new().unwrap();
+            let mut app = test_app();
+            app.roots = sample_roots(temp.path());
+            app.roots.trash = Some(crate::trash::TrashPaths::from_data_root(
+                temp.path().join("data"),
+            ));
+            let path = temp.path().join("session.jsonl");
+            std::fs::write(&path, "original transcript bytes").unwrap();
+            let mut matched = sample_rule_match(path.clone());
+            matched.hit.session.agent = agent;
+            matched.proposals[0].agent = agent;
+            app.results = vec![matched.hit.clone()];
+            app.rules_preview = Some(RulesPreviewState {
+                matches: vec![matched],
+                marked_paths: std::collections::HashSet::from([path.clone()]),
+                errors: Vec::new(),
+            });
+
+            // The session becomes active after the proposal was shown and marked.
+            let markers = temp.path().join("markers");
+            std::fs::create_dir_all(&markers).unwrap();
+            let _lock = match agent {
+                Agent::Claude => {
+                    app.roots.live_sessions.claude_sessions_dir = Some(markers.clone());
+                    std::fs::write(
+                        markers.join("owner.json"),
+                        serde_json::json!({"pid": std::process::id(), "sessionId": "session"})
+                            .to_string(),
+                    )
+                    .unwrap();
+                    None
+                }
+                Agent::Codex | Agent::Antigravity => {
+                    if agent == Agent::Codex {
+                        app.roots.live_sessions.codex_writer_locks_dir = Some(markers.clone());
+                        std::fs::write(markers.join(".coordination.lock"), "").unwrap();
+                    } else {
+                        app.roots.live_sessions.antigravity_presence_dir = Some(markers.clone());
+                    }
+                    let file = std::fs::File::create(markers.join("session.lock")).unwrap();
+                    file.lock().unwrap();
+                    Some(file)
+                }
+            };
+            app.process_marked_rules().unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "original transcript bytes"
+            );
+            assert_eq!(app.results.len(), 1);
+            assert_eq!(app.rules_preview.as_ref().unwrap().marked_count(), 1);
+            assert_eq!(
+                app.statusline.as_ref().unwrap().label,
+                "processed 1 marked: 0 applied, 1 skipped"
+            );
+            assert!(!app.roots.trash.as_ref().unwrap().metadata_file.exists());
+        }
+    }
+
+    #[test]
     fn rules_process_summary_counts_hidden_and_offscreen_marked_sessions() {
         let mut app = test_app();
         let matches = vec![
@@ -7216,6 +7297,7 @@ mod tests {
 
     fn sample_roots(base: &std::path::Path) -> SessionRoots {
         SessionRoots {
+            live_sessions: Default::default(),
             claude_projects: base.join(".claude/projects"),
             codex_sessions: base.join(".codex/sessions"),
             antigravity_home: base.join(".gemini/antigravity-cli"),

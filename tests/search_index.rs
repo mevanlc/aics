@@ -223,6 +223,7 @@ fn working_dir_field_and_wd_alias_match_component_prefixes() -> Result<()> {
     write_codex_session(&temp, "escaped-regex-target", "/tmp/c>zzz", "escape target")?;
 
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -346,6 +347,7 @@ fn semantic_text_and_path_fields_are_isolated_and_searchable() -> Result<()> {
     let temp = TempDir::new()?;
     write_semantic_field_codex_session(&temp)?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -419,6 +421,7 @@ fn internal_context_visibility_search_and_version_15_upgrade() -> Result<()> {
         ".codex/sessions/rollout-internal-context.jsonl",
     )?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -519,6 +522,7 @@ fn selected_search_content_and_query_overrides_follow_visibility() -> Result<()>
     let temp = TempDir::new()?;
     write_semantic_field_codex_session(&temp)?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -579,6 +583,7 @@ fn visibility_modifiers_follow_display_toggles_and_explicit_fields_override_them
     let temp = TempDir::new()?;
     write_semantic_field_codex_session(&temp)?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -786,6 +791,7 @@ fn fixture_roots(temp: &TempDir) -> Result<SessionRoots> {
     )?;
 
     Ok(SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),

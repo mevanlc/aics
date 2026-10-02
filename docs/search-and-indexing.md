@@ -17,9 +17,6 @@ run, `--claude-home PATH` and `--codex-home PATH` override those homes. When the
 corresponding CLI home override is not used, `AICS_CLAUDE_PROJECTS_DIR` and
 `AICS_CODEX_SESSIONS_DIR` override the indexed roots directly.
 
-`AICS_CLAUDE_SESSIONS_DIR` separately overrides the Claude session directory
-used for live-session detection.
-
 Set `AICS_ANTIGRAVITY_HOME` or pass `--antigravity-home PATH` to override the
 Antigravity home. Each `brain/<conversation-id>/` directory is one logical
 session. AICS requires its `.system_generated/logs/transcript.jsonl`, uses
@@ -34,6 +31,25 @@ Moving an Antigravity session to AICS Trash preserves its complete
 searchable in AICS with the trash filter, cannot be resumed while trashed, and
 can be restored to their original Antigravity home. Permanent deletion removes
 the same complete local bundle.
+
+## Live sessions
+
+The Live badge and `--live` filter use provider-specific runtime markers:
+
+- Claude: `<claude-home>/sessions/*.json`, with a live owner PID. Confirmed dead
+  owners and registrations older than a reused PID's process are ignored.
+- Codex: held native locks at `<codex-home>/thread-writer-locks/<session-id>.lock`.
+- Antigravity: held native locks at `<antigravity-home>/presence/<conversation-id>.lock`.
+
+Leftover unlocked lock files do not make a session live. Marker locations follow
+the resolved homes, even when `AICS_CLAUDE_PROJECTS_DIR` or
+`AICS_CODEX_SESSIONS_DIR` changes the indexed root. `AICS_CLAUDE_SESSIONS_DIR`
+overrides Claude's marker directory unless `--claude-home` is supplied. All three
+CLI home overrides take precedence over their corresponding environment values.
+
+[Rules processing](rules-js.md#live-and-locked-sessions) excludes live/locked
+sessions and conservatively skips sessions whose markers cannot be verified. A
+provider-wide inspection failure does not give every session a Live badge.
 
 ## Incremental indexing
 

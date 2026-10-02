@@ -104,6 +104,7 @@ fn rules_expose_missing_session_strings_as_empty() -> Result<()> {
         "#,
     )?;
     let session_roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -156,6 +157,7 @@ fn rules_expose_supersession_keeper_id_and_invalidate_cached_outcomes() -> Resul
         ),
     )?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -618,6 +620,7 @@ fn rule_proposals_trash_and_untrash_antigravity_bundles() -> Result<()> {
     fs::write(&database, "database")?;
     let trash_paths = TrashPaths::from_data_root(temp.path().join("data"));
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join("missing-claude"),
         codex_sessions: temp.path().join("missing-codex"),
         antigravity_home,
@@ -724,6 +727,7 @@ fn applying_antigravity_lifecycle_action_rejects_invalid_bundle_path() -> Result
     let transcript = temp.path().join("transcript.jsonl");
     fs::write(&transcript, "bundle stays intact")?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join("claude"),
         codex_sessions: temp.path().join("codex"),
         antigravity_home: temp.path().join("antigravity"),
@@ -782,6 +786,7 @@ fn parallel_rules_keep_lazy_text_isolated_and_results_path_ordered() -> Result<(
         "#,
     )?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -832,6 +837,7 @@ fn rules_progress_reports_processing_count() -> Result<()> {
         "#,
     )?;
     let session_roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: roots.claude_projects,
         codex_sessions: roots.codex_sessions,
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -891,6 +897,7 @@ fn non_empty_nothing_decision_is_available_to_interactive_preview_only() -> Resu
         "#,
     )?;
     let session_roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: roots.claude_projects,
         codex_sessions: roots.codex_sessions,
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),

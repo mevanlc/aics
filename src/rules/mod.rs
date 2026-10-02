@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::index::reader::fallback_snippet;
 use crate::index::{Scope, SearchFilters, SearchHit, StoredSession, TrashFilter};
+use crate::live::{LiveSessionSnapshot, LiveSessionTracker, ProtectionReason};
 use crate::parse::{
     is_contextual_user_message_content, parse_scanned_session_file, Agent, DerivationType,
     MessageRole, PatchFile, Session, SessionCell,
@@ -211,6 +212,30 @@ pub struct RulesReport {
     pub applied: Vec<AppliedRuleAction>,
     pub skipped: Vec<SkippedRuleAction>,
     pub errors: Vec<RuleEvaluationError>,
+    pub processing_skips: Vec<RuleProcessingSkip>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "event", rename = "rules_processing_skip")]
+pub struct RuleProcessingSkip {
+    pub agent: Agent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub path: PathBuf,
+    pub reason: String,
+    pub indeterminate: bool,
+}
+
+impl RuleProcessingSkip {
+    fn new(file: &SessionFile, session_id: Option<&str>, reason: ProtectionReason) -> Self {
+        Self {
+            agent: file.agent,
+            session_id: session_id.map(str::to_owned),
+            path: file.path.clone(),
+            reason: reason.message().to_owned(),
+            indeterminate: reason.is_indeterminate(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -349,6 +374,9 @@ where
     });
     let rules_must_be_validated = cache.as_ref().is_none_or(|cache| !cache.was_reused());
     let files = scan_session_files(roots)?;
+    let tracker = LiveSessionTracker::new(roots.live_sessions.clone());
+    let live_sessions = tracker.snapshot();
+    let mut report = RulesReport::default();
     let total = files.len();
     on_progress(RulesProgress::ProcessingStarted { total });
     let mut completed = 0;
@@ -364,6 +392,13 @@ where
 
     for (file_index, file) in files.iter().enumerate() {
         if !file_matches_filters(file, &options.filters) {
+            mark_completed();
+            continue;
+        }
+        if let Some(reason) = live_sessions.provider_error(file.agent) {
+            report
+                .processing_skips
+                .push(RuleProcessingSkip::new(file, None, reason));
             mark_completed();
             continue;
         }
@@ -394,6 +429,7 @@ where
                 results[file_index] = Some(CompletedRuleFile {
                     determination,
                     cache_fingerprint: None,
+                    processing_skip: None,
                 });
                 mark_completed();
             }
@@ -449,6 +485,7 @@ where
                     &options.scope,
                     &options.filters,
                     cache_enabled,
+                    &live_sessions,
                 )
             },
             |job_index, result| {
@@ -458,20 +495,28 @@ where
         )?;
     }
 
-    let mut report = RulesReport::default();
+    // Activity can change while workers are running, including for exact cache hits.
+    let live_sessions = tracker.snapshot();
     for (file_index, result) in results.into_iter().enumerate() {
         let Some(result) = result else {
             continue;
         };
         let file = &files[file_index];
-        collect_determination(
+        if let Some(skip) = result.processing_skip {
+            report.processing_skips.push(skip);
+            continue;
+        }
+        let cacheable = collect_determination(
             &mut report,
             file,
             &result.determination,
             &options.scope,
             &options.filters,
+            &live_sessions,
         );
-        if let (Some(cache), Some(fingerprint)) = (cache.as_mut(), result.cache_fingerprint) {
+        if let (true, Some(cache), Some(fingerprint)) =
+            (cacheable, cache.as_mut(), result.cache_fingerprint)
+        {
             let superseded_by = options.supersession.get(&file.path).map(String::as_str);
             cache.insert(&file.path, fingerprint, superseded_by, result.determination);
         }
@@ -521,6 +566,7 @@ enum RuleJobKind {
 struct CompletedRuleFile {
     determination: CachedDetermination,
     cache_fingerprint: Option<ContentFingerprint>,
+    processing_skip: Option<RuleProcessingSkip>,
 }
 
 fn cached_determination_needs_evaluation(
@@ -545,6 +591,7 @@ fn rules_worker_count(job_count: usize) -> usize {
         .max(1)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_rule_job(
     engine: &JsRuleEngine,
     file: &SessionFile,
@@ -553,6 +600,7 @@ fn process_rule_job(
     scope: &Scope,
     filters: &SearchFilters,
     cache_enabled: bool,
+    live_sessions: &LiveSessionSnapshot,
 ) -> CompletedRuleFile {
     match &job.kind {
         RuleJobKind::Evaluate { fingerprint } => evaluate_rule_file(
@@ -564,6 +612,7 @@ fn process_rule_job(
             filters,
             cache_enabled,
             *fingerprint,
+            live_sessions,
         ),
         RuleJobKind::Validate {
             determination,
@@ -574,6 +623,7 @@ fn process_rule_job(
                 CompletedRuleFile {
                     determination: determination.clone(),
                     cache_fingerprint: Some(current),
+                    processing_skip: None,
                 }
             }
             Ok(current) => evaluate_rule_file(
@@ -585,6 +635,7 @@ fn process_rule_job(
                 filters,
                 cache_enabled,
                 Some(current),
+                live_sessions,
             ),
             Err(error) => {
                 warn!(
@@ -600,6 +651,7 @@ fn process_rule_job(
                     filters,
                     cache_enabled,
                     None,
+                    live_sessions,
                 )
             }
         },
@@ -616,6 +668,7 @@ fn evaluate_rule_file(
     filters: &SearchFilters,
     cache_enabled: bool,
     mut cache_fingerprint: Option<ContentFingerprint>,
+    live_sessions: &LiveSessionSnapshot,
 ) -> CompletedRuleFile {
     let determination = match parse_scanned_session_file(file) {
         Ok(Some(session)) => {
@@ -627,10 +680,26 @@ fn evaluate_rule_file(
                     session: Box::new(stored),
                 }
             } else {
+                if let Some(reason) =
+                    live_sessions.protection_reason(file.agent, &session.session_id)
+                {
+                    // Transient protection is deliberately never written to the rules cache.
+                    return CompletedRuleFile {
+                        determination: CachedDetermination::Ignored,
+                        cache_fingerprint: None,
+                        processing_skip: Some(RuleProcessingSkip::new(
+                            file,
+                            Some(&session.session_id),
+                            reason,
+                        )),
+                    };
+                }
                 let input = RuleInput::from_session(&session, file, superseded_by);
                 let details = RuleDetails::from_session(&session);
                 match engine.evaluate(&input, details, selection) {
-                    Ok(outcomes) if outcomes.is_empty() => CachedDetermination::NoMatch,
+                    Ok(outcomes) if outcomes.is_empty() => CachedDetermination::NoMatch {
+                        session_id: session.session_id.clone(),
+                    },
                     Ok(outcomes) => CachedDetermination::Evaluated {
                         session: Box::new(stored),
                         outcomes,
@@ -654,6 +723,7 @@ fn evaluate_rule_file(
     CompletedRuleFile {
         determination,
         cache_fingerprint,
+        processing_skip: None,
     }
 }
 
@@ -823,6 +893,9 @@ pub fn print_report(report: &RulesReport, json: bool, mode: RulesMode) -> Result
         for error in &report.errors {
             eprintln!("{}", serde_json::to_string(error)?);
         }
+        for skip in &report.processing_skips {
+            eprintln!("{}", serde_json::to_string(skip)?);
+        }
         return Ok(());
     }
 
@@ -856,10 +929,24 @@ pub fn print_report(report: &RulesReport, json: bool, mode: RulesMode) -> Result
     for error in &report.errors {
         eprintln!("rule error  {}  {}", file_label(&error.path), error.error);
     }
+    for skip in &report.processing_skips {
+        println!(
+            "exclude  {}  {}  {}",
+            skip.agent,
+            file_label(&skip.path),
+            skip.reason
+        );
+    }
 
     println!();
     println!("{} proposed actions", report.proposals.len());
     println!("{} applied", report.applied.len());
+    if !report.processing_skips.is_empty() {
+        println!(
+            "{} live/locked sessions excluded",
+            report.processing_skips.len()
+        );
+    }
     if !report.skipped.is_empty() {
         println!("{} skipped", report.skipped.len());
     }
@@ -1144,10 +1231,35 @@ fn collect_determination(
     determination: &CachedDetermination,
     scope: &Scope,
     filters: &SearchFilters,
-) {
+    live_sessions: &LiveSessionSnapshot,
+) -> bool {
+    if let CachedDetermination::NoMatch { session_id } = determination {
+        if let Some(reason) = live_sessions.protection_reason(file.agent, session_id) {
+            report
+                .processing_skips
+                .push(RuleProcessingSkip::new(file, Some(session_id), reason));
+            return false;
+        }
+    }
+    if let CachedDetermination::Evaluated { session, .. }
+    | CachedDetermination::EvaluationError { session, .. }
+    | CachedDetermination::Unevaluated { session } = determination
+    {
+        if session_matches_scope(scope, session) && session_matches_filters(session, file, filters)
+        {
+            if let Some(reason) = live_sessions.protection_reason(file.agent, &session.session_id) {
+                report.processing_skips.push(RuleProcessingSkip::new(
+                    file,
+                    Some(&session.session_id),
+                    reason,
+                ));
+                return false;
+            }
+        }
+    }
     match determination {
         CachedDetermination::Ignored
-        | CachedDetermination::NoMatch
+        | CachedDetermination::NoMatch { .. }
         | CachedDetermination::Unevaluated { .. } => {}
         CachedDetermination::ParseError { error } => {
             warn!("failed to parse {} for rules: {error}", file.path.display())
@@ -1171,6 +1283,7 @@ fn collect_determination(
             }
         }
     }
+    true
 }
 
 fn dedupe_preview_matches(matches: Vec<RulePreviewMatch>) -> Vec<RulePreviewMatch> {
@@ -1211,7 +1324,22 @@ pub fn apply_rule_proposals(
     };
 
     let store = TrashStore::new(paths);
+    let tracker = LiveSessionTracker::new(roots.live_sessions.clone());
     for proposal in proposals {
+        let _guard = match tracker.acquire_action_guard(proposal.agent, &proposal.session_id) {
+            Ok(guard) => guard,
+            Err(reason) => {
+                skipped.push(SkippedRuleAction {
+                    rule: proposal.rule.clone(),
+                    session_id: proposal.session_id.clone(),
+                    path: proposal.path.clone(),
+                    agent: proposal.agent,
+                    action: proposal.action.clone(),
+                    skip_reason: reason.message().to_owned(),
+                });
+                continue;
+            }
+        };
         match &proposal.action {
             RuleAction::Trash { reason } => {
                 if proposal.path.starts_with(store.paths().trash_dir.as_path()) {

@@ -13,7 +13,7 @@ use super::RawRuleOutcome;
 use crate::index::StoredSession;
 use crate::scan::SessionFile;
 
-const RULES_CACHE_FORMAT_VERSION: u32 = 4;
+const RULES_CACHE_FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct ContentFingerprint {
@@ -61,7 +61,9 @@ impl FileMetadataFingerprint {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(super) enum CachedDetermination {
     Ignored,
-    NoMatch,
+    NoMatch {
+        session_id: String,
+    },
     Unevaluated {
         session: Box<StoredSession>,
     },
@@ -515,7 +517,9 @@ mod tests {
             &session,
             fingerprint_file(&session)?,
             None,
-            CachedDetermination::NoMatch,
+            CachedDetermination::NoMatch {
+                session_id: "session".to_owned(),
+            },
         );
         assert!(matches!(
             cache.lookup(&scanned_session(&session)?, Some("keeper")),
@@ -611,8 +615,13 @@ mod tests {
 
     #[test]
     fn no_match_determination_has_compact_serialization() -> Result<()> {
-        let serialized = serde_json::to_value(CachedDetermination::NoMatch)?;
-        assert_eq!(serialized, serde_json::json!({ "status": "no_match" }));
+        let serialized = serde_json::to_value(CachedDetermination::NoMatch {
+            session_id: "session".to_owned(),
+        })?;
+        assert_eq!(
+            serialized,
+            serde_json::json!({ "status": "no_match", "session_id": "session" })
+        );
         Ok(())
     }
 
@@ -634,6 +643,7 @@ mod tests {
         fs::write(&rules, r#"rule("match", () => trash("evaluated"));"#)?;
         let cache_path = temp.path().join("rules-cache.json");
         let roots = SessionRoots {
+            live_sessions: Default::default(),
             claude_projects: temp.path().join(".claude/projects"),
             codex_sessions: temp.path().join(".codex/sessions"),
             antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -692,6 +702,7 @@ mod tests {
         fs::write(&rules, r#"rule("match", () => trash("evaluated"));"#)?;
         let cache_path = temp.path().join("rules-cache.json");
         let roots = SessionRoots {
+            live_sessions: Default::default(),
             claude_projects: temp.path().join(".claude/projects"),
             codex_sessions: temp.path().join(".codex/sessions"),
             antigravity_home: temp.path().join(".gemini/antigravity-cli"),

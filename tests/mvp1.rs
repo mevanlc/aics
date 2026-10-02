@@ -487,6 +487,7 @@ fn scanner_discovers_both_session_roots_recursively() -> Result<()> {
     )?;
 
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),

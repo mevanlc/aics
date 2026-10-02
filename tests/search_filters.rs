@@ -129,6 +129,7 @@ fn sub_agent_sessions_are_hidden_unless_requested() -> Result<()> {
         ".claude/projects/-Users-testuser-projects-myapp/c0d1e2f3-a4b5-4c6d-8e7f-9a0b1c2d3e4f/subagents/agent-1.jsonl",
     )?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -183,7 +184,7 @@ fn live_only_filter_uses_live_session_markers() -> Result<()> {
     fs::create_dir_all(&live_dir)?;
     fs::write(
         live_dir.join("321.json"),
-        r#"{"pid":321,"sessionId":"c0d1e2f3-a4b5-4c6d-8e7f-9a0b1c2d3e4f","cwd":"/Users/testuser/projects/myapp","startedAt":"2026-03-21T00:00:00Z"}"#,
+        serde_json::json!({"pid": std::process::id(), "sessionId": "c0d1e2f3-a4b5-4c6d-8e7f-9a0b1c2d3e4f"}).to_string(),
     )?;
 
     let cache_root = temp.path().join("cache");
@@ -238,6 +239,7 @@ fn trashed_filter_defaults_to_normal_sessions_and_can_include_trash() -> Result<
         ),
     )?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -341,6 +343,7 @@ fn superseded_filter_tracks_direct_codex_forks_across_incremental_sync() -> Resu
         ),
     )?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -415,6 +418,7 @@ fn superseded_filter_excludes_families_with_reference_backed_codex_history() -> 
         ),
     )?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -485,6 +489,7 @@ fn superseded_filter_collapses_equivalent_codex_fork_siblings() -> Result<()> {
         )?;
     }
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -548,6 +553,7 @@ fn superseded_filter_collapses_empty_aborted_codex_fork_parent() -> Result<()> {
         ),
     )?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -611,6 +617,7 @@ fn superseded_filter_recognizes_trailing_aborted_codex_parent_turn() -> Result<(
         ),
     )?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -679,6 +686,7 @@ fn superseded_filter_recognizes_retried_legacy_codex_aborted_turn() -> Result<()
         ),
     )?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -736,6 +744,7 @@ fn superseded_filter_recognizes_claude_fork_lineage() -> Result<()> {
         ),
     )?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -782,6 +791,7 @@ fn superseded_filter_collapses_equivalent_claude_fork() -> Result<()> {
         ),
     )?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -836,6 +846,7 @@ fn fixture_roots(temp: &TempDir) -> Result<SessionRoots> {
     )?;
 
     Ok(SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),

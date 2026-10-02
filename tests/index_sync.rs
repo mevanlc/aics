@@ -129,6 +129,7 @@ fn long_lived_search_engine_drops_deleted_sessions_after_sync() -> Result<()> {
         ".codex/sessions/2025/12/10/rollout-new.jsonl",
     )?;
     let roots = SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),
@@ -171,6 +172,7 @@ fn fixture_roots(temp: &TempDir) -> Result<SessionRoots> {
     )?;
 
     Ok(SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
         codex_sessions: temp.path().join(".codex/sessions"),
         antigravity_home: temp.path().join(".gemini/antigravity-cli"),

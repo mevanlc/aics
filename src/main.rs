@@ -611,7 +611,24 @@ fn main() -> Result<()> {
                     skipped.skip_reason
                 );
             }
-            let startup_issue_count = report.errors.len() + report.skipped.len();
+            let uncertain_exclusions = report
+                .processing_skips
+                .iter()
+                .filter(|skip| skip.indeterminate)
+                .count();
+            for skip in report
+                .processing_skips
+                .iter()
+                .filter(|skip| skip.indeterminate)
+            {
+                warn!(
+                    "startup rules excluded {}: {}",
+                    skip.path.display(),
+                    skip.reason
+                );
+            }
+            let startup_issue_count =
+                report.errors.len() + report.skipped.len() + uncertain_exclusions;
             if startup_issue_count > 0 {
                 append_startup_warning(
                     &mut settings_warning,
@@ -624,9 +641,9 @@ fn main() -> Result<()> {
         }
     }
 
-    let search_engine = manager.open_search_engine_with_live_sessions(
-        LiveSessionTracker::from_claude_sessions_dir(resolved_paths.claude_sessions.clone()),
-    )?;
+    let search_engine = manager.open_search_engine_with_live_sessions(LiveSessionTracker::new(
+        resolved_paths.roots.live_sessions.clone(),
+    ))?;
 
     if cli.json {
         let display_options = hidden_from(DisplayOptions::SHOW_ALL, &cli.hide);

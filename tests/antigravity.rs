@@ -251,6 +251,7 @@ fn parses_older_result_records_and_skips_malformed_lines() -> Result<()> {
 
 fn roots_for(antigravity_home: PathBuf) -> SessionRoots {
     SessionRoots {
+        live_sessions: Default::default(),
         claude_projects: antigravity_home.join("missing-claude"),
         codex_sessions: antigravity_home.join("missing-codex"),
         antigravity_home,

@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -16,7 +16,7 @@ use tantivy::{
 
 use crate::index::schema::IndexSchema;
 use crate::index::writer::{IndexPaths, StoredSession};
-use crate::live::LiveSessionTracker;
+use crate::live::{LiveSessionSnapshot, LiveSessionTracker};
 use crate::parse::{strip_project_docs_autodump_preamble, Agent, DerivationType};
 use crate::search_query::{
     extract_highlight_terms, extract_visibility_search, has_explicit_boolean_operators,
@@ -279,8 +279,8 @@ impl SearchEngine {
         let session = self.session_from_doc(*address, &document, &mut HashMap::new())?;
         let is_live = self
             .live_sessions
-            .live_session_ids()
-            .contains(&session.session_id);
+            .snapshot()
+            .is_live(session.agent, &session.session_id);
         Ok(matches_request(request, &session, is_live))
     }
 
@@ -303,7 +303,7 @@ impl SearchEngine {
 
         let limit = request.limit.max(1);
         let query_text = query_text.trim();
-        let live_ids = self.live_sessions.live_session_ids();
+        let live_ids = self.live_sessions.snapshot();
         let mut session_cache = HashMap::new();
 
         if query_text.is_empty() {
@@ -381,7 +381,7 @@ impl SearchEngine {
         searcher: &tantivy::Searcher,
         request: &SearchRequest,
         limit: usize,
-        live_ids: &HashSet<String>,
+        live_ids: &LiveSessionSnapshot,
         session_cache: &mut HashMap<DocAddress, StoredSession>,
     ) -> Result<Vec<SearchHit>> {
         let modified_ts_field = self.fields.schema.get_field_name(self.fields.modified_ts);
@@ -411,7 +411,7 @@ impl SearchEngine {
                     continue;
                 }
                 let session = self.load_session(searcher, address, session_cache)?;
-                let is_live = live_ids.contains(&session.session_id);
+                let is_live = live_ids.is_live(session.agent, &session.session_id);
                 if !matches_request(request, &session, is_live) {
                     continue;
                 }
@@ -494,7 +494,7 @@ impl SearchEngine {
         query_text: &str,
         visibility_search: VisibilitySearch,
         display_options: DisplayOptions,
-        live_ids: &HashSet<String>,
+        live_ids: &LiveSessionSnapshot,
         session_cache: &mut HashMap<DocAddress, StoredSession>,
     ) -> Result<Vec<SearchHit>> {
         let (query_parser, default_snippet_fields) =
@@ -527,7 +527,7 @@ impl SearchEngine {
             for (_, address) in docs {
                 let document = searcher.doc::<TantivyDocument>(address)?;
                 let session = self.session_from_doc(address, &document, session_cache)?;
-                let is_live = live_ids.contains(&session.session_id);
+                let is_live = live_ids.is_live(session.agent, &session.session_id);
                 if !matches_request(request, &session, is_live) {
                     continue;
                 }
@@ -643,14 +643,14 @@ impl SearchEngine {
         docs: Vec<(f32, DocAddress)>,
         request: &SearchRequest,
         snippet_generators: &[SnippetGenerator],
-        live_ids: &HashSet<String>,
+        live_ids: &LiveSessionSnapshot,
         session_cache: &mut HashMap<DocAddress, StoredSession>,
         hits: &mut Vec<SearchCandidate>,
     ) -> Result<()> {
         for (score, address) in docs {
             let document = searcher.doc::<TantivyDocument>(address)?;
             let session = self.session_from_doc(address, &document, session_cache)?;
-            let is_live = live_ids.contains(&session.session_id);
+            let is_live = live_ids.is_live(session.agent, &session.session_id);
             if !matches_request(request, &session, is_live) {
                 continue;
             }
@@ -1306,7 +1306,7 @@ mod tests {
     ) -> anyhow::Result<()> {
         use crate::index::{IndexManager, IndexPaths, SearchFilters, SearchRequest, SortMode};
         use crate::scan::SessionRoots;
-        use std::collections::{HashMap, HashSet};
+        use std::collections::HashMap;
 
         let temp = tempfile::tempdir()?;
         let codex = temp.path().join("sessions");
@@ -1348,6 +1348,7 @@ mod tests {
             )?;
         }
         let roots = SessionRoots {
+            live_sessions: Default::default(),
             claude_projects: temp.path().join("claude"),
             codex_sessions: codex,
             antigravity_home: temp.path().join("agy"),
@@ -1378,7 +1379,7 @@ mod tests {
             &engine.reader.searcher(),
             &request,
             request.limit,
-            &HashSet::new(),
+            &crate::live::LiveSessionSnapshot::default(),
             &mut loaded,
         )?;
         assert_eq!(
@@ -1436,6 +1437,7 @@ mod tests {
             )?;
         }
         let roots = SessionRoots {
+            live_sessions: Default::default(),
             claude_projects: temp.path().join("claude"),
             codex_sessions: codex,
             antigravity_home: temp.path().join("agy"),

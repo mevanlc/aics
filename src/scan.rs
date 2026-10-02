@@ -17,6 +17,7 @@ use crate::trash::{AntigravityBundlePaths, TrashPaths, TrashStore};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRoots {
+    pub live_sessions: crate::live::LiveSessionPaths,
     pub claude_projects: PathBuf,
     pub codex_sessions: PathBuf,
     pub antigravity_home: PathBuf,
@@ -116,6 +117,12 @@ impl ResolvedPaths {
             env_override("AICS_CODEX_SESSIONS_DIR").unwrap_or_else(|| codex_home.join("sessions"))
         };
 
+        let claude_sessions = resolve_path(claude_sessions, &current_dir)?;
+        let live_sessions = crate::live::LiveSessionPaths {
+            claude_sessions_dir: Some(claude_sessions.clone()),
+            codex_writer_locks_dir: Some(codex_home.join("thread-writer-locks")),
+            antigravity_presence_dir: Some(antigravity_home.join("presence")),
+        };
         Ok(Self {
             homes: AgentHomes {
                 claude_home,
@@ -123,6 +130,7 @@ impl ResolvedPaths {
                 antigravity_home: antigravity_home.clone(),
             },
             roots: SessionRoots {
+                live_sessions,
                 claude_projects,
                 codex_sessions,
                 antigravity_home,

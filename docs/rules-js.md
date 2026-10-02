@@ -24,6 +24,32 @@ Rules mode honors the usual scope and filter flags, including `-g`, `--dir`,
 `--agent`, `--after`, `--before`, `--min-lines`, and `--sub-agent`, but it does
 not accept a text search query yet.
 
+## Live and locked sessions
+
+Rules exclude live or locked Claude Code, Codex CLI, and Antigravity CLI sessions
+from callbacks and previews, including cached determinations, startup rules, and
+informational `nothing(reason)` results. AICS checks Claude's owner PID
+registrations, Codex's writer locks, and Antigravity's presence locks. Confirmed
+dead Claude owners and unlocked leftover lock files do not block processing.
+
+AICS checks again before each rule action, including processing marked proposals
+in the TUI. It holds existing native locks during Codex and Antigravity actions;
+it never creates, truncates, or deletes provider markers. Claude has no equivalent
+native lock, so its final PID check cannot prevent a session starting immediately
+after the check. If a provider's native marker files do not yet exist, there is
+also no existing lock for AICS to hold against a newly starting owner.
+
+If a marker or owner cannot be verified, AICS conservatively excludes the affected
+session. An unreadable marker directory or an unattributable malformed Claude
+registration excludes that provider's sessions. Human reports show exclusions;
+JSON rules reports emit `rules_processing_skip` diagnostics on stderr, leaving
+proposal/action JSONL on stdout. Ordinary active-session exclusions do not count
+as startup failures; uncertain checks are reported as startup issues.
+
+Activity is checked anew each run and is never cached as a rule determination.
+Once a session becomes inactive, it is eligible again. The same provider markers
+drive the Live badge and `--live` filter; see [session locations](search-and-indexing.md#live-sessions).
+
 ## Defining rules
 
 Register a rule with either `rule(name, callback)` or
