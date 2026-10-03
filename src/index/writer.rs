@@ -3,11 +3,11 @@ use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use directories::BaseDirs;
-use log::{info, warn};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tantivy::directory::error::LockError;
@@ -119,9 +119,28 @@ pub enum SyncOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncProgress {
-    Discovering { discovered: usize },
-    IndexingStarted { total: usize },
-    IndexingProgress { processed: usize, total: usize },
+    OpeningIndex,
+    Discovering {
+        discovered: usize,
+    },
+    /// Reading changed source files; search documents have not been written yet.
+    IndexingStarted {
+        total: usize,
+    },
+    IndexingProgress {
+        processed: usize,
+        total: usize,
+    },
+    ResolvingSupersession,
+    WritingStarted {
+        total: usize,
+    },
+    WritingProgress {
+        processed: usize,
+        total: usize,
+    },
+    Committing,
+    SavingState,
 }
 
 trait SyncProgressObserver {
@@ -326,6 +345,8 @@ impl IndexManager {
         rebuild: bool,
         progress: &mut P,
     ) -> Result<SyncStats> {
+        let started = Instant::now();
+        progress.on_progress(SyncProgress::OpeningIndex);
         fs::create_dir_all(&self.paths.cache_root)
             .with_context(|| format!("failed to create {}", self.paths.cache_root.display()))?;
 
@@ -348,6 +369,12 @@ impl IndexManager {
         } else {
             load_state(&self.paths.state_file)?
         };
+        debug!(
+            "index sync: opened index and state in {:?}",
+            started.elapsed()
+        );
+        let mut phase_started = Instant::now();
+        progress.on_progress(SyncProgress::Discovering { discovered: 0 });
         let scanned_files = {
             let mut scan_progress = ScanToSyncProgress { progress };
             scan_session_files_with_progress(roots, &mut scan_progress)?
@@ -365,7 +392,11 @@ impl IndexManager {
             scanned: scanned_files.len(),
             ..SyncStats::default()
         };
-        let mut writer = index.writer(50_000_000)?;
+        // Splitting 50 MB across all workers produced many tiny segments and
+        // repeated merges on large rebuilds. Give each worker its own budget.
+        let writer_threads = std::thread::available_parallelism()?.get().min(4);
+        let mut writer =
+            index.writer_with_num_threads(writer_threads, writer_threads * 50_000_000)?;
         let mut changed = rebuild;
         let mut pending_files = Vec::new();
         let mut scanned_by_key = HashMap::new();
@@ -397,6 +428,13 @@ impl IndexManager {
             pending_files.push(file.clone());
         }
 
+        debug!(
+            "index sync: discovered {} files ({} changed) in {:?}",
+            scanned_files.len(),
+            pending_files.len(),
+            phase_started.elapsed()
+        );
+        phase_started = Instant::now();
         progress.on_progress(SyncProgress::IndexingStarted {
             total: pending_files.len(),
         });
@@ -439,34 +477,61 @@ impl IndexManager {
             });
         }
 
+        debug!("index sync: read sessions in {:?}", phase_started.elapsed());
+        phase_started = Instant::now();
+        progress.on_progress(SyncProgress::ResolvingSupersession);
         apply_supersession(&mut next_state);
-
-        for file in &pending_files {
-            let key = normalize_path_key(&file.path);
-            writer.delete_term(Term::from_field_text(fields.file_path, &key));
-            changed = true;
-            if let Some(session) = parsed_sessions.get(&key) {
-                let superseded_by = next_state
-                    .files
-                    .get(&key)
-                    .and_then(|state| state.superseded_by.clone());
-                add_session_document(&mut writer, &fields, session, file, superseded_by)?;
-            }
-        }
-
         let relation_changed = next_state
             .files
             .iter()
             .filter_map(|(key, state)| {
+                // Pending sessions are written with their final relationships
+                // below. Only unchanged source files need a separate refresh.
+                if parsed_sessions.contains_key(key) {
+                    return None;
+                }
                 let previous = previous_state.files.get(key)?;
                 (state.indexed && state.superseded_by != previous.superseded_by)
                     .then(|| key.clone())
             })
             .collect::<Vec<_>>();
-        for key in relation_changed {
-            if parsed_sessions.contains_key(&key) {
-                continue;
+        let deleted_paths = previous_state
+            .files
+            .keys()
+            .filter(|key| !next_state.files.contains_key(*key))
+            .collect::<Vec<_>>();
+        debug!(
+            "index sync: resolved session relationships in {:?}",
+            phase_started.elapsed()
+        );
+
+        phase_started = Instant::now();
+        let writing_total = pending_files.len() + relation_changed.len() + deleted_paths.len();
+        let mut written = 0;
+        progress.on_progress(SyncProgress::WritingStarted {
+            total: writing_total,
+        });
+        for file in &pending_files {
+            let key = normalize_path_key(&file.path);
+            writer.delete_term(Term::from_field_text(fields.file_path, &key));
+            changed = true;
+            // Release each parsed transcript as soon as its document is queued,
+            // rather than keeping the whole source corpus alive during commit.
+            if let Some(session) = parsed_sessions.remove(&key) {
+                let superseded_by = next_state
+                    .files
+                    .get(&key)
+                    .and_then(|state| state.superseded_by.clone());
+                add_session_document(&mut writer, &fields, &session, file, superseded_by)?;
             }
+            written += 1;
+            progress.on_progress(SyncProgress::WritingProgress {
+                processed: written,
+                total: writing_total,
+            });
+        }
+
+        for key in relation_changed {
             let Some(file) = scanned_by_key.get(&key) else {
                 continue;
             };
@@ -507,25 +572,50 @@ impl IndexManager {
                     }
                 }
             }
+            written += 1;
+            progress.on_progress(SyncProgress::WritingProgress {
+                processed: written,
+                total: writing_total,
+            });
         }
 
-        for deleted_path in previous_state.files.keys() {
-            if next_state.files.contains_key(deleted_path) {
-                continue;
-            }
+        for deleted_path in deleted_paths {
             writer.delete_term(Term::from_field_text(fields.file_path, deleted_path));
             stats.removed += 1;
             changed = true;
+            written += 1;
+            progress.on_progress(SyncProgress::WritingProgress {
+                processed: written,
+                total: writing_total,
+            });
         }
+        debug!(
+            "index sync: built search documents in {:?}",
+            phase_started.elapsed()
+        );
 
+        phase_started = Instant::now();
         if changed {
+            progress.on_progress(SyncProgress::Committing);
             writer.commit().context("failed to commit tantivy index")?;
         }
+        drop(writer);
+        debug!(
+            "index sync: committed index in {:?}",
+            phase_started.elapsed()
+        );
 
+        phase_started = Instant::now();
+        progress.on_progress(SyncProgress::SavingState);
         save_state(&self.paths.state_file, &next_state)?;
+        debug!("index sync: saved state in {:?}", phase_started.elapsed());
         info!(
-            "indexed sessions: scanned={}, updated={}, skipped={}, removed={}",
-            stats.scanned, stats.updated, stats.skipped, stats.removed
+            "indexed sessions: scanned={}, updated={}, skipped={}, removed={}, elapsed={:?}",
+            stats.scanned,
+            stats.updated,
+            stats.skipped,
+            stats.removed,
+            started.elapsed()
         );
         Ok(stats)
     }

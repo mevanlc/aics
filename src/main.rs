@@ -810,19 +810,45 @@ impl StartupProgress {
 
     fn update(&mut self, event: SyncProgress) {
         match event {
+            SyncProgress::OpeningIndex => self.start_spinner("Opening index"),
             SyncProgress::Discovering { discovered } => {
+                if discovered == 0 {
+                    self.bar.reset();
+                    self.bar.unset_length();
+                    self.bar.set_style(discovering_style());
+                }
                 self.bar.set_message(format!("{discovered} found"));
             }
             SyncProgress::IndexingStarted { total } => {
-                self.bar.set_style(indexing_style());
-                self.bar.set_message(String::new());
-                self.bar.set_length(total as u64);
-                self.bar.set_position(0);
+                self.start_bar("Reading sessions", total);
             }
             SyncProgress::IndexingProgress { processed, .. } => {
                 self.bar.set_position(processed as u64);
             }
+            SyncProgress::ResolvingSupersession => {
+                self.start_spinner("Resolving session relationships");
+            }
+            SyncProgress::WritingStarted { total } => self.start_bar("Building index", total),
+            SyncProgress::WritingProgress { processed, .. } => {
+                self.bar.set_position(processed as u64);
+            }
+            SyncProgress::Committing => self.start_spinner("Committing index"),
+            SyncProgress::SavingState => self.start_spinner("Saving index state"),
         }
+    }
+
+    fn start_bar(&self, label: &'static str, total: usize) {
+        self.bar.reset();
+        self.bar.set_style(indexing_style());
+        self.bar.set_message(label);
+        self.bar.set_length(total as u64);
+    }
+
+    fn start_spinner(&self, label: &'static str) {
+        self.bar.reset();
+        self.bar.unset_length();
+        self.bar.set_style(finalizing_style());
+        self.bar.set_message(label);
     }
 
     fn finish(self) {
@@ -836,9 +862,14 @@ fn discovering_style() -> ProgressStyle {
 }
 
 fn indexing_style() -> ProgressStyle {
-    ProgressStyle::with_template("Indexing {wide_bar:.green/blue} {pos}/{len} ({eta})")
+    ProgressStyle::with_template("{msg} {wide_bar:.green/blue} {pos}/{len} ({eta})")
         .expect("valid progress template")
         .progress_chars("█▉▊▋▌▍▎▏ ")
+}
+
+fn finalizing_style() -> ProgressStyle {
+    ProgressStyle::with_template("{spinner:.green} {msg} [{elapsed}]")
+        .expect("valid progress template")
 }
 
 struct RulesProcessingProgress {

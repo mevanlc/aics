@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use aics::index::{
     IndexManager, IndexPaths, Scope, SearchEngine, SearchFilters, SearchRequest, SortMode,
-    SupersededFilter, TrashFilter,
+    SupersededFilter, SyncProgress, TrashFilter,
 };
 use aics::live::LiveSessionTracker;
 use aics::parse::{Agent, DerivationType};
@@ -333,15 +333,6 @@ fn superseded_filter_tracks_direct_codex_forks_across_incremental_sync() -> Resu
             "{\"timestamp\":\"2026-08-01T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
         ),
     )?;
-    fs::write(
-        &child,
-        concat!(
-            "{\"timestamp\":\"2026-08-01T10:01:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"forked_from_id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
-            "{\"timestamp\":\"2026-08-01T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
-            "{\"timestamp\":\"2026-08-01T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
-            "{\"timestamp\":\"2026-08-01T10:01:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-2\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"continue here\"}]}}\n",
-        ),
-    )?;
     let roots = SessionRoots {
         live_sessions: Default::default(),
         claude_projects: temp.path().join(".claude/projects"),
@@ -351,6 +342,25 @@ fn superseded_filter_tracks_direct_codex_forks_across_incremental_sync() -> Resu
     };
     let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
     manager.sync_with_roots(&roots, true)?;
+
+    fs::write(
+        &child,
+        concat!(
+            "{\"timestamp\":\"2026-08-01T10:01:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"forked_from_id\":\"parent\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"assistant-1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+            "{\"timestamp\":\"2026-08-01T10:01:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"user-2\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"continue here\"}]}}\n",
+        ),
+    )?;
+    let mut events = Vec::new();
+    manager.sync_with_roots_and_progress(&roots, false, |event| events.push(event))?;
+    assert!(events.contains(&SyncProgress::IndexingStarted { total: 1 }));
+    // A new fork also requires rewriting its unchanged parent's relationship.
+    assert!(events.contains(&SyncProgress::WritingStarted { total: 2 }));
+    assert!(events.contains(&SyncProgress::WritingProgress {
+        processed: 2,
+        total: 2
+    }));
 
     let search = |superseded| -> Result<Vec<_>> {
         manager.open_search_engine()?.search(&SearchRequest {

@@ -127,7 +127,7 @@ fn sync_best_effort_reports_busy_when_writer_lock_is_held() -> Result<()> {
 }
 
 #[test]
-fn sync_progress_reports_discovery_then_reindex_count() -> Result<()> {
+fn sync_progress_covers_reading_writing_and_finalization() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
     let cache_root = temp.path().join("cache");
@@ -135,19 +135,40 @@ fn sync_progress_reports_discovery_then_reindex_count() -> Result<()> {
 
     let mut first_events = Vec::new();
     manager.sync_with_roots_and_progress(&roots, true, |event| first_events.push(event))?;
+    assert_eq!(first_events.first(), Some(&SyncProgress::OpeningIndex));
     assert!(first_events.iter().any(
         |event| matches!(event, SyncProgress::Discovering { discovered } if *discovered >= 1)
     ));
     assert!(first_events
         .iter()
         .any(|event| matches!(event, SyncProgress::IndexingStarted { total } if *total == 2)));
-    assert!(matches!(
-        first_events.last(),
-        Some(SyncProgress::IndexingProgress {
-            processed: 2,
-            total: 2
+    let reading_complete = first_events
+        .iter()
+        .position(|event| {
+            *event
+                == SyncProgress::IndexingProgress {
+                    processed: 2,
+                    total: 2,
+                }
         })
-    ));
+        .expect("all changed sources are read");
+    assert_eq!(
+        &first_events[reading_complete + 1..],
+        &[
+            SyncProgress::ResolvingSupersession,
+            SyncProgress::WritingStarted { total: 2 },
+            SyncProgress::WritingProgress {
+                processed: 1,
+                total: 2
+            },
+            SyncProgress::WritingProgress {
+                processed: 2,
+                total: 2
+            },
+            SyncProgress::Committing,
+            SyncProgress::SavingState,
+        ]
+    );
 
     let mut second_events = Vec::new();
     manager.sync_with_roots_and_progress(&roots, false, |event| second_events.push(event))?;
@@ -157,6 +178,30 @@ fn sync_progress_reports_discovery_then_reindex_count() -> Result<()> {
     assert!(!second_events
         .iter()
         .any(|event| matches!(event, SyncProgress::IndexingProgress { .. })));
+    assert!(second_events.contains(&SyncProgress::WritingStarted { total: 0 }));
+    assert!(!second_events.contains(&SyncProgress::Committing));
+    assert_eq!(second_events.last(), Some(&SyncProgress::SavingState));
+    Ok(())
+}
+
+#[test]
+fn sync_progress_counts_removed_sessions_as_index_writes() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    fs::remove_dir_all(&roots.codex_sessions)?;
+
+    let mut events = Vec::new();
+    let stats = manager.sync_with_roots_and_progress(&roots, false, |event| events.push(event))?;
+    assert_eq!(stats.removed, 1);
+    assert!(events.contains(&SyncProgress::IndexingStarted { total: 0 }));
+    assert!(events.contains(&SyncProgress::WritingStarted { total: 1 }));
+    assert!(events.contains(&SyncProgress::WritingProgress {
+        processed: 1,
+        total: 1
+    }));
+    assert!(events.contains(&SyncProgress::Committing));
     Ok(())
 }
 
