@@ -88,6 +88,8 @@ pub struct Settings {
     pub default_filter: Option<DefaultFilter>,
     #[serde(default)]
     pub viewer_filter_exclusion: ViewerFilterExclusion,
+    #[serde(default = "default_viewer_find_jump")]
+    pub viewer_find_jump: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +136,7 @@ pub enum DefaultFilterScope {
 
 #[derive(Debug, Clone, Default)]
 pub struct SettingsPatch {
+    viewer_find_jump: Option<bool>,
     theme: Option<ThemeName>,
     claude_command: Option<String>,
     claude_args: Option<String>,
@@ -163,6 +166,7 @@ impl SettingsPatch {
 
     pub fn settings_modal(settings: &Settings) -> Self {
         Self {
+            viewer_find_jump: Some(settings.viewer_find_jump),
             theme: Some(settings.theme),
             claude_command: Some(settings.claude_command.clone()),
             claude_args: Some(settings.claude_args.clone()),
@@ -210,6 +214,9 @@ impl SettingsPatch {
     }
 
     pub fn apply_to(&self, settings: &mut Settings) {
+        if let Some(value) = self.viewer_find_jump {
+            settings.viewer_find_jump = value;
+        }
         if let Some(choice) = self.viewer_filter_exclusion {
             settings.viewer_filter_exclusion = choice;
         }
@@ -347,6 +354,10 @@ fn default_hide_internal_context() -> bool {
     true
 }
 
+fn default_viewer_find_jump() -> bool {
+    true
+}
+
 fn default_summarize_prompt() -> String {
     DEFAULT_PROMPT.to_owned()
 }
@@ -372,6 +383,7 @@ impl Default for Settings {
             display_options: DisplayOptions::default(),
             default_filter: None,
             viewer_filter_exclusion: ViewerFilterExclusion::Ask,
+            viewer_find_jump: default_viewer_find_jump(),
         }
     }
 }
@@ -609,6 +621,7 @@ const SETTINGS_FIELD_NAMES: &[&str] = &[
     "display_options",
     "default_filter",
     "viewer_filter_exclusion",
+    "viewer_find_jump",
 ];
 
 fn settings_path() -> Result<PathBuf> {
@@ -683,6 +696,24 @@ mod tests {
         let loaded = Settings::load_from_path(&path).unwrap();
         assert_eq!(loaded.history_save_count, 7);
         assert_eq!(loaded.history_save_dwell_ms, 2345);
+    }
+
+    #[test]
+    fn viewer_find_jump_defaults_and_settings_patch_round_trip() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        fs::write(&path, r#"{"snippet_line_count":7,"custom_key":"keep"}"#).unwrap();
+        let mut draft = Settings::load_from_path(&path).unwrap();
+        assert!(draft.viewer_find_jump);
+        draft.viewer_find_jump = false;
+        Settings::save_patch_to_path(&path, &SettingsPatch::settings_modal(&draft)).unwrap();
+        assert!(!Settings::load_from_path(&path).unwrap().viewer_find_jump);
+        Settings::save_patch_to_path(&path, &SettingsPatch::layout(true, 40)).unwrap();
+        let loaded = Settings::load_from_path(&path).unwrap();
+        assert!(!loaded.viewer_find_jump);
+        assert_eq!(loaded.snippet_line_count, 7);
+        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["custom_key"], "keep");
     }
 
     #[test]

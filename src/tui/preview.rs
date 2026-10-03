@@ -8,15 +8,16 @@ use ratatui::widgets::{Block, BorderType, Borders};
 use ratatui::Frame;
 
 use crate::parse::{
-    is_internal_context_injection, is_project_docs_autodump, is_skill_text_injection, Agent,
-    ExecStatus, MessageRole, PatchFile, PatchOp, PlanItemStatus, RuntimeMetrics, Session,
+    Agent, ExecStatus, MessageRole, PatchFile, PatchOp, PlanItemStatus, RuntimeMetrics, Session,
     SessionCell, SessionInfo, ToolStatus,
 };
+use crate::search_match::{DocumentMap, RenderOrigin, SourceBlock, SourceId, SourceRange};
 use crate::settings::DisplayOptions;
 use crate::summary::{
     AicsSummaryPreview, ClaudeAutosummaryPreview, CodexAutosummaryPreview, SummaryPreview,
     SummarySources,
 };
+use crate::tui::ansi::{sanitize_with_origins, TextOrigin};
 use crate::tui::app::App;
 use crate::tui::markdown::{render_markdown_message, render_markdown_message_with_headings};
 use crate::tui::profile;
@@ -32,6 +33,7 @@ pub struct DisplayDocument {
     pub text: Text<'static>,
     pub sticky_markers: Vec<StickyLineMarker>,
     pub(crate) blocks: Vec<DisplayBlock>,
+    pub(crate) map: DocumentMap,
 }
 
 #[derive(Debug, Clone)]
@@ -82,14 +84,9 @@ impl Default for SessionRenderOptions {
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let _profile = profile::scope("preview.render");
-    let (mut text, max_scroll, active_match_row, sticky_header) =
+    let (text, max_scroll, sticky_header) =
         if let Some(state) = app.preview_render_state(area, theme) {
-            (
-                state.text.clone(),
-                state.max_scroll,
-                state.active_match_row,
-                state.sticky_header.clone(),
-            )
+            (state.text, state.max_scroll, state.sticky_header.clone())
         } else {
             (
                 Text::from(Line::from(Span::styled(
@@ -98,14 +95,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
                 ))),
                 0,
                 None,
-                None,
             )
         };
     app.preview_scroll = app.preview_scroll.min(max_scroll);
-    if let Some(row) = active_match_row {
-        let width = area.width.saturating_sub(2);
-        crate::tui::viewer::highlight_active_match(&mut text, row, width, theme);
-    }
     let left_title = block_title(Line::from(vec![
         Span::styled(app.preview_title(), Style::default().fg(theme.accent)),
         Span::styled(" (^V)", Style::default().fg(theme.muted)),
@@ -149,7 +141,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         header_area,
     );
     frame.render_widget(
-        FullLineBackgroundParagraph::new(text).scroll(app.preview_scroll),
+        FullLineBackgroundParagraph::prewrapped(text).scroll(app.preview_scroll),
         body_area,
     );
 }
@@ -210,6 +202,7 @@ pub fn render_session_document_with_options(
     let mut lines = Vec::new();
     let mut sticky_markers = Vec::new();
     let mut blocks = Vec::new();
+    let mut origin_blocks = Vec::new();
 
     if let Some(info) = session.session_info.as_ref() {
         let info_lines = render_session_info_block(info, theme, highlight_query);
@@ -232,7 +225,7 @@ pub fn render_session_document_with_options(
                 continue;
             }
             let start = lines.len();
-            render_message_into(
+            let origins = render_message_into(
                 &mut lines,
                 &mut sticky_markers,
                 session.agent,
@@ -240,6 +233,16 @@ pub fn render_session_document_with_options(
                 theme,
                 highlight_query,
             );
+            origin_blocks.push((
+                start,
+                bind_message_origins(
+                    session,
+                    SourceBlock::Message(index),
+                    message.role,
+                    &message.content,
+                    origins,
+                ),
+            ));
             record_block(&mut blocks, SessionBlockId::Message(index), start, &lines);
         }
     } else {
@@ -256,7 +259,7 @@ pub fn render_session_document_with_options(
                 continue;
             }
             let start = lines.len();
-            render_cell_into(
+            let origins = render_cell_into(
                 &mut lines,
                 &mut sticky_markers,
                 session.agent,
@@ -264,7 +267,36 @@ pub fn render_session_document_with_options(
                 theme,
                 highlight_query,
                 options.display_options,
+                SourceBlock::Cell(index),
+                session
+                    .search_fields
+                    .tool_call_sources
+                    .get(&index)
+                    .map(|source| (source.raw_name.as_str(), &source.input)),
             );
+            let origins = if let SessionCell::Message {
+                role: MessageRole::Summary,
+                content,
+                ..
+            } = cell
+            {
+                bind_message_origins(
+                    session,
+                    SourceBlock::Cell(index),
+                    MessageRole::Summary,
+                    content,
+                    origins
+                        .into_iter()
+                        .map(|origin| TextOrigin {
+                            rendered: origin.rendered,
+                            source: origin.source.range,
+                        })
+                        .collect(),
+                )
+            } else {
+                origins
+            };
+            origin_blocks.push((start, origins));
             record_block(&mut blocks, SessionBlockId::Cell(index), start, &lines);
         }
 
@@ -291,28 +323,37 @@ pub fn render_session_document_with_options(
             }
         }
     }
+    let text = Text::from(lines);
+    let mut map = DocumentMap::from_text(&text);
+    for (start, origins) in origin_blocks {
+        let offset = map
+            .line_starts
+            .get(start)
+            .copied()
+            .unwrap_or(map.plain.len());
+        map.origins.extend(origins.into_iter().map(|mut origin| {
+            origin.rendered = offset + origin.rendered.start..offset + origin.rendered.end;
+            origin
+        }));
+    }
     DisplayDocument {
-        text: Text::from(lines),
+        text,
+        map,
         sticky_markers,
         blocks,
     }
 }
 
 fn should_hide_message(role: MessageRole, content: &str, options: SessionRenderOptions) -> bool {
-    !shows_message_role(options.display_options, role)
-        || options.hide_project_docs_autodump && is_project_docs_autodump(role, content)
-        || options.display_options.hide_skill_text_injection
-            && is_skill_text_injection(role, content)
-        || options.display_options.hide_internal_context
-            && is_internal_context_injection(role, content)
+    let mut display_options = options.display_options;
+    display_options.hide_project_docs_autodump = options.hide_project_docs_autodump;
+    !crate::search_projection::message_visibility(role, content).is_visible(display_options)
 }
 
 fn should_hide_cell(cell: &SessionCell, options: SessionRenderOptions) -> bool {
-    match cell {
-        SessionCell::Message { role, content, .. } => should_hide_message(*role, content, options),
-        SessionCell::Exec { is_user: true, .. } => options.display_options.hide_user_tool_calls,
-        _ => false,
-    }
+    let mut display_options = options.display_options;
+    display_options.hide_project_docs_autodump = options.hide_project_docs_autodump;
+    !crate::search_projection::cell_visible(cell, &display_options)
 }
 
 pub fn render_composite_text(
@@ -370,6 +411,15 @@ pub fn render_composite_document_with_options(
             block
         }));
     summary.text.lines.extend(session_doc.text.lines);
+    let mut map = DocumentMap::from_text(&summary.text);
+    map.extend_origins(&summary.map, 0);
+    let byte_offset = map
+        .line_starts
+        .get(session_offset)
+        .copied()
+        .unwrap_or(map.plain.len());
+    map.extend_origins(&session_doc.map, byte_offset);
+    summary.map = map;
     summary
         .sticky_markers
         .extend(
@@ -401,6 +451,7 @@ pub fn render_summary_sections_document(
 ) -> DisplayDocument {
     let mut lines = Vec::new();
     let mut sticky_markers = Vec::new();
+    let mut native_origins = Vec::new();
 
     if let Some(summary) = summaries.codex_autosummary.as_ref() {
         let title = "# Codex Auto-summary";
@@ -439,7 +490,16 @@ pub fn render_summary_sections_document(
             "# Claude Auto-summary".to_owned()
         };
         let section_start = lines.len();
-        let body = render_claude_summary_text(summary, theme, highlight_query);
+        let (body, origins) =
+            render_claude_summary_text_with_origins(summary, theme, highlight_query);
+        native_origins.push((
+            section_start + 4,
+            bind_origins(
+                SourceBlock::Context,
+                &format!("native_summary/{index}"),
+                origins,
+            ),
+        ));
         lines.extend(render_section(&title, &body, theme).lines);
         sticky_markers.push(StickyLineMarker {
             line_index: section_start,
@@ -512,8 +572,22 @@ pub fn render_summary_sections_document(
         });
     }
 
+    let text = Text::from(lines);
+    let mut map = DocumentMap::from_text(&text);
+    for (line, origins) in native_origins {
+        let offset = map
+            .line_starts
+            .get(line)
+            .copied()
+            .unwrap_or(map.plain.len());
+        map.origins.extend(origins.into_iter().map(|mut origin| {
+            origin.rendered = offset + origin.rendered.start..offset + origin.rendered.end;
+            origin
+        }));
+    }
     DisplayDocument {
-        text: Text::from(lines),
+        map,
+        text,
         sticky_markers,
         blocks: Vec::new(),
     }
@@ -555,6 +629,7 @@ pub fn render_session_section_document_with_options(
         )
     } else {
         DisplayDocument {
+            map: DocumentMap::default(),
             text: render_summary_missing(
                 theme,
                 "Session log is unavailable for this entry.",
@@ -565,6 +640,9 @@ pub fn render_session_section_document_with_options(
         }
     };
     let text = render_section("# Session Log", &body.text, theme);
+    let mut map = DocumentMap::from_text(&text);
+    let offset = map.line_starts.get(2).copied().unwrap_or(map.plain.len());
+    map.extend_origins(&body.map, offset);
     let mut sticky_markers = vec![StickyLineMarker {
         line_index: 0,
         header: StickyHeader::new("Session", "", "Session Log"),
@@ -579,6 +657,7 @@ pub fn render_session_section_document_with_options(
     );
     DisplayDocument {
         text,
+        map,
         sticky_markers,
         blocks: body
             .blocks
@@ -727,6 +806,14 @@ fn render_claude_summary_text(
     theme: &Theme,
     highlight_query: Option<&str>,
 ) -> Text<'static> {
+    render_claude_summary_text_with_origins(summary, theme, highlight_query).0
+}
+
+fn render_claude_summary_text_with_origins(
+    summary: &ClaudeAutosummaryPreview,
+    theme: &Theme,
+    highlight_query: Option<&str>,
+) -> (Text<'static>, Vec<TextOrigin>) {
     let base = Style::default().fg(theme.text);
     let mut spans = vec![
         Span::styled(
@@ -750,13 +837,13 @@ fn render_claude_summary_text(
             Style::default().fg(theme.muted),
         ));
     }
-    let body = render_markdown_message(&summary.body, theme, base, highlight_query);
+    let body = render_markdown_message_with_headings(&summary.body, theme, base, highlight_query);
 
-    let mut lines = Vec::with_capacity(body.lines.len() + 2);
+    let mut lines = Vec::with_capacity(body.text.lines.len() + 2);
     lines.push(Line::from(spans));
     lines.push(Line::default());
-    lines.extend(body.lines);
-    Text::from(lines)
+    lines.extend(body.text.lines);
+    (Text::from(lines), body.origins)
 }
 
 fn render_codex_summary_text(
@@ -796,6 +883,7 @@ fn render_codex_summary_text(
     Text::from(lines)
 }
 
+#[cfg(test)]
 pub(crate) fn render_message_body(
     agent: Agent,
     role: MessageRole,
@@ -816,8 +904,11 @@ pub(crate) fn render_message_body_document(
     let (_, bubble_bg) = message_colors(agent, role, theme);
     let base = Style::default().fg(theme.text).bg(bubble_bg);
     let rendered = render_markdown_message_with_headings(content, theme, base, highlight_query);
+    let mut map = DocumentMap::from_text(&rendered.text);
+    map.origins = bind_origins(SourceBlock::Message(0), "content", rendered.origins);
     DisplayDocument {
         text: rendered.text,
+        map,
         blocks: Vec::new(),
         sticky_markers: rendered
             .headings
@@ -971,7 +1062,7 @@ fn render_message_into(
     message: &crate::parse::SessionMessage,
     theme: &Theme,
     highlight_query: Option<&str>,
-) {
+) -> Vec<TextOrigin> {
     let (label_color, _) = message_colors(agent, message.role, theme);
     let label = session_message_label(message);
     let header_line = lines.len();
@@ -1015,9 +1106,25 @@ fn render_message_into(
     }
     lines.extend(rendered.text.lines);
     lines.push(Line::default());
+    let offset = lines[header_line]
+        .spans
+        .iter()
+        .map(|span| span.content.len())
+        .sum::<usize>()
+        + 1;
+    rendered
+        .map
+        .origins
+        .into_iter()
+        .map(|origin| TextOrigin {
+            rendered: offset + origin.rendered.start..offset + origin.rendered.end,
+            source: origin.source.range,
+        })
+        .collect()
 }
 
 /// Render a single cell into the rolling lines/sticky list.
+#[allow(clippy::too_many_arguments)]
 fn render_cell_into(
     lines: &mut Vec<Line<'static>>,
     sticky_markers: &mut Vec<StickyLineMarker>,
@@ -1026,7 +1133,10 @@ fn render_cell_into(
     theme: &Theme,
     highlight_query: Option<&str>,
     display_options: DisplayOptions,
-) {
+    source: SourceBlock,
+    tool_source: Option<(&str, &serde_json::Value)>,
+) -> Vec<RenderOrigin> {
+    let start = lines.len();
     match cell {
         SessionCell::Message {
             role,
@@ -1034,7 +1144,7 @@ fn render_cell_into(
             timestamp,
         } => {
             if !shows_message_role(display_options, *role) {
-                return;
+                return Vec::new();
             }
             let synthetic = crate::parse::SessionMessage {
                 role: *role,
@@ -1042,7 +1152,7 @@ fn render_cell_into(
                 timestamp: *timestamp,
                 tool_name: None,
             };
-            render_message_into(
+            let origins = render_message_into(
                 lines,
                 sticky_markers,
                 agent,
@@ -1050,6 +1160,7 @@ fn render_cell_into(
                 theme,
                 highlight_query,
             );
+            return bind_origins(source, "content", origins);
         }
         SessionCell::Reasoning {
             header,
@@ -1057,7 +1168,7 @@ fn render_cell_into(
             timestamp,
         } => {
             if display_options.hide_agent_replies {
-                return;
+                return Vec::new();
             }
             render_reasoning_into(
                 lines,
@@ -1078,7 +1189,7 @@ fn render_cell_into(
             timestamp,
         } => {
             if display_options.hide_tool_calls {
-                return;
+                return Vec::new();
             }
             render_tool_call_into(
                 lines,
@@ -1101,7 +1212,7 @@ fn render_cell_into(
             timestamp,
         } => {
             if display_options.hide_tool_results {
-                return;
+                return Vec::new();
             }
             render_tool_result_into(
                 lines,
@@ -1133,7 +1244,7 @@ fn render_cell_into(
                 display_options.hide_tool_calls
             };
             if hide_calls {
-                return;
+                return Vec::new();
             }
             render_exec_into(
                 lines,
@@ -1160,7 +1271,7 @@ fn render_cell_into(
             timestamp,
         } => {
             if display_options.hide_tool_calls {
-                return;
+                return Vec::new();
             }
             render_patch_into(
                 lines,
@@ -1181,7 +1292,7 @@ fn render_cell_into(
             timestamp,
         } => {
             if display_options.hide_tool_calls {
-                return;
+                return Vec::new();
             }
             render_web_search_into(
                 lines,
@@ -1205,6 +1316,595 @@ fn render_cell_into(
         }
         SessionCell::SessionInfo(_) | SessionCell::Metrics(_) => {
             // Handled outside the main loop.
+        }
+    }
+    cell_origins(cell, source, &lines[start..], display_options, tool_source)
+}
+
+fn bind_origins(block: SourceBlock, part: &str, origins: Vec<TextOrigin>) -> Vec<RenderOrigin> {
+    let source = SourceId::new(block, part);
+    origins
+        .into_iter()
+        .map(|origin| RenderOrigin {
+            rendered: origin.rendered,
+            source: SourceRange {
+                source: source.clone(),
+                range: origin.source,
+            },
+        })
+        .collect()
+}
+
+fn bind_message_origins(
+    session: &Session,
+    block: SourceBlock,
+    role: MessageRole,
+    content: &str,
+    origins: Vec<TextOrigin>,
+) -> Vec<RenderOrigin> {
+    if role == MessageRole::ToolCall {
+        if let SourceBlock::Message(index) = &block {
+            let index = *index;
+            if let Some(source) = session.search_fields.tool_call_sources.get(&index) {
+                let mut mapped = CellOrigins {
+                    block: block.clone(),
+                    line_starts: vec![0],
+                    origins: bind_origins(block, "content", origins),
+                };
+                mapped.aliases(
+                    "content",
+                    tool_summary_input_origins(&source.raw_name, &source.input, content),
+                );
+                if let Some(tool) = session.messages[index].tool_name.as_deref() {
+                    mapped.raw_tool_name(tool, &source.raw_name);
+                }
+                return mapped.origins;
+            }
+        }
+    }
+    let native = &session.search_fields.native_summaries;
+    if role != MessageRole::Summary || native.is_empty() {
+        return bind_origins(block, "content", origins);
+    }
+    // Claude's summary-only fallback joins native bodies in source order,
+    // skipping adjacent duplicates. Reconstruct that producer-defined assembly and
+    // require it to equal the complete synthetic message before assigning any
+    // original record locations.
+    let mut chunks: Vec<&str> = Vec::new();
+    let mut intervals: Vec<(std::ops::Range<usize>, Vec<usize>)> = Vec::new();
+    let mut combined = String::new();
+    for (index, body) in native.iter().enumerate() {
+        if chunks.last().is_some_and(|last| *last == body.as_str()) {
+            intervals.last_mut().unwrap().1.push(index);
+            continue;
+        }
+        if !combined.is_empty() {
+            combined.push_str("\n\n");
+        }
+        let start = combined.len();
+        combined.push_str(body);
+        intervals.push((start..combined.len(), vec![index]));
+        chunks.push(body);
+    }
+    if combined != content {
+        return bind_origins(block, "content", origins);
+    }
+    let mut mapped = Vec::new();
+    for (interval, indices) in intervals {
+        for index in indices {
+            for origin in &origins {
+                let start = origin.source.start.max(interval.start);
+                let end = origin.source.end.min(interval.end);
+                if start >= end {
+                    continue;
+                }
+                let rendered = if origin.rendered.len() == origin.source.len() {
+                    origin.rendered.start + start - origin.source.start
+                        ..origin.rendered.start + end - origin.source.start
+                } else {
+                    origin.rendered.clone()
+                };
+                mapped.push(RenderOrigin {
+                    rendered,
+                    source: SourceRange {
+                        source: SourceId::new(
+                            SourceBlock::Context,
+                            format!("native_summary/{index}"),
+                        ),
+                        range: start - interval.start..end - interval.start,
+                    },
+                });
+            }
+        }
+    }
+    mapped
+}
+
+/// Cell formatting owns its prefixes and component order. Record origins at
+/// those known positions; never locate a component by searching its contents.
+fn cell_origins(
+    cell: &SessionCell,
+    block: SourceBlock,
+    lines: &[Line<'_>],
+    options: DisplayOptions,
+    tool_source: Option<(&str, &serde_json::Value)>,
+) -> Vec<RenderOrigin> {
+    let mut map = CellOrigins::new(block, lines);
+    match cell {
+        SessionCell::Reasoning { header, body, .. } => {
+            if let Some(header) = header.as_deref().filter(|header| !header.is_empty()) {
+                map.plain("header", header, 0, "↳ thinking · ".len(), 0);
+            }
+            map.plain("body", body, 1, 2, 0);
+        }
+        SessionCell::ToolCall {
+            tool,
+            raw_name,
+            summary,
+            input,
+            ..
+        } => {
+            let (source_raw_name, source_input) = tool_source.unwrap_or((raw_name, input));
+            map.plain("tool", tool, 0, "› ".len(), 0);
+            map.raw_tool_name(tool, source_raw_name);
+            if is_generic_tool(raw_name) {
+                match input {
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                        let pretty = serde_json::to_string_pretty(input)
+                            .unwrap_or_else(|_| input.to_string());
+                        map.formatted_parts(
+                            &pretty,
+                            crate::tui::json_highlight::json_value_origins(input),
+                            1,
+                            2,
+                        );
+                    }
+                    serde_json::Value::String(text) => {
+                        map.plain("input", text, 1, 2, 0);
+                    }
+                    _ if !summary.is_empty() => {
+                        map.summary("summary", summary, 1);
+                        map.aliases(
+                            "summary",
+                            tool_summary_input_origins(source_raw_name, source_input, summary),
+                        );
+                    }
+                    _ => {}
+                }
+            } else if !summary.is_empty() {
+                map.summary("summary", summary, 1);
+                map.aliases(
+                    "summary",
+                    tool_summary_input_origins(source_raw_name, source_input, summary),
+                );
+            }
+        }
+        SessionCell::ToolResult { tool, output, .. } => {
+            if let Some(tool) = tool.as_deref().filter(|tool| !tool.is_empty()) {
+                map.plain("tool", tool, 0, "‹ ".len(), 0);
+            }
+            map.summary("output", output, 1);
+        }
+        SessionCell::Exec {
+            command,
+            parsed_summary,
+            stdout,
+            stderr,
+            is_user,
+            ..
+        } => {
+            if let Some(summary) = parsed_summary
+                .as_deref()
+                .filter(|summary| !summary.is_empty())
+            {
+                map.plain("parsed_summary", summary, 0, 2, 0);
+            } else if !command.is_empty() {
+                let joined = command.join(" ");
+                let source_offset = if command.len() >= 3
+                    && command[0].ends_with("sh")
+                    && command[1].starts_with('-')
+                {
+                    command[0].len() + command[1].len() + 2
+                } else {
+                    0
+                };
+                map.plain("command", &flatten_command(command), 0, 2, source_offset);
+                // Shell-wrapper arguments not present in the display retain no
+                // invented location; the joined command owns these offsets.
+                debug_assert!(source_offset <= joined.len());
+            }
+            let hidden = if *is_user {
+                options.hide_user_tool_results
+            } else {
+                options.hide_tool_results
+            };
+            if !hidden {
+                let count = map.plain("stdout", stdout, 1, 2, 0);
+                map.plain("stderr", stderr, 1 + count, 2, 0);
+            }
+        }
+        SessionCell::Patch {
+            files,
+            stdout,
+            stderr,
+            ..
+        } => {
+            for (index, file) in files.iter().enumerate() {
+                map.plain(&format!("files/{index}/path"), &file.path, 1 + index, 4, 0);
+            }
+            if !options.hide_tool_results {
+                let line = 1 + files.len();
+                let count = map.plain("stdout", stdout, line, 2, 0);
+                map.plain("stderr", stderr, line + count, 2, 0);
+            }
+        }
+        SessionCell::WebSearch { query, queries, .. } => {
+            let mut line = 1;
+            if !query.is_empty() {
+                map.plain("query", query, line, "  ▸ ".len(), 0);
+                line += 1;
+            }
+            for (index, value) in queries.iter().enumerate() {
+                if !query.is_empty() && value == query {
+                    continue;
+                }
+                map.plain(&format!("queries/{index}"), value, line, "  ▸ ".len(), 0);
+                line += 1;
+            }
+        }
+        SessionCell::Plan { items, .. } => {
+            for (index, item) in items.iter().enumerate() {
+                map.plain(&format!("items/{index}/step"), &item.step, 1 + index, 6, 0);
+            }
+        }
+        SessionCell::Message { .. } | SessionCell::SessionInfo(_) | SessionCell::Metrics(_) => {}
+    }
+    map.origins
+}
+
+/// Reconstruct the formatter's selected components at their defined output
+/// positions. A complete formatter equality check guards against assigning a
+/// source location to a custom or stale summary that merely contains its text.
+fn tool_summary_input_origins(
+    name: &str,
+    input: &serde_json::Value,
+    summary: &str,
+) -> Vec<(String, TextOrigin)> {
+    use serde_json::Value;
+
+    if crate::parse::tool_format::format_tool_call(name, input) != summary {
+        return Vec::new();
+    }
+    fn trimmed(part: &str, text: &str, offset: usize) -> (String, TextOrigin) {
+        let start = text.len() - text.trim_start().len();
+        let len = text.trim().len();
+        (
+            part.to_owned(),
+            TextOrigin {
+                source: start..start + len,
+                rendered: offset..offset + len,
+            },
+        )
+    }
+    fn truncate_bytes(text: &str, limit: usize) -> &str {
+        let mut end = text.len().min(limit);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    }
+    let label = crate::parse::tool_format::tool_label(name);
+    match label {
+        "bash" => {
+            for key in ["command", "cmd"] {
+                if let Some(text) = input.get(key).and_then(Value::as_str) {
+                    if !text.trim().is_empty() {
+                        return vec![trimmed(&format!("input/{key}"), text, 0)];
+                    }
+                }
+            }
+            if let Some(text) = input.as_str().filter(|text| !text.trim().is_empty()) {
+                return vec![trimmed("input", text, 0)];
+            }
+        }
+        "read" | "write" | "edit" => {
+            let selected = if input.get("file_path").is_some() {
+                "file_path"
+            } else {
+                "path"
+            };
+            if let Some(text) = input
+                .get(selected)
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+            {
+                return vec![trimmed(&format!("input/{selected}"), text, 0)];
+            }
+        }
+        "glob" | "grep" => {
+            if let Some(pattern) = input
+                .get("pattern")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+            {
+                if let Some(path) = input
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    return vec![
+                        (
+                            "input/pattern".to_owned(),
+                            TextOrigin {
+                                source: 0..pattern.len(),
+                                rendered: 0..pattern.len(),
+                            },
+                        ),
+                        trimmed("input/path", path, pattern.len() + " in ".len()),
+                    ];
+                }
+                return vec![trimmed("input/pattern", pattern, 0)];
+            }
+        }
+        "patch" => {
+            let (part, text) = match input {
+                Value::String(text) => ("input", Some(text.as_str())),
+                _ => ("input/input", input.get("input").and_then(Value::as_str)),
+            };
+            if let Some(text) = text {
+                let mut offset = 0;
+                for line in text.split_inclusive('\n') {
+                    let content = line.trim();
+                    if content.starts_with("*** Update File:")
+                        || content.starts_with("*** Add File:")
+                    {
+                        let (part, mut origin) = trimmed(part, line, 0);
+                        origin.source = origin.source.start + offset..origin.source.end + offset;
+                        return vec![(part, origin)];
+                    }
+                    offset += line.len();
+                }
+                return Vec::new();
+            }
+        }
+        _ => {}
+    }
+    // Recognized labels without a special input shape use the formatter's
+    // bounded key/value fallback. Only selected, displayed values receive maps.
+    let mut origins = Vec::new();
+    let mut offset = 0;
+    if let Value::Object(map) = input {
+        for (key, value) in map {
+            let (text, source_start) = match value {
+                Value::String(text) => {
+                    let trimmed = truncate_bytes(text.trim(), 100);
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    (trimmed.to_owned(), text.len() - text.trim_start().len())
+                }
+                Value::Number(_) | Value::Bool(_) => (value.to_string(), 0),
+                _ => continue,
+            };
+            if !origins.is_empty() {
+                offset += ", ".len();
+            }
+            offset += key.len() + ": ".len();
+            let part = format!("input/{}", key.replace('~', "~0").replace('/', "~1"));
+            origins.push((
+                part,
+                TextOrigin {
+                    source: source_start..source_start + text.len(),
+                    rendered: offset..offset + text.len(),
+                },
+            ));
+            offset += text.len();
+            if origins.len() == 4 {
+                break;
+            }
+        }
+    }
+    if !origins.is_empty() {
+        return origins;
+    }
+    let compact = serde_json::to_string(input).unwrap_or_default();
+    let displayed_len = truncate_bytes(&compact, 200).len();
+    crate::tui::json_highlight::json_value_origins_in_formatted(&compact)
+        .into_iter()
+        .filter_map(|(part, mut origin)| {
+            if origin.rendered.start >= displayed_len {
+                return None;
+            }
+            if origin.rendered.end > displayed_len {
+                if origin.rendered.len() == origin.source.len() {
+                    origin.source.end -= origin.rendered.end - displayed_len;
+                }
+                origin.rendered.end = displayed_len;
+            }
+            Some((part, origin))
+        })
+        .collect()
+}
+
+struct CellOrigins {
+    block: SourceBlock,
+    line_starts: Vec<usize>,
+    origins: Vec<RenderOrigin>,
+}
+
+impl CellOrigins {
+    fn new(block: SourceBlock, lines: &[Line<'_>]) -> Self {
+        let mut offset = 0;
+        let line_starts = lines
+            .iter()
+            .map(|line| {
+                let start = offset;
+                offset += line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.len())
+                    .sum::<usize>()
+                    + 1;
+                start
+            })
+            .collect();
+        Self {
+            block,
+            line_starts,
+            origins: Vec::new(),
+        }
+    }
+
+    fn raw_tool_name(&mut self, tool: &str, raw_name: &str) {
+        if raw_name == tool {
+            self.plain("raw_name", raw_name, 0, "› ".len(), 0);
+        } else if crate::parse::tool_format::tool_label(raw_name) == tool {
+            let trimmed = raw_name.trim();
+            let source_start = raw_name.len() - raw_name.trim_start().len();
+            let start = "› ".len();
+            self.origins.push(RenderOrigin {
+                rendered: start..start + tool.len(),
+                source: SourceRange {
+                    source: SourceId::new(self.block.clone(), "raw_name"),
+                    range: source_start..source_start + trimmed.len(),
+                },
+            });
+        }
+    }
+
+    fn plain(
+        &mut self,
+        part: &str,
+        text: &str,
+        line: usize,
+        prefix: usize,
+        source_offset: usize,
+    ) -> usize {
+        let mut input_offset = source_offset;
+        let mut count = 0;
+        for raw in text.split_inclusive('\n') {
+            let content = raw.strip_suffix('\n').unwrap_or(raw);
+            let content = content.strip_suffix('\r').unwrap_or(content);
+            let safe = sanitize_with_origins(content);
+            if let Some(start) = self.line_starts.get(line + count).copied() {
+                let origins = safe
+                    .origins
+                    .into_iter()
+                    .map(|origin| TextOrigin {
+                        rendered: start + prefix + origin.rendered.start
+                            ..start + prefix + origin.rendered.end,
+                        source: input_offset + origin.source.start
+                            ..input_offset + origin.source.end,
+                    })
+                    .collect();
+                self.origins
+                    .extend(bind_origins(self.block.clone(), part, origins));
+            }
+            input_offset += raw.len();
+            count += 1;
+        }
+        count
+    }
+
+    fn summary(&mut self, part: &str, text: &str, line: usize) {
+        if crate::tui::json_highlight::looks_like_json_object_or_array(text) {
+            let pretty = serde_json::from_str::<serde_json::Value>(text)
+                .ok()
+                .and_then(|value| serde_json::to_string_pretty(&value).ok())
+                .unwrap_or_else(|| text.to_owned());
+            self.formatted(
+                part,
+                &pretty,
+                crate::tui::json_highlight::json_string_origins(text),
+                line,
+                2,
+            );
+        } else {
+            self.plain(part, text, line, 2, 0);
+        }
+    }
+
+    fn aliases(&mut self, part: &str, aliases: Vec<(String, TextOrigin)>) {
+        let base: Vec<_> = self
+            .origins
+            .iter()
+            .filter(|origin| origin.source.source.part == part)
+            .cloned()
+            .collect();
+        for (part, alias) in aliases {
+            for origin in &base {
+                let start = origin.source.range.start.max(alias.rendered.start);
+                let end = origin.source.range.end.min(alias.rendered.end);
+                if start >= end {
+                    continue;
+                }
+                let rendered = if origin.rendered.len() == origin.source.range.len() {
+                    origin.rendered.start + start - origin.source.range.start
+                        ..origin.rendered.start + end - origin.source.range.start
+                } else {
+                    origin.rendered.clone()
+                };
+                let source = if alias.source.len() == alias.rendered.len() {
+                    alias.source.start + start - alias.rendered.start
+                        ..alias.source.start + end - alias.rendered.start
+                } else {
+                    alias.source.clone()
+                };
+                self.origins.push(RenderOrigin {
+                    rendered,
+                    source: SourceRange {
+                        source: SourceId::new(self.block.clone(), part.clone()),
+                        range: source,
+                    },
+                });
+            }
+        }
+    }
+
+    fn formatted(
+        &mut self,
+        part: &str,
+        formatted: &str,
+        origins: Vec<TextOrigin>,
+        first_line: usize,
+        prefix: usize,
+    ) {
+        self.formatted_parts(
+            formatted,
+            origins
+                .into_iter()
+                .map(|origin| (part.to_owned(), origin))
+                .collect(),
+            first_line,
+            prefix,
+        );
+    }
+
+    fn formatted_parts(
+        &mut self,
+        formatted: &str,
+        origins: Vec<(String, TextOrigin)>,
+        first_line: usize,
+        prefix: usize,
+    ) {
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(formatted.match_indices('\n').map(|(index, _)| index + 1))
+            .collect();
+        for (part, origin) in origins {
+            let line = line_starts
+                .partition_point(|start| *start <= origin.rendered.start)
+                .saturating_sub(1);
+            if let Some(start) = self.line_starts.get(first_line + line).copied() {
+                let offset = start + prefix - line_starts[line];
+                self.origins.extend(bind_origins(
+                    self.block.clone(),
+                    &part,
+                    vec![TextOrigin {
+                        rendered: offset + origin.rendered.start..offset + origin.rendered.end,
+                        source: origin.source,
+                    }],
+                ));
+            }
         }
     }
 }
@@ -1231,14 +1931,14 @@ fn push_cell_header(
         header: sticky,
     });
     let mut spans = vec![Span::styled(
-        label,
+        crate::tui::ansi::strip_terminal_escapes(&label),
         Style::default()
             .fg(label_color)
             .add_modifier(Modifier::BOLD),
     )];
     if let Some(suffix) = suffix {
         spans.push(Span::styled(
-            format!(" {suffix}"),
+            crate::tui::ansi::strip_terminal_escapes(&format!(" {suffix}")),
             Style::default().fg(theme.muted),
         ));
     }
@@ -2038,6 +2738,953 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    fn projected_text(
+        document: &super::DisplayDocument,
+        block: crate::search_match::SourceBlock,
+        part: &str,
+        range: std::ops::Range<usize>,
+    ) -> Vec<String> {
+        let source = crate::search_match::SourceRange {
+            source: crate::search_match::SourceId::new(block, part),
+            range,
+        };
+        document
+            .map
+            .project(&source)
+            .into_iter()
+            .map(|range| document.map.plain[range].to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn document_provenance_keeps_hidden_source_and_repeated_visible_text_separate() {
+        use crate::search_match::SourceBlock;
+        let mut session = empty_session(
+            Agent::Codex,
+            vec![
+                SessionCell::Message {
+                    role: MessageRole::User,
+                    content: "same **same**".to_owned(),
+                    timestamp: None,
+                },
+                SessionCell::Exec {
+                    command: vec!["same".to_owned()],
+                    cwd: None,
+                    parsed_summary: None,
+                    stdout: "same".to_owned(),
+                    stderr: String::new(),
+                    exit_code: None,
+                    duration_ms: None,
+                    status: ExecStatus::Completed,
+                    timestamp: None,
+                    is_user: false,
+                },
+            ],
+        );
+        let options = DisplayOptions {
+            hide_tool_results: true,
+            ..DisplayOptions::SHOW_ALL
+        };
+        let doc = super::render_session_section_document_with_options(
+            Some(&session),
+            &Theme::default(),
+            None,
+            options,
+        );
+        assert_eq!(
+            projected_text(&doc, SourceBlock::Cell(0), "content", 7..11),
+            ["same"]
+        );
+        assert_eq!(
+            projected_text(&doc, SourceBlock::Cell(1), "command", 0..4),
+            ["same"]
+        );
+        assert!(projected_text(&doc, SourceBlock::Cell(1), "stdout", 0..4).is_empty());
+        assert!(doc
+            .map
+            .origins
+            .iter()
+            .all(|origin| origin.rendered.end <= doc.map.plain.len()));
+        session.cells.remove(1);
+        let composite = super::render_composite_document_with_options(
+            Some(&session),
+            &SummarySources::default(),
+            &Theme::default(),
+            None,
+            false,
+            options,
+        );
+        assert_eq!(
+            projected_text(&composite, SourceBlock::Cell(0), "content", 7..11),
+            ["same"]
+        );
+    }
+
+    #[test]
+    fn structured_json_provenance_uses_decoded_leaf_offsets() {
+        use crate::search_match::SourceBlock;
+        let session = empty_session(
+            Agent::Codex,
+            vec![SessionCell::ToolCall {
+                tool: "mcp__unknown__test".to_owned(),
+                raw_name: "mcp__unknown__test".to_owned(),
+                summary: "source only same".to_owned(),
+                input: serde_json::json!({"a":"same\n", "b":"same\n"}),
+                status: crate::parse::ToolStatus::Completed,
+                timestamp: None,
+            }],
+        );
+        let doc = super::render_session_document_with_options(
+            &session,
+            &Theme::default(),
+            None,
+            SessionRenderOptions::new(DisplayOptions::SHOW_ALL),
+        );
+        assert_eq!(
+            projected_text(&doc, SourceBlock::Cell(0), "input/a", 4..5),
+            ["\\n"]
+        );
+        let a = doc.map.project(&crate::search_match::SourceRange {
+            source: crate::search_match::SourceId::new(SourceBlock::Cell(0), "input/a"),
+            range: 0..4,
+        });
+        let b = doc.map.project(&crate::search_match::SourceRange {
+            source: crate::search_match::SourceId::new(SourceBlock::Cell(0), "input/b"),
+            range: 0..4,
+        });
+        assert_ne!(a, b);
+        assert!(projected_text(&doc, SourceBlock::Cell(0), "summary", 12..16).is_empty());
+    }
+
+    fn query_display_ranges(
+        session: &Session,
+        document: &super::DisplayDocument,
+        query: &str,
+    ) -> (bool, Vec<std::ops::Range<usize>>) {
+        let projection = crate::search_projection::SearchProjection::from_session(session);
+        let plan = crate::search_query::QueryPlan::compile(
+            query,
+            crate::search_query::VisibilitySearch::All,
+            DisplayOptions::SHOW_ALL,
+        )
+        .unwrap();
+        let matched = plan.matches(&projection);
+        let ranges = crate::search_match::merge_ranges(
+            matched
+                .matches
+                .iter()
+                .flat_map(|matched| document.map.project_match(matched))
+                .collect(),
+        );
+        (matched.is_match, ranges)
+    }
+
+    #[test]
+    fn query_occurrences_project_through_markdown_json_exec_and_patch_rendering() {
+        let session = empty_session(
+            Agent::Codex,
+            vec![
+                SessionCell::Message {
+                    role: MessageRole::User,
+                    content: "alpha **beta** [linked](https://sourceonly.invalid)\n\n界".to_owned(),
+                    timestamp: None,
+                },
+                SessionCell::ToolCall {
+                    tool: "mcp__unknown__test".to_owned(),
+                    raw_name: "mcp__unknown__test".to_owned(),
+                    summary: "NeedleA".to_owned(),
+                    input: serde_json::json!({"a/b":"NeedleA", "a":{"b":"NeedleB"}, "escaped":"alpha\nbeta"}),
+                    status: crate::parse::ToolStatus::Completed,
+                    timestamp: None,
+                },
+                SessionCell::ToolResult {
+                    tool: None,
+                    output: r#"{"value":"\u0061lpha"}"#.to_owned(),
+                    is_error: false,
+                    call_summary: None,
+                    timestamp: None,
+                },
+                SessionCell::Exec {
+                    command: vec![
+                        "/bin/zsh".to_owned(),
+                        "-lc".to_owned(),
+                        "echo delta".to_owned(),
+                    ],
+                    cwd: Some("OnlyCwdNeedle".to_owned()),
+                    parsed_summary: None,
+                    stdout: "stdoutNeedle".to_owned(),
+                    stderr: "stderrNeedle".to_owned(),
+                    exit_code: None,
+                    duration_ms: None,
+                    status: ExecStatus::Completed,
+                    timestamp: None,
+                    is_user: false,
+                },
+                SessionCell::Patch {
+                    files: vec![PatchFile {
+                        path: "src/epsilon.rs".to_owned(),
+                        op: PatchOp::Update,
+                        content: Some("hiddenPatchNeedle".to_owned()),
+                        additions: 1,
+                        deletions: 0,
+                    }],
+                    success: true,
+                    stdout: "visiblePatchNeedle".to_owned(),
+                    stderr: String::new(),
+                    timestamp: None,
+                },
+            ],
+        );
+        let document = super::render_session_document_with_options(
+            &session,
+            &Theme::default(),
+            None,
+            SessionRenderOptions::new(DisplayOptions::SHOW_ALL),
+        );
+        for (query, expected) in [
+            ("\"alpha beta\"", vec!["alpha beta", "alpha\\nbeta"]),
+            ("NeedleA", vec!["NeedleA"]),
+            ("NeedleB", vec!["NeedleB"]),
+            ("u0061lpha", vec!["alpha"]),
+            ("delta", vec!["delta"]),
+            ("epsilon", vec!["epsilon"]),
+            ("visiblePatchNeedle", vec!["visiblePatchNeedle"]),
+            ("界", vec!["界"]),
+        ] {
+            let (is_match, ranges) = query_display_ranges(&session, &document, query);
+            assert!(is_match, "query {query}");
+            let text: Vec<_> = ranges
+                .iter()
+                .map(|range| &document.map.plain[range.clone()])
+                .collect();
+            assert_eq!(text, expected, "query {query}");
+            for width in [20, 40, 80, 120] {
+                let layout = crate::tui::text_layout::LayoutDocument::new(&document.text, width);
+                assert!(
+                    ranges
+                        .iter()
+                        .all(|range| !layout.locate(range.clone()).is_empty()),
+                    "query {query}, width {width}"
+                );
+            }
+        }
+        for source_only in ["sourceonly", "OnlyCwdNeedle", "hiddenPatchNeedle"] {
+            let (is_match, ranges) = query_display_ranges(&session, &document, source_only);
+            assert!(is_match);
+            assert!(ranges.is_empty(), "source-only query {source_only}");
+        }
+    }
+
+    #[test]
+    fn field_query_never_maps_hidden_raw_tool_input_to_identical_visible_message() {
+        let mut session = empty_session(
+            Agent::Claude,
+            vec![
+                SessionCell::Message {
+                    role: MessageRole::User,
+                    content: "rawneedle".to_owned(),
+                    timestamp: None,
+                },
+                SessionCell::ToolCall {
+                    tool: "Bash".to_owned(),
+                    raw_name: "Bash".to_owned(),
+                    summary: "compact summary".to_owned(),
+                    input: serde_json::json!({"command":"rawneedle"}),
+                    status: crate::parse::ToolStatus::Completed,
+                    timestamp: None,
+                },
+            ],
+        );
+        session.search_fields.tool_call.push("rawneedle".to_owned());
+        let document = super::render_session_document_with_options(
+            &session,
+            &Theme::default(),
+            None,
+            SessionRenderOptions::new(DisplayOptions::SHOW_ALL),
+        );
+        let (is_match, ranges) = query_display_ranges(&session, &document, "toolcall:rawneedle");
+        assert!(is_match);
+        assert!(ranges.is_empty());
+        let (is_match, ranges) = query_display_ranges(&session, &document, "user:rawneedle");
+        assert!(is_match);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(&document.map.plain[ranges[0].clone()], "rawneedle");
+    }
+
+    #[test]
+    fn recognized_tool_summaries_map_only_formatter_selected_input_components() {
+        let calls = [
+            (
+                "Bash",
+                serde_json::json!({"command":"  alpha\nbeta  ", "description":"alpha"}),
+                vec!["input/command"],
+                vec!["input/description"],
+            ),
+            (
+                "Read",
+                serde_json::json!({"file_path":" /tmp/alpha.rs ", "path":"/hidden/alpha.rs"}),
+                vec!["input/file_path"],
+                vec!["input/path"],
+            ),
+            (
+                "Glob",
+                serde_json::json!({"pattern":" alpha ", "path":" /tmp/alpha "}),
+                vec!["input/pattern", "input/path"],
+                vec![],
+            ),
+            (
+                "Grep",
+                serde_json::json!({"pattern":" alpha ", "unused":"alpha"}),
+                vec!["input/pattern"],
+                vec!["input/unused"],
+            ),
+            (
+                "apply_patch",
+                serde_json::json!({"input":"*** Begin Patch\n  *** Update File: alpha.rs\n+hiddenAlpha\n*** End Patch"}),
+                vec!["input/input"],
+                vec![],
+            ),
+            (
+                "WebFetch",
+                serde_json::json!({"a":" alpha ", "b":"alpha", "c":false, "d":23, "e":"alpha"}),
+                vec!["input/a", "input/b"],
+                vec!["input/e"],
+            ),
+        ];
+        for (name, input, shown, hidden) in calls {
+            let summary = crate::parse::tool_format::format_tool_call(name, &input);
+            let mut session = empty_session(
+                Agent::Codex,
+                vec![SessionCell::ToolCall {
+                    tool: crate::parse::tool_format::tool_label(name).to_owned(),
+                    raw_name: name.to_owned(),
+                    summary,
+                    input: input.clone(),
+                    status: crate::parse::ToolStatus::Completed,
+                    timestamp: None,
+                }],
+            );
+            session.search_fields.push_tool_call_text(name);
+            session.search_fields.push_tool_call(&input);
+            let projection = crate::search_projection::SearchProjection::from_session(&session);
+            let document = super::render_session_document_with_options(
+                &session,
+                &Theme::default(),
+                None,
+                SessionRenderOptions::new(DisplayOptions::SHOW_ALL),
+            );
+            let matched = crate::search_query::QueryPlan::compile(
+                "toolcall:alpha",
+                crate::search_query::VisibilitySearch::Visible,
+                DisplayOptions::SHOW_ALL,
+            )
+            .unwrap()
+            .matches(&projection);
+            assert!(matched.is_match, "tool {name}");
+            for part in shown {
+                let occurrences: Vec<_> = matched
+                    .matches
+                    .iter()
+                    .filter(|matched| {
+                        matched
+                            .sources
+                            .iter()
+                            .any(|source| source.source.part == part)
+                    })
+                    .collect();
+                assert!(!occurrences.is_empty(), "tool {name}, component {part}");
+                assert!(
+                    occurrences.iter().all(|matched| {
+                        document.map.project_match(matched).iter().any(|range| {
+                            document.map.plain[range.clone()].eq_ignore_ascii_case("alpha")
+                        })
+                    }),
+                    "tool {name}, component {part}"
+                );
+            }
+            for part in hidden {
+                let occurrences: Vec<_> = matched
+                    .matches
+                    .iter()
+                    .filter(|matched| {
+                        matched
+                            .sources
+                            .iter()
+                            .any(|source| source.source.part == part)
+                    })
+                    .collect();
+                assert!(!occurrences.is_empty(), "tool {name}, component {part}");
+                assert!(
+                    occurrences
+                        .iter()
+                        .all(|matched| document.map.project_match(matched).is_empty()),
+                    "tool {name}, component {part}"
+                );
+            }
+            let named = crate::search_query::QueryPlan::compile(
+                &format!("toolcall:{name}"),
+                crate::search_query::VisibilitySearch::Visible,
+                DisplayOptions::SHOW_ALL,
+            )
+            .unwrap()
+            .matches(&projection);
+            assert!(named.is_match);
+            assert!(
+                document
+                    .map
+                    .project_matches(&named.matches)
+                    .iter()
+                    .any(|ranges| !ranges.is_empty()),
+                "normalized tool name {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn serialized_json_tool_queries_project_escaped_leaves_and_plain_siblings() {
+        let input = serde_json::json!({
+            "encoded":r#"{"first":"\u0061lpha\n","second":"alpha"}"#,
+            "sibling":"gamma",
+        });
+        let mut session = empty_session(
+            Agent::Codex,
+            vec![SessionCell::ToolCall {
+                tool: "mcp__nested".to_owned(),
+                raw_name: "mcp__nested".to_owned(),
+                summary: String::new(),
+                input: input.clone(),
+                status: crate::parse::ToolStatus::Completed,
+                timestamp: None,
+            }],
+        );
+        session.search_fields.push_tool_call(&input);
+        let projection = crate::search_projection::SearchProjection::from_session(&session);
+        let document = super::render_session_document_with_options(
+            &session,
+            &Theme::default(),
+            None,
+            SessionRenderOptions::new(DisplayOptions::SHOW_ALL),
+        );
+        for (query, expected) in [
+            ("toolcall:alpha", vec![r"\\u0061lpha", "alpha"]),
+            ("toolcall:gamma", vec!["gamma"]),
+        ] {
+            let matched = crate::search_query::QueryPlan::compile(
+                query,
+                crate::search_query::VisibilitySearch::Visible,
+                DisplayOptions::SHOW_ALL,
+            )
+            .unwrap()
+            .matches(&projection);
+            assert!(matched.is_match, "query {query}");
+            let ranges = document.map.project_matches(&matched.matches);
+            assert_eq!(ranges.len(), expected.len(), "query {query}");
+            let text: Vec<_> = ranges
+                .iter()
+                .map(|ranges| {
+                    assert_eq!(ranges.len(), 1, "query {query}");
+                    &document.map.plain[ranges[0].clone()]
+                })
+                .collect();
+            assert_eq!(text, expected, "query {query}");
+            let layout = crate::tui::text_layout::LayoutDocument::new(&document.text, 20);
+            assert!(ranges
+                .iter()
+                .flatten()
+                .all(|range| !layout.locate(range.clone()).is_empty()));
+        }
+    }
+
+    #[test]
+    fn claude_fixture_tool_queries_map_displayed_commands_and_normalized_labels() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sessions/claude/rich_content.jsonl");
+        let mut session = crate::parse::parse_claude_session_file(&path)
+            .unwrap()
+            .unwrap();
+        for legacy in [false, true] {
+            if legacy {
+                session.cells.clear();
+            }
+            let document = super::render_session_document_with_options(
+                &session,
+                &Theme::default(),
+                None,
+                SessionRenderOptions::new(DisplayOptions::SHOW_ALL),
+            );
+            for (query, expected) in [("toolcall:cargo", "cargo"), ("toolcall:Read", "read")] {
+                let (is_match, ranges) = query_display_ranges(&session, &document, query);
+                assert!(is_match, "query {query}, legacy {legacy}");
+                assert_eq!(ranges.len(), 1, "query {query}, legacy {legacy}");
+                assert_eq!(&document.map.plain[ranges[0].clone()], expected);
+            }
+            let (is_match, ranges) = query_display_ranges(&session, &document, "toolcall:module");
+            assert!(is_match);
+            assert!(
+                ranges.is_empty(),
+                "hidden Bash description stays source-only, legacy {legacy}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_user_query_preserves_individual_identical_message_occurrences() {
+        let mut session = empty_session(
+            Agent::Claude,
+            vec![
+                SessionCell::Message {
+                    role: MessageRole::User,
+                    content: "same".to_owned(),
+                    timestamp: None,
+                },
+                SessionCell::Message {
+                    role: MessageRole::User,
+                    content: "same".to_owned(),
+                    timestamp: None,
+                },
+            ],
+        );
+        session.search_fields.user = vec!["same".to_owned(), "same".to_owned()];
+        let projection = crate::search_projection::SearchProjection::from_session(&session);
+        let matched = crate::search_query::QueryPlan::compile(
+            "user:same",
+            crate::search_query::VisibilitySearch::All,
+            DisplayOptions::SHOW_ALL,
+        )
+        .unwrap()
+        .matches(&projection);
+        assert_eq!(matched.matches.len(), 2);
+        assert!(matched
+            .matches
+            .iter()
+            .all(|matched| matched.sources.len() == 1));
+        let document = super::render_session_document_with_options(
+            &session,
+            &Theme::default(),
+            None,
+            SessionRenderOptions::new(DisplayOptions::SHOW_ALL),
+        );
+        let displayed: Vec<_> = matched
+            .matches
+            .iter()
+            .map(|matched| document.map.project_match(matched))
+            .collect();
+        assert_eq!(displayed.len(), 2);
+        assert!(displayed.iter().all(|ranges| ranges.len() == 1));
+        assert_ne!(displayed[0], displayed[1]);
+    }
+
+    #[test]
+    fn native_claude_summaries_project_to_preview_bodies_without_sidecar_matches() {
+        crate::settings::isolate_config_root_for_tests();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("native-summaries.jsonl");
+        let body = "# Native\n\n**nativeNeedle** &amp; entity";
+        let records = [
+            serde_json::json!({"type":"user", "sessionId":"native-summary", "message":{"role":"user", "content":"initial request"}}),
+            serde_json::json!({"type":"assistant", "message":{"role":"assistant", "content":"ordinary reply"}}),
+            serde_json::json!({"type":"system", "subtype":"away_summary", "content":body}),
+            serde_json::json!({"type":"system", "subtype":"away_summary", "content":body}),
+        ];
+        std::fs::write(
+            &path,
+            records
+                .iter()
+                .map(serde_json::Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let session = crate::parse::parse_claude_session_file(&path)
+            .unwrap()
+            .unwrap();
+        let fingerprint = Fingerprint {
+            line_count: 4,
+            last_line_sha256: "test".to_owned(),
+        };
+        let summaries = SummarySources {
+            claude_autosummaries: crate::parse::claude::read_claude_autosummaries(&path)
+                .unwrap()
+                .into_iter()
+                .map(|summary| ClaudeAutosummaryPreview {
+                    body: summary.body,
+                    generated_at: summary.timestamp,
+                })
+                .collect(),
+            codex_autosummary: Some(CodexAutosummaryPreview {
+                body: "nativeNeedle ExternalOnlyNeedle".to_owned(),
+                updated_at: None,
+            }),
+            aics_sidecar: Some(AicsSummaryPreview {
+                sidecar: SummarySidecar::new(
+                    &path,
+                    &fingerprint,
+                    SummarizeBackend::Claude,
+                    "nativeNeedle SidecarOnlyNeedle".to_owned(),
+                ),
+                fingerprint,
+            }),
+        };
+        let options = DisplayOptions {
+            hide_agent_replies: true,
+            ..DisplayOptions::default()
+        };
+        let document = super::render_composite_document_with_options(
+            Some(&session),
+            &summaries,
+            &Theme::default(),
+            None,
+            false,
+            options,
+        );
+        assert_eq!(document.map.plain.matches("nativeNeedle").count(), 4);
+        let projection = crate::search_projection::SearchProjection::from_session(&session);
+        for query in ["nativeNeedle", "agent:nativeNeedle"] {
+            let plan = crate::search_query::QueryPlan::compile(
+                query,
+                crate::search_query::VisibilitySearch::Visible,
+                options,
+            )
+            .unwrap();
+            let matched = plan.matches(&projection);
+            assert!(matched.is_match);
+            assert_eq!(matched.matches.len(), 2);
+            let ranges: Vec<_> = matched
+                .matches
+                .iter()
+                .flat_map(|matched| document.map.project_match(matched))
+                .collect();
+            assert_eq!(ranges.len(), 2);
+            assert!(ranges
+                .iter()
+                .all(|range| &document.map.plain[range.clone()] == "nativeNeedle"));
+            let layout = crate::tui::text_layout::LayoutDocument::new(&document.text, 20);
+            assert!(ranges
+                .iter()
+                .all(|range| !layout.locate(range.clone()).is_empty()));
+        }
+        for query in ["SidecarOnlyNeedle", "ExternalOnlyNeedle"] {
+            let matched = crate::search_query::QueryPlan::compile(
+                query,
+                crate::search_query::VisibilitySearch::All,
+                options,
+            )
+            .unwrap()
+            .matches(&projection);
+            assert!(!matched.is_match);
+            assert!(matched.matches.is_empty());
+            assert!(document.map.plain.contains(query));
+        }
+    }
+
+    #[test]
+    fn summary_only_fallback_maps_native_records_in_cells_and_legacy_messages() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sessions/claude/summary_session.jsonl");
+        let mut session = crate::parse::parse_claude_session_file(&path)
+            .unwrap()
+            .unwrap();
+        for legacy in [false, true] {
+            if legacy {
+                session.cells.clear();
+            }
+            let projection = crate::search_projection::SearchProjection::from_session(&session);
+            let document = super::render_session_document_with_options(
+                &session,
+                &Theme::default(),
+                None,
+                SessionRenderOptions::new(DisplayOptions::SHOW_ALL),
+            );
+            for (query, expected) in [("rotation", 1), ("Invalid", 2)] {
+                let matched = crate::search_query::QueryPlan::compile(
+                    query,
+                    crate::search_query::VisibilitySearch::All,
+                    DisplayOptions::SHOW_ALL,
+                )
+                .unwrap()
+                .matches(&projection);
+                assert_eq!(
+                    matched.matches.len(),
+                    expected,
+                    "query {query}, legacy {legacy}"
+                );
+                for occurrence in matched.matches {
+                    let ranges = document.map.project_match(&occurrence);
+                    assert_eq!(ranges.len(), 1, "query {query}, legacy {legacy}");
+                    assert!(document.map.plain[ranges[0].clone()].eq_ignore_ascii_case(query));
+                }
+            }
+            assert!(document
+                .map
+                .origins
+                .iter()
+                .all(|origin| origin.source.source.block
+                    == crate::search_match::SourceBlock::Context));
+        }
+    }
+
+    #[test]
+    fn summary_fallback_preserves_nonadjacent_repeated_record_locations() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("summary-only.jsonl");
+        let records: Vec<_> = ["**alpha**", "**alpha**", "beta", "**alpha**"]
+            .into_iter()
+            .map(|body| serde_json::json!({"type":"summary", "summary":body}).to_string())
+            .collect();
+        std::fs::write(&path, records.join("\n")).unwrap();
+        let session = crate::parse::parse_claude_session_file(&path)
+            .unwrap()
+            .unwrap();
+        for legacy in [false, true] {
+            let mut session = session.clone();
+            if legacy {
+                session.cells.clear();
+            }
+            let document = super::render_session_document_with_options(
+                &session,
+                &Theme::default(),
+                None,
+                SessionRenderOptions::new(DisplayOptions::SHOW_ALL),
+            );
+            let mapped: Vec<_> = [0, 1, 3]
+                .into_iter()
+                .map(|index| {
+                    document.map.project(&crate::search_match::SourceRange {
+                        source: crate::search_match::SourceId::new(
+                            crate::search_match::SourceBlock::Context,
+                            format!("native_summary/{index}"),
+                        ),
+                        range: 2..7,
+                    })
+                })
+                .collect();
+            assert!(mapped.iter().all(|ranges| ranges.len() == 1));
+            assert_eq!(mapped[0], mapped[1]);
+            assert_ne!(mapped[0], mapped[2]);
+            assert_eq!(document.map.plain.matches("alpha").count(), 2);
+            let projection = crate::search_projection::SearchProjection::from_session(&session);
+            let matched = crate::search_query::QueryPlan::compile(
+                "alpha",
+                crate::search_query::VisibilitySearch::All,
+                DisplayOptions::SHOW_ALL,
+            )
+            .unwrap()
+            .matches(&projection);
+            assert_eq!(matched.matches.len(), 3);
+            let mut occurrences: Vec<_> = matched
+                .matches
+                .iter()
+                .map(|matched| document.map.project_match(matched))
+                .collect();
+            occurrences.sort_by_key(|ranges| ranges[0].start);
+            occurrences.dedup();
+            assert_eq!(occurrences.len(), 2);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual renderer provenance timing"]
+    fn renderer_provenance_projection_timing() {
+        let cells = (0..500).map(|_| SessionCell::ToolCall {
+            tool: "mcp__profile".to_owned(), raw_name: "mcp__profile".to_owned(), summary: String::new(),
+            input: serde_json::json!({"items":["alpha beta gamma delta epsilon", "alpha beta gamma delta epsilon", "alpha beta gamma delta epsilon", "alpha beta gamma delta epsilon"]}),
+            status: crate::parse::ToolStatus::Completed, timestamp: None,
+        }).collect();
+        let session = empty_session(Agent::Codex, cells);
+        let start = std::time::Instant::now();
+        let document = super::render_session_document_with_options(
+            &session,
+            &Theme::default(),
+            None,
+            SessionRenderOptions::new(DisplayOptions::SHOW_ALL),
+        );
+        let render_time = start.elapsed();
+        let occurrences: Vec<_> = (0..500)
+            .flat_map(|index| {
+                (0..4).map(move |leaf| crate::search_match::SourceMatch {
+                    sources: vec![crate::search_match::SourceRange {
+                        source: crate::search_match::SourceId::new(
+                            crate::search_match::SourceBlock::Cell(index),
+                            format!("input/items/{leaf}"),
+                        ),
+                        range: 0..5,
+                    }],
+                })
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        let ranges: Vec<_> = occurrences
+            .iter()
+            .map(|matched| document.map.project_match(matched))
+            .collect();
+        let projection_time = start.elapsed();
+        let start = std::time::Instant::now();
+        let bulk_ranges = document.map.project_matches(&occurrences);
+        let bulk_projection_time = start.elapsed();
+        assert_eq!(bulk_ranges, ranges);
+        assert!(ranges
+            .iter()
+            .all(|ranges| ranges.len() == 1 && &document.map.plain[ranges[0].clone()] == "alpha"));
+        println!("renderer provenance timing cells={} readable_bytes={} origins={} occurrences={} render_ms={:.3} project_ms={:.3} bulk_project_ms={:.3}", session.cells.len(), document.map.plain.len(), document.map.origins.len(), occurrences.len(), render_time.as_secs_f64() * 1000.0, projection_time.as_secs_f64() * 1000.0, bulk_projection_time.as_secs_f64() * 1000.0);
+    }
+
+    #[test]
+    fn provider_fixture_corpus_preserves_source_render_and_layout_coordinates() {
+        crate::settings::isolate_config_root_for_tests();
+        let fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sessions");
+        let mut samples: Vec<(Agent, PathBuf)> = [
+            (Agent::Claude, "claude/basic_session.jsonl"),
+            (Agent::Claude, "claude/rich_content.jsonl"),
+            (Agent::Claude, "claude/named_session.jsonl"),
+            (Agent::Claude, "claude/summary_session.jsonl"),
+            (Agent::Codex, "codex/minimal.jsonl"),
+            (Agent::Codex, "codex/internal_context.jsonl"),
+            (Agent::Codex, "codex/latest_format.jsonl"),
+            (Agent::Codex, "codex/old_format.jsonl"),
+            (Agent::Codex, "codex/new_format.jsonl"),
+            (Agent::Antigravity, "antigravity/brain/aaaa1111-bbbb-2222-cccc-333344445555/.system_generated/logs/transcript.jsonl"),
+        ].into_iter().map(|(agent, path)| (agent, fixture_root.join(path))).collect();
+        // Explicit paths enable the same read-only coordinate audit on local
+        // session samples; normal test runs remain confined to fixtures.
+        for (agent, key) in [
+            (Agent::Claude, "AICS_PROVENANCE_SAMPLE_CLAUDE"),
+            (Agent::Codex, "AICS_PROVENANCE_SAMPLE_CODEX"),
+            (Agent::Antigravity, "AICS_PROVENANCE_SAMPLE_ANTIGRAVITY"),
+        ] {
+            if let Some(path) = std::env::var_os(key) {
+                samples.push((agent, PathBuf::from(path)));
+            }
+        }
+        let schema = crate::index::schema::IndexSchema::new();
+        let index = tantivy::Index::create_in_ram(schema.schema.clone());
+        crate::index::schema::IndexSchema::register_tokenizers(&index);
+        for (agent, path) in samples {
+            let session = crate::parse::parse_session_file(agent, &path)
+                .unwrap()
+                .expect("transcript fixture contains a session");
+            let projection = crate::search_projection::SearchProjection::from_session(&session);
+            let summaries = SummarySources {
+                claude_autosummaries: if agent == Agent::Claude {
+                    crate::parse::claude::read_claude_autosummaries(&path)
+                        .unwrap()
+                        .into_iter()
+                        .map(|summary| ClaudeAutosummaryPreview {
+                            body: summary.body,
+                            generated_at: summary.timestamp,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+                ..SummarySources::default()
+            };
+            let mut query_plans = Vec::new();
+            for field in ["content", "user", "agent", "toolcall", "toolresult"] {
+                let Some(values) = projection.fields.get(field) else {
+                    continue;
+                };
+                let mut terms = std::collections::BTreeSet::new();
+                let mut analyzer = index
+                    .tokenizer_for_field(schema.schema.get_field(field).unwrap())
+                    .unwrap();
+                for value in values {
+                    analyzer.token_stream(&value.text).process(&mut |token| {
+                        if terms.len() < 3 && token.text.len() <= 40 {
+                            terms.insert(token.text.clone());
+                        }
+                    });
+                }
+                for term in terms {
+                    let query = format!("{field}:\"{term}\"");
+                    let plan = crate::search_query::QueryPlan::compile(
+                        &query,
+                        crate::search_query::VisibilitySearch::All,
+                        DisplayOptions::SHOW_ALL,
+                    )
+                    .unwrap();
+                    query_plans.push((query, plan));
+                }
+            }
+            for options in [DisplayOptions::SHOW_ALL, DisplayOptions::default()] {
+                let document = super::render_composite_document_with_options(
+                    Some(&session),
+                    &summaries,
+                    &Theme::default(),
+                    None,
+                    false,
+                    options,
+                );
+                assert!(
+                    document
+                        .map
+                        .origins
+                        .iter()
+                        .all(|origin| origin.rendered.end <= document.map.plain.len()),
+                    "origin bounds: {}",
+                    path.display()
+                );
+                for origin in &document.map.origins {
+                    if let Some(segment) = projection
+                        .segments
+                        .iter()
+                        .find(|segment| segment.source == origin.source.source)
+                    {
+                        assert!(
+                            segment.visibility.is_visible(options),
+                            "hidden source leaked at {}: {:?}",
+                            path.display(),
+                            origin.source
+                        );
+                        assert!(
+                            origin.source.range.end <= segment.text.len(),
+                            "source bounds at {}: {:?}",
+                            path.display(),
+                            origin.source
+                        );
+                    }
+                }
+                let mut matches = 0;
+                let mut displayed = 0;
+                let mut all_ranges = Vec::new();
+                for (query, plan) in &query_plans {
+                    let matched = plan.matches(&projection);
+                    assert!(
+                        matched.is_match,
+                        "sampled query {query}: {}",
+                        path.display()
+                    );
+                    matches += matched.matches.len();
+                    for occurrence in matched.matches {
+                        let ranges = document.map.project_match(&occurrence);
+                        displayed += usize::from(!ranges.is_empty());
+                        for range in ranges {
+                            assert!(
+                                document.map.plain.is_char_boundary(range.start)
+                                    && document.map.plain.is_char_boundary(range.end),
+                                "UTF-8 coordinates for {query}: {}",
+                                path.display()
+                            );
+                            all_ranges.push(range);
+                        }
+                    }
+                }
+                for width in [20, 40, 80, 120] {
+                    let layout =
+                        crate::tui::text_layout::LayoutDocument::new(&document.text, width);
+                    assert!(
+                        all_ranges
+                            .iter()
+                            .all(|range| !layout.locate(range.clone()).is_empty()),
+                        "display ranges have visual rows at width {width}: {}",
+                        path.display()
+                    );
+                }
+                println!("provenance sample agent={agent:?} source_bytes={} cells={} readable_bytes={} origins={} queries={} occurrences={} displayed={} options={options:?}", std::fs::metadata(&path).unwrap().len(), session.cells.len(), document.map.plain.len(), document.map.origins.len(), query_plans.len(), matches, displayed);
+            }
+        }
     }
 
     #[test]

@@ -28,6 +28,7 @@ enum SettingsField {
     SessionSeparator,
     SnippetLineCount,
     HistorySaveCount,
+    ViewerFindJump,
     ClaudeCommand,
     ClaudeArgs,
     CodexCommand,
@@ -44,6 +45,7 @@ pub struct SettingsModalState {
     separator_input: Input,
     snippet_line_count_input: Input,
     history_save_count_input: Input,
+    viewer_find_jump: bool,
     claude_command_input: Input,
     claude_args_input: Input,
     codex_command_input: Input,
@@ -71,6 +73,7 @@ impl SettingsModalState {
                 .with_value(settings.snippet_line_count.to_string()),
             history_save_count_input: Input::default()
                 .with_value(settings.history_save_count.to_string()),
+            viewer_find_jump: settings.viewer_find_jump,
             claude_command_input: Input::default().with_value(settings.claude_command.clone()),
             claude_args_input: Input::default().with_value(settings.claude_args.clone()),
             codex_command_input: Input::default().with_value(settings.codex_command.clone()),
@@ -139,6 +142,12 @@ impl SettingsModalState {
             SettingsField::HistorySaveCount => {
                 self.history_save_count_input.handle_event(&Event::Key(key));
             }
+            SettingsField::ViewerFindJump => match key.code {
+                KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter => {
+                    self.viewer_find_jump = !self.viewer_find_jump;
+                }
+                _ => {}
+            },
             SettingsField::ClaudeCommand => {
                 self.claude_command_input.handle_event(&Event::Key(key));
             }
@@ -209,6 +218,24 @@ impl SettingsModalState {
                             }
                         }
                         SettingsField::Theme => {}
+                        SettingsField::ViewerFindJump if was_selected => {
+                            let rows = settings_rows(area);
+                            match inline_radio_hit_at(
+                                "Find: jump while typing",
+                                &["Off".to_owned(), "On".to_owned()],
+                                usize::from(self.viewer_find_jump),
+                                rows[9],
+                                column,
+                                row,
+                            ) {
+                                Some(RadioHit::Item(index)) => self.viewer_find_jump = index == 1,
+                                Some(RadioHit::Previous | RadioHit::Next) => {
+                                    self.viewer_find_jump = !self.viewer_find_jump
+                                }
+                                None => {}
+                            }
+                        }
+                        SettingsField::ViewerFindJump => {}
                         SettingsField::EditSummarizer => {
                             self.summarizer = Some(SummarizerModalState::new(
                                 &self.base.summarize_command,
@@ -302,6 +329,26 @@ impl SettingsModalState {
                 .style(Style::default().fg(theme.focus_border)),
             rows[8],
         );
+
+        let find_focused = self.field == SettingsField::ViewerFindJump;
+        let find_line = inline_radio_row(
+            "Find: jump while typing",
+            &["Off".to_owned(), "On".to_owned()],
+            usize::from(self.viewer_find_jump),
+            rows[9].width,
+            theme,
+            find_focused,
+        );
+        frame.render_widget(Paragraph::new(find_line), rows[9]);
+        if find_focused {
+            set_inline_radio_cursor(
+                frame,
+                "Find: jump while typing",
+                &["Off".to_owned(), "On".to_owned()],
+                usize::from(self.viewer_find_jump),
+                rows[9],
+            );
+        }
 
         let claude_cmd_focused = self.field == SettingsField::ClaudeCommand;
         render_inline_text_field(
@@ -513,6 +560,7 @@ impl SettingsModalState {
             .parse::<usize>()
             .unwrap_or(self.base.snippet_line_count);
         Settings {
+            viewer_find_jump: self.viewer_find_jump,
             theme: *self.theme.current(),
             claude_command: self.claude_command_input.value().to_owned(),
             claude_args: self.claude_args_input.value().to_owned(),
@@ -569,7 +617,7 @@ fn settings_rows_from_inner(inner: Rect) -> Vec<Rect> {
         Constraint::Length(1), // 6  Snippet Lines inline
         Constraint::Length(1), // 7  Search History Count inline
         Constraint::Length(1), // 8  divider
-        Constraint::Length(1), // 9  spacing
+        Constraint::Length(1), // 9  Find: jump while typing
         Constraint::Length(1), // 10 Claude Code Command inline
         Constraint::Length(1), // 11 Claude Code Args inline
         Constraint::Length(1), // 12 spacing
@@ -597,6 +645,7 @@ fn settings_field_at(area: Rect, column: u16, row: u16) -> Option<SettingsField>
         (5, SettingsField::SessionSeparator),
         (6, SettingsField::SnippetLineCount),
         (7, SettingsField::HistorySaveCount),
+        (9, SettingsField::ViewerFindJump),
         (10, SettingsField::ClaudeCommand),
         (11, SettingsField::ClaudeArgs),
         (13, SettingsField::CodexCommand),
@@ -619,6 +668,7 @@ fn settings_field_cursor(selected: SettingsField) -> RingCursor<SettingsField> {
         SettingsField::SessionSeparator,
         SettingsField::SnippetLineCount,
         SettingsField::HistorySaveCount,
+        SettingsField::ViewerFindJump,
         SettingsField::ClaudeCommand,
         SettingsField::ClaudeArgs,
         SettingsField::CodexCommand,
@@ -2257,6 +2307,23 @@ mod tests {
         let outcome = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
 
         assert!(matches!(outcome, SettingsOutcome::Stay));
+    }
+
+    #[test]
+    fn viewer_find_jump_setting_supports_focus_toggle_and_save() {
+        let settings = Settings::default();
+        let mut state = SettingsModalState::new(&settings);
+        state.field.set(&SettingsField::HistorySaveCount);
+        state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(*state.field.current(), SettingsField::ViewerFindJump);
+        state.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let SettingsOutcome::Apply(saved) =
+            state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        else {
+            panic!("expected saved settings")
+        };
+        assert!(!saved.viewer_find_jump);
+        assert!(settings.viewer_find_jump);
     }
 
     #[test]

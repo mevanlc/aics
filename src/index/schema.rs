@@ -24,6 +24,9 @@ const VIS_PROJECT_DOCS_FIELD: &str = "_vis_projectdocs";
 const VIS_USER_PROJECT_DOCS_FIELD: &str = "_vis_user_projectdocs";
 const VIS_USER_SKILL_FIELD: &str = "_vis_user_skill";
 const VIS_USER_INTERNAL_CONTEXT_FIELD: &str = "_vis_user_internal_context";
+const VIS_USER_TOOL_CALL_FIELD: &str = "_vis_user_toolcall";
+const VIS_USER_TOOL_CALL_RESULT_FIELD: &str = "_vis_user_toolcall_result";
+const SEARCH_PROVENANCE_FIELD: &str = "_search_provenance";
 const WORKING_DIR_FIELD: &str = "working_dir";
 const WORKING_DIR_TOKENIZER: &str = "working_dir";
 const FILE_PATH_FIELD: &str = "file_path";
@@ -51,6 +54,9 @@ pub struct IndexSchema {
     pub vis_user_project_docs: Field,
     pub vis_user_skill: Field,
     pub vis_user_internal_context: Field,
+    pub vis_user_tool_call: Field,
+    pub vis_user_tool_call_result: Field,
+    pub search_provenance: Field,
     pub working_dir: Field,
     pub file_path: Field,
     pub modified_ts: Field,
@@ -71,7 +77,7 @@ impl IndexSchema {
                 .set_tokenizer("default")
                 .set_index_option(IndexRecordOption::WithFreqsAndPositions),
         );
-        let working_dir_options = TextOptions::default().set_indexing_options(
+        let working_dir_options = TextOptions::default().set_stored().set_indexing_options(
             TextFieldIndexing::default()
                 .set_tokenizer(WORKING_DIR_TOKENIZER)
                 .set_index_option(IndexRecordOption::Basic),
@@ -105,7 +111,13 @@ impl IndexSchema {
             builder.add_text_field(VIS_USER_PROJECT_DOCS_FIELD, content_options.clone());
         let vis_user_skill = builder.add_text_field(VIS_USER_SKILL_FIELD, content_options.clone());
         let vis_user_internal_context =
-            builder.add_text_field(VIS_USER_INTERNAL_CONTEXT_FIELD, content_options);
+            builder.add_text_field(VIS_USER_INTERNAL_CONTEXT_FIELD, content_options.clone());
+        let vis_user_tool_call =
+            builder.add_text_field(VIS_USER_TOOL_CALL_FIELD, content_options.clone());
+        let vis_user_tool_call_result =
+            builder.add_text_field(VIS_USER_TOOL_CALL_RESULT_FIELD, content_options);
+        let search_provenance =
+            builder.add_text_field(SEARCH_PROVENANCE_FIELD, stored_text.clone());
         let working_dir = builder.add_text_field(WORKING_DIR_FIELD, working_dir_options);
         let file_path = builder.add_text_field(FILE_PATH_FIELD, STRING | STORED);
         let modified_ts = builder.add_u64_field(MODIFIED_TS_FIELD, numeric_options);
@@ -131,6 +143,9 @@ impl IndexSchema {
             vis_user_project_docs,
             vis_user_skill,
             vis_user_internal_context,
+            vis_user_tool_call,
+            vis_user_tool_call_result,
+            search_provenance,
             working_dir,
             file_path,
             modified_ts,
@@ -199,6 +214,15 @@ impl IndexSchema {
             vis_user_internal_context: schema
                 .get_field(VIS_USER_INTERNAL_CONTEXT_FIELD)
                 .context("missing visibility field")?,
+            vis_user_tool_call: schema
+                .get_field(VIS_USER_TOOL_CALL_FIELD)
+                .context("missing visibility field")?,
+            vis_user_tool_call_result: schema
+                .get_field(VIS_USER_TOOL_CALL_RESULT_FIELD)
+                .context("missing visibility field")?,
+            search_provenance: schema
+                .get_field(SEARCH_PROVENANCE_FIELD)
+                .context("missing search provenance")?,
             working_dir: schema
                 .get_field(WORKING_DIR_FIELD)
                 .context("missing working_dir field")?,

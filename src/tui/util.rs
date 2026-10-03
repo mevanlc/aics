@@ -402,6 +402,7 @@ pub struct FullLineBackgroundParagraph<'a> {
     text: Text<'a>,
     block: Option<Block<'a>>,
     scroll: usize,
+    prewrapped: bool,
 }
 
 impl<'a> FullLineBackgroundParagraph<'a> {
@@ -410,6 +411,15 @@ impl<'a> FullLineBackgroundParagraph<'a> {
             text,
             block: None,
             scroll: 0,
+            prewrapped: false,
+        }
+    }
+
+    /// Draw rows already produced by the shared layout transform.
+    pub fn prewrapped(text: Text<'a>) -> Self {
+        Self {
+            prewrapped: true,
+            ..Self::new(text)
         }
     }
 
@@ -427,6 +437,25 @@ impl<'a> FullLineBackgroundParagraph<'a> {
 impl Widget for FullLineBackgroundParagraph<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let inner = self.block.as_ref().map_or(area, |block| block.inner(area));
+        if self.prewrapped {
+            let mut visible = self.text;
+            visible.lines = visible
+                .lines
+                .into_iter()
+                .skip(self.scroll)
+                .take(usize::from(inner.height))
+                .collect();
+            if let Some(block) = self.block {
+                block.render(area, buf);
+            }
+            super::text_layout::render_prepared(&visible, inner, buf, 0);
+            for (row, line) in visible.lines.iter().enumerate() {
+                if let Some(bg) = line.style.bg.filter(|bg| *bg != Color::Reset) {
+                    fill_reset_background_cells(inner, row as u16, bg, buf);
+                }
+            }
+            return;
+        }
         let paragraph = Paragraph::new(self.text.clone())
             .wrap(Wrap { trim: false })
             .scroll((self.scroll.min(u16::MAX as usize) as u16, 0));

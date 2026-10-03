@@ -16,6 +16,7 @@ pub mod rules_actions;
 pub mod search;
 pub mod settings;
 pub mod statusline;
+pub mod text_layout;
 pub mod theme;
 pub mod util;
 pub mod viewer;

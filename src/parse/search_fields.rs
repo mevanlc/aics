@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 use url::Url;
@@ -15,9 +15,22 @@ pub struct SessionSearchFields {
     pub agent: Vec<String>,
     pub tool_call: Vec<String>,
     pub tool_result: Vec<String>,
+    /// Native transcript summaries keep their source-record order, including
+    /// identical records, so index matches can locate their summary sections.
+    pub native_summaries: Vec<String>,
+    /// Raw components discarded by Claude's legacy display cells, keyed by the
+    /// corresponding cell index. Search and render provenance share these
+    /// records without changing the cells' serialized/exported representation.
+    pub tool_call_sources: BTreeMap<usize, ToolCallSource>,
     pub dirs: BTreeSet<String>,
     pub files: BTreeSet<String>,
     pub paths: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallSource {
+    pub raw_name: String,
+    pub input: Value,
 }
 
 impl SessionSearchFields {
@@ -27,6 +40,11 @@ impl SessionSearchFields {
 
     pub fn push_agent(&mut self, text: impl Into<String>) {
         push_text(&mut self.agent, text);
+    }
+
+    pub fn push_native_summary(&mut self, text: String) {
+        self.push_agent(text.clone());
+        self.native_summaries.push(text);
     }
 
     pub fn push_tool_call(&mut self, value: &Value) {

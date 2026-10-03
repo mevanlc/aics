@@ -44,7 +44,9 @@ use crate::rules::{
 };
 use crate::scan::{is_default_antigravity_home, AgentHomes, SessionRoots};
 use crate::search_history::{HistoryDwell, SearchHistory};
-use crate::search_query::VisibilitySearch;
+use crate::search_match::{DocumentMap, SourceBlock, SourceId};
+use crate::search_projection::SearchProjection;
+use crate::search_query::{QueryPlan, VisibilitySearch};
 use crate::settings::{
     DefaultFilter, DefaultFilterScope, DisplayOptions, Settings, SettingsPatch, ThemeName,
     ViewerFilterExclusion,
@@ -65,16 +67,17 @@ use crate::tui::profile;
 use crate::tui::rules_actions::{self, RulesAction, RulesActionMenuState, RulesActionOutcome};
 use crate::tui::settings::{SettingsModalState, SettingsOutcome};
 use crate::tui::statusline;
+use crate::tui::text_layout::LayoutDocument;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
-    block_title, highlight_spans, parse_highlighted_html, session_display_title,
-    sticky_header_for_scroll, sticky_rows_from_line_markers, wrapped_text_height, StickyHeader,
-    StickyRowMarker, STICKY_HEADER_HEIGHT,
+    block_title, parse_highlighted_html, session_display_title, sticky_header_for_scroll,
+    StickyHeader, StickyRowMarker, STICKY_HEADER_HEIGHT,
 };
+#[cfg(test)]
+use crate::tui::viewer::collect_message_rows;
 use crate::tui::viewer::{
-    collect_match_rows_in_text, collect_message_rows, message_row_for_scroll, next_match_index,
-    previous_match_index, scroll_for_match, MatchDirection, MessageDirection, MessageJumpScope,
-    ViewerOutcome, ViewerState,
+    message_row_for_scroll, next_match_index, previous_match_index, scroll_for_match,
+    MatchDirection, MessageDirection, MessageJumpScope, ViewerOutcome, ViewerState,
 };
 use crate::tui::viewer_exclusion::ViewerExclusionDialog;
 use crate::tui::{keymap_hint, layout, list, preview, search};
@@ -248,14 +251,23 @@ impl RulesPreviewState {
 
 struct PreviewRenderCache {
     path: PathBuf,
+    session: Option<Session>,
+    summaries: SummarySources,
+    summary_inflight: bool,
+    base_text: Text<'static>,
+    sticky_markers: Vec<crate::tui::util::StickyLineMarker>,
     query: String,
     width: u16,
     theme_name: ThemeName,
     display_options: DisplayOptions,
-    wrapped_height: Option<usize>,
-    text: Text<'static>,
+    visibility: VisibilitySearch,
+    layout: LayoutDocument,
+    map: DocumentMap,
+    projection: SearchProjection,
+    match_ranges: Vec<Vec<std::ops::Range<usize>>>,
     match_rows: Vec<usize>,
     sticky_rows: Vec<StickyRowMarker>,
+    blocks: Vec<preview::DisplayBlock>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -263,10 +275,9 @@ struct PreviewResizeDrag {
     areas: layout::AppLayout,
 }
 
-pub struct PreviewRenderState<'a> {
-    pub text: &'a Text<'static>,
+pub struct PreviewRenderState {
+    pub text: Text<'static>,
     pub max_scroll: usize,
-    pub active_match_row: Option<usize>,
     pub sticky_header: Option<StickyHeader>,
 }
 
@@ -282,6 +293,18 @@ enum SnippetMode {
     ContentPreview,
     AicsSummary,
     BuiltinSummary,
+}
+
+struct SummarySnippet {
+    body: String,
+    native_source: Option<usize>,
+}
+
+struct SnippetQueryPlanCache {
+    query: String,
+    visibility: VisibilitySearch,
+    display_options: DisplayOptions,
+    plan: Option<QueryPlan>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,6 +462,7 @@ pub struct App {
     preview_render_cache: Option<PreviewRenderCache>,
     preview_active_match: Option<usize>,
     committed_query: String,
+    snippet_query_plan: Option<SnippetQueryPlanCache>,
     pending_search: bool,
     last_edit_at: Option<Instant>,
     history: Option<SearchHistory>,
@@ -537,6 +561,7 @@ impl App {
             preview_render_cache: None,
             preview_active_match: None,
             committed_query: initial_request.query,
+            snippet_query_plan: None,
             pending_search: true,
             last_edit_at: None,
             history: None,
@@ -810,11 +835,11 @@ impl App {
         self.preview_cache.get(&path).and_then(Option::as_ref)
     }
 
-    pub fn preview_render_state<'a>(
-        &'a mut self,
+    pub fn preview_render_state(
+        &mut self,
         area: Rect,
         theme: &Theme,
-    ) -> Option<PreviewRenderState<'a>> {
+    ) -> Option<PreviewRenderState> {
         let hit = self.results.get(self.selected)?;
         let agent = hit.session.agent;
         let path = hit.session.file_path.clone();
@@ -823,78 +848,143 @@ impl App {
         let width = area.width.saturating_sub(2);
         let theme_name = self.current_frame_theme_name();
         let display_options = self.display_options;
+        let visibility = self.visibility_search;
+
+        let _ = self.selected_preview();
+        self.ensure_summary_cache(agent, &path, &session_id);
+        let session = self.preview_cache.get(&path).and_then(Option::as_ref);
+        let summaries = self.summary_cache.get(&path)?;
+        let summary_inflight = self.summary_inflight.contains(&path);
 
         let cache_miss = self.preview_render_cache.as_ref().is_none_or(|cache| {
             cache.path != path
-                || cache.query != query
-                || cache.width != width
+                || cache.session.as_ref() != session
+                || cache.summaries != *summaries
+                || cache.summary_inflight != summary_inflight
                 || cache.theme_name != theme_name
                 || cache.display_options != display_options
         });
         if cache_miss {
             profile::event("preview.cache.miss");
-            let highlight_query = (!query.is_empty()).then_some(query.as_str());
-            let session = self.selected_preview().cloned();
-            self.ensure_summary_cache(agent, &path, &session_id);
             let document = preview::render_composite_document_with_options(
-                session.as_ref(),
-                self.summary_cache.get(&path)?,
+                session,
+                summaries,
                 theme,
-                highlight_query,
-                self.summary_inflight.contains(&path),
+                None,
+                summary_inflight,
                 display_options,
             );
-            let text = document.text;
-            let match_rows = collect_match_rows_in_text(&text, &query, width);
-            let sticky_rows = sticky_rows_from_line_markers(&text, &document.sticky_markers, width);
+            let layout = LayoutDocument::new(&document.text, width);
+            let sticky_rows = document
+                .sticky_markers
+                .iter()
+                .map(|marker| StickyRowMarker {
+                    row: layout
+                        .rows_for_lines(marker.line_index..marker.line_index + 1)
+                        .start,
+                    header: marker.header.clone(),
+                })
+                .collect();
             self.preview_render_cache = Some(PreviewRenderCache {
                 path: path.clone(),
+                session: session.cloned(),
+                summaries: summaries.clone(),
+                summary_inflight,
+                base_text: document.text,
+                sticky_markers: document.sticky_markers,
                 query: query.clone(),
                 width,
                 theme_name,
                 display_options,
-                wrapped_height: None,
-                text,
-                match_rows,
+                visibility,
+                layout,
+                map: document.map,
+                projection: session
+                    .map(SearchProjection::from_session)
+                    .unwrap_or_default(),
+                match_ranges: Vec::new(),
+                match_rows: Vec::new(),
                 sticky_rows,
+                blocks: document.blocks,
             });
             self.preview_active_match = None;
         } else {
             profile::event("preview.cache.hit");
         }
 
-        if self.preview_scroll > 0
-            && self
-                .preview_render_cache
-                .as_ref()
-                .is_some_and(|cache| cache.wrapped_height.is_none())
-        {
-            if let Some(cache) = self.preview_render_cache.as_mut() {
-                cache.wrapped_height = Some(wrapped_text_height(&cache.text, cache.width));
-            }
+        let cache = self.preview_render_cache.as_mut()?;
+        let layout_changed = cache.width != width;
+        if layout_changed {
+            cache.width = width;
+            cache.layout = LayoutDocument::new(&cache.base_text, width);
+            cache.sticky_rows = cache
+                .sticky_markers
+                .iter()
+                .map(|marker| StickyRowMarker {
+                    row: cache
+                        .layout
+                        .rows_for_lines(marker.line_index..marker.line_index + 1)
+                        .start,
+                    header: marker.header.clone(),
+                })
+                .collect();
         }
-
-        let cache = self.preview_render_cache.as_ref()?;
-        let max_scroll = if self.preview_scroll == 0 {
-            0
-        } else {
-            let viewport_height = area
-                .height
-                .saturating_sub(2)
-                .saturating_sub(STICKY_HEADER_HEIGHT) as usize;
-            cache
-                .wrapped_height
-                .unwrap_or_default()
-                .saturating_sub(viewport_height)
-        };
-        let active_match_row = self
+        if cache_miss || cache.query != query || cache.visibility != visibility {
+            cache.query = query;
+            cache.visibility = visibility;
+            cache.match_ranges = QueryPlan::compile(&cache.query, visibility, display_options)
+                .map(|plan| {
+                    let matches = plan.matches(&cache.projection);
+                    cache
+                        .map
+                        .project_matches(&matches.matches)
+                        .into_iter()
+                        .filter(|ranges| !ranges.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            cache.match_ranges.sort_by(|left, right| {
+                left.iter()
+                    .map(|range| (range.start, range.end))
+                    .cmp(right.iter().map(|range| (range.start, range.end)))
+            });
+            cache.match_ranges.dedup();
+            cache.match_rows = cache
+                .match_ranges
+                .iter()
+                .map(|ranges| cache.layout.row_for_offset(ranges[0].start))
+                .collect();
+            self.preview_active_match = None;
+        }
+        if layout_changed {
+            cache.match_rows = cache
+                .match_ranges
+                .iter()
+                .map(|ranges| cache.layout.row_for_offset(ranges[0].start))
+                .collect();
+        }
+        let viewport_height = area
+            .height
+            .saturating_sub(2)
+            .saturating_sub(STICKY_HEADER_HEIGHT) as usize;
+        let max_scroll = cache.layout.height().saturating_sub(viewport_height);
+        let mut text = cache.layout.text.clone();
+        let ranges: Vec<_> = cache.match_ranges.iter().flatten().cloned().collect();
+        cache
+            .layout
+            .overlay_ranges(&mut text, &ranges, theme.search_match_style());
+        if let Some(ranges) = self
             .preview_active_match
-            .and_then(|index| cache.match_rows.get(index).copied());
+            .and_then(|index| cache.match_ranges.get(index))
+        {
+            cache
+                .layout
+                .overlay_ranges(&mut text, ranges, theme.active_match_style());
+        }
         let effective_scroll = self.preview_scroll.min(max_scroll);
         Some(PreviewRenderState {
-            text: &cache.text,
+            text,
             max_scroll,
-            active_match_row,
             sticky_header: sticky_header_for_scroll(&cache.sticky_rows, effective_scroll),
         })
     }
@@ -912,13 +1002,8 @@ impl App {
     }
 
     pub fn list_snippet_line(&mut self, hit: &SearchHit, theme: &Theme) -> Line<'static> {
-        let mut line = if let Some(snippet) = self.active_summary_snippet_text(hit) {
-            Line::from(highlight_spans(
-                &snippet,
-                &self.committed_query,
-                Style::default().fg(theme.text),
-                theme.search_match_style(),
-            ))
+        let mut line = if let Some(snippet) = self.active_summary_snippet(hit) {
+            self.summary_snippet_line(hit, snippet, theme)
         } else {
             parse_highlighted_html(
                 &hit.snippet_html,
@@ -932,8 +1017,37 @@ impl App {
                 if !title.is_empty() {
                     let title_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
                     let highlight_style = title_style.patch(theme.search_match_style());
-                    let mut spans =
-                        highlight_spans(title, &self.committed_query, title_style, highlight_style);
+                    self.ensure_snippet_query_plan();
+                    let mut projection = SearchProjection::default();
+                    for field in ["content", "_vis_always"] {
+                        projection.fields.insert(
+                            field.to_owned(),
+                            vec![crate::search_projection::ProjectedText {
+                                text: title.to_owned(),
+                                origins: Vec::new(),
+                            }],
+                        );
+                    }
+                    let ranges: Vec<_> = self
+                        .snippet_query_plan
+                        .as_ref()
+                        .and_then(|cache| cache.plan.as_ref())
+                        .map(|plan| {
+                            plan.field_matches(&projection)
+                                .1
+                                .into_iter()
+                                .map(|matched| matched.range)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let mut spans = crate::tui::text_layout::highlight_ranges(
+                        &Text::from(Span::styled(title.to_owned(), title_style)),
+                        &ranges,
+                        highlight_style,
+                    )
+                    .lines
+                    .remove(0)
+                    .spans;
                     spans.push(Span::styled(": ", Style::default().fg(theme.muted)));
                     spans.append(&mut line.spans);
                     line = Line::from(spans);
@@ -1016,33 +1130,132 @@ impl App {
         Some(Line::from(spans))
     }
 
-    fn active_summary_snippet_text(&mut self, hit: &SearchHit) -> Option<String> {
+    fn ensure_snippet_query_plan(&mut self) {
+        if self.snippet_query_plan.as_ref().is_none_or(|cache| {
+            cache.query != self.committed_query
+                || cache.visibility != self.visibility_search
+                || cache.display_options != self.display_options
+        }) {
+            self.snippet_query_plan = Some(SnippetQueryPlanCache {
+                query: self.committed_query.clone(),
+                visibility: self.visibility_search,
+                display_options: self.display_options,
+                plan: QueryPlan::compile(
+                    &self.committed_query,
+                    self.visibility_search,
+                    self.display_options,
+                )
+                .ok(),
+            });
+        }
+    }
+
+    fn summary_snippet_line(
+        &mut self,
+        hit: &SearchHit,
+        snippet: SummarySnippet,
+        theme: &Theme,
+    ) -> Line<'static> {
+        let text = snippet.body.trim();
+        let trim_start = snippet.body.len() - snippet.body.trim_start().len();
+        let trim_end = trim_start + text.len();
+        let mut ranges = Vec::new();
+        if let Some(index) = snippet.native_source {
+            let session = self
+                .preview_cache
+                .entry(hit.session.file_path.clone())
+                .or_insert_with(|| {
+                    parse_session_file(hit.session.agent, &hit.session.file_path)
+                        .ok()
+                        .flatten()
+                })
+                .as_ref();
+            // Match the selected native record's identity and bytes. A sidecar,
+            // external summary, or stale body must not borrow another source's hits.
+            let projection = session
+                .filter(|session| {
+                    session.search_fields.native_summaries.get(index) == Some(&snippet.body)
+                })
+                .map(SearchProjection::from_session);
+            self.ensure_snippet_query_plan();
+            if let Some((plan, projection)) = self
+                .snippet_query_plan
+                .as_ref()
+                .and_then(|cache| cache.plan.as_ref())
+                .zip(projection.as_ref())
+            {
+                let source = SourceId::new(SourceBlock::Context, format!("native_summary/{index}"));
+                ranges = plan
+                    .matches(projection)
+                    .matches
+                    .into_iter()
+                    .flat_map(|matched| matched.sources)
+                    .filter(|matched| matched.source == source)
+                    .filter_map(|matched| {
+                        let start = matched.range.start.max(trim_start);
+                        let end = matched.range.end.min(trim_end);
+                        (start < end).then_some(start - trim_start..end - trim_start)
+                    })
+                    .collect();
+                ranges.sort_by_key(|range| (range.start, range.end));
+                ranges.dedup();
+            }
+        }
+        crate::tui::text_layout::highlight_ranges(
+            &Text::from(Span::styled(
+                text.to_owned(),
+                Style::default().fg(theme.text),
+            )),
+            &ranges,
+            theme.search_match_style(),
+        )
+        .lines
+        .remove(0)
+    }
+
+    fn active_summary_snippet(&mut self, hit: &SearchHit) -> Option<SummarySnippet> {
         let path = hit.session.file_path.clone();
         self.ensure_summary_cache(hit.session.agent, &path, &hit.session.session_id);
         let sources = self.summary_cache.get(&path)?;
-        let text = match self.snippet_mode {
-            SnippetMode::ContentPreview => return None,
-            SnippetMode::AicsSummary => sources
-                .aics_sidecar
-                .as_ref()
-                .map(|summary| summary.sidecar.body.trim().to_owned())
+        let sidecar = || {
+            sources.aics_sidecar.as_ref().map(|summary| SummarySnippet {
+                body: summary.sidecar.body.clone(),
+                native_source: None,
+            })
+        };
+        let native = || {
+            sources
+                .claude_autosummaries
+                .iter()
+                .enumerate()
+                .next_back()
+                .map(|(index, summary)| SummarySnippet {
+                    body: summary.body.clone(),
+                    native_source: Some(index),
+                })
                 .or_else(|| {
                     sources
-                        .builtin_summary_body()
-                        .map(|body| body.trim().to_owned())
-                }),
-            SnippetMode::BuiltinSummary => sources
-                .builtin_summary_body()
-                .map(|body| body.trim().to_owned())
-                .or_else(|| {
-                    sources
-                        .aics_sidecar
+                        .codex_autosummary
                         .as_ref()
-                        .map(|summary| summary.sidecar.body.trim().to_owned())
-                }),
+                        .map(|summary| SummarySnippet {
+                            body: summary.body.clone(),
+                            native_source: None,
+                        })
+                })
+        };
+        let snippet = match self.snippet_mode {
+            SnippetMode::ContentPreview => return None,
+            SnippetMode::AicsSummary => sidecar().or_else(native),
+            SnippetMode::BuiltinSummary => native().or_else(sidecar),
         }?;
 
-        (!text.is_empty()).then_some(text)
+        (!snippet.body.trim().is_empty()).then_some(snippet)
+    }
+
+    #[cfg(test)]
+    fn active_summary_snippet_text(&mut self, hit: &SearchHit) -> Option<String> {
+        self.active_summary_snippet(hit)
+            .map(|snippet| snippet.body.trim().to_owned())
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -1152,6 +1365,8 @@ impl App {
                 action_menu.render(frame, frame.area(), &theme);
             }
             Overlay::Viewer(viewer_state) => {
+                viewer_state
+                    .set_search_options(self.visibility_search, self.settings.viewer_find_jump);
                 let hit = active_hit.as_ref();
                 let session = hit
                     .and_then(|hit| preview_cache.get(&hit.session.file_path))
@@ -1378,8 +1593,8 @@ impl App {
         }
 
         if matches!(self.overlay, Overlay::Viewer(_))
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-            && key.code == KeyCode::Char('f')
+            && key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+            && matches!(key.code, KeyCode::Char('f' | 'F'))
         {
             self.open_filters();
             return Ok(());
@@ -1399,7 +1614,7 @@ impl App {
             return Ok(());
         }
 
-        if matches!(self.overlay, Overlay::Viewer(_))
+        if matches!(&self.overlay, Overlay::Viewer(state) if state.search_is_focused())
             && key.code == KeyCode::Enter
             && key.modifiers.is_empty()
         {
@@ -1464,6 +1679,7 @@ impl App {
                 }
             },
             Overlay::Viewer(state) => {
+                state.set_search_options(self.visibility_search, self.settings.viewer_find_jump);
                 match state.handle_key(
                     key,
                     viewer_area,
@@ -1712,9 +1928,11 @@ impl App {
                     match mouse.kind {
                         MouseEventKind::ScrollDown => {
                             state.scroll = state.scroll.saturating_add(PANEL_MOUSE_SCROLL_STEP);
+                            state.reset_find_anchor();
                         }
                         MouseEventKind::ScrollUp => {
                             state.scroll = state.scroll.saturating_sub(PANEL_MOUSE_SCROLL_STEP);
+                            state.reset_find_anchor();
                         }
                         _ => {}
                     }
@@ -2149,42 +2367,44 @@ impl App {
         let Some(preview_area) = layout.preview else {
             return;
         };
-        let width = preview_area.width.saturating_sub(2);
         let theme = self.current_frame_theme();
+        if self.preview_render_state(preview_area, &theme).is_none() {
+            return;
+        }
         let rows = {
-            let Some((agent, path, session_id)) = self.selected_hit().map(|hit| {
-                (
-                    hit.session.agent,
-                    hit.session.file_path.clone(),
-                    hit.session.session_id.clone(),
-                )
-            }) else {
-                return;
-            };
             let Some(session) = self.active_session().cloned() else {
                 return;
             };
-            self.ensure_summary_cache(agent, &path, &session_id);
-            let summary_offset = self
-                .summary_cache
-                .get(&path)
-                .map(|sources| {
-                    let summary_text = preview::render_summary_sections(
-                        sources,
-                        &theme,
-                        None,
-                        self.summary_inflight.contains(&path),
-                    );
-                    if summary_text.lines.is_empty() {
-                        0
-                    } else {
-                        wrapped_text_height(&summary_text, width)
-                    }
+            let Some(cache) = &self.preview_render_cache else {
+                return;
+            };
+            cache
+                .blocks
+                .iter()
+                .filter_map(|block| {
+                    let is_user = match block.id {
+                        crate::export::SessionBlockId::Message(index) => session
+                            .messages
+                            .get(index)
+                            .map(|message| message.role == crate::parse::MessageRole::User),
+                        crate::export::SessionBlockId::Cell(index) => {
+                            match session.cells.get(index) {
+                                Some(
+                                    crate::parse::SessionCell::SessionInfo(_)
+                                    | crate::parse::SessionCell::Metrics(_),
+                                )
+                                | None => None,
+                                Some(crate::parse::SessionCell::Message { role, .. }) => {
+                                    Some(*role == crate::parse::MessageRole::User)
+                                }
+                                Some(_) => Some(false),
+                            }
+                        }
+                        _ => None,
+                    }?;
+                    (scope == MessageJumpScope::Any || is_user)
+                        .then(|| cache.layout.rows_for_lines(block.lines.clone()).start)
                 })
-                .unwrap_or(0);
-            collect_message_rows(&session, None, &theme, width, scope, self.display_options)
-                .into_iter()
-                .map(|row| row + summary_offset)
                 .collect::<Vec<_>>()
         };
         if let Some(target) = message_row_for_scroll(&rows, self.preview_scroll, direction) {
@@ -2226,9 +2446,6 @@ impl App {
             self.preview_active_match = None;
             return;
         }
-        if cache.wrapped_height.is_none() {
-            cache.wrapped_height = Some(wrapped_text_height(&cache.text, cache.width));
-        }
 
         let active_match = self
             .preview_active_match
@@ -2244,10 +2461,7 @@ impl App {
             }
         };
 
-        let max_scroll = cache
-            .wrapped_height
-            .unwrap_or_default()
-            .saturating_sub(viewport_height);
+        let max_scroll = cache.layout.height().saturating_sub(viewport_height);
         let target_row = cache.match_rows[next_index];
         self.preview_active_match = Some(next_index);
         self.preview_scroll = scroll_for_match(target_row, viewport_height, max_scroll);
@@ -2636,7 +2850,9 @@ impl App {
             self.pending_list_click = None;
             self.pending_action_menu_click = None;
             self.viewer_before_actions = None;
-            self.overlay = Overlay::Viewer(ViewerState::with_search(&self.committed_query));
+            let mut viewer = ViewerState::with_search(&self.committed_query);
+            viewer.set_search_options(self.visibility_search, self.settings.viewer_find_jump);
+            self.overlay = Overlay::Viewer(viewer);
         }
     }
 
@@ -4832,6 +5048,7 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("first user"));
         app.results.clear();
+        app.handle_key(crossterm_key(KeyCode::Tab)).unwrap();
         app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
         assert!(matches!(app.overlay, super::Overlay::Actions(_)));
         assert_eq!(app.selected_hit().unwrap().session.file_path, path);
@@ -5632,6 +5849,7 @@ mod tests {
         .unwrap();
         assert!(source.exists());
         assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+        app.handle_key(crossterm_key(KeyCode::Tab)).unwrap();
         app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
         app.handle_key(crossterm_key_mods(
             KeyCode::Char('d'),
@@ -5982,14 +6200,38 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_f_opens_filters_over_viewer_and_restores_viewer() {
+    fn ctrl_f_focuses_viewer_find_and_enter_keeps_viewer_open() {
+        let mut app = test_app();
+        app.results = vec![sample_hit(Agent::Claude)];
+        app.committed_query = "alpha".into();
+        app.open_viewer();
+        app.handle_key(crossterm_key(KeyCode::Tab)).unwrap();
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        app.handle_key(crossterm_key(KeyCode::Char('x'))).unwrap();
+        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
+        match &app.overlay {
+            super::Overlay::Viewer(viewer) => {
+                assert_eq!(viewer.find_query(), "x");
+                assert_eq!(viewer.search_query(), "alpha");
+            }
+            _ => panic!("Find should keep the viewer open"),
+        }
+        assert_eq!(app.committed_query, "alpha");
+    }
+
+    #[test]
+    fn ctrl_shift_f_opens_filters_over_viewer_and_restores_viewer() {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude)];
         app.open_viewer();
 
         app.handle_key(crossterm_key_mods(
             KeyCode::Char('f'),
-            KeyModifiers::CONTROL,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         ))
         .unwrap();
         assert!(matches!(app.overlay, super::Overlay::Filters(_, Some(_))));
@@ -6008,7 +6250,7 @@ mod tests {
 
         app.handle_key(crossterm_key_mods(
             KeyCode::Char('f'),
-            KeyModifiers::CONTROL,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         ))
         .unwrap();
         app.handle_key(crossterm_key(KeyCode::Down)).unwrap();
@@ -6032,6 +6274,7 @@ mod tests {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude)];
         app.open_viewer();
+        app.handle_key(crossterm_key(KeyCode::Tab)).unwrap();
 
         app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
 
@@ -6043,6 +6286,7 @@ mod tests {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude)];
         app.open_viewer();
+        app.handle_key(crossterm_key(KeyCode::Tab)).unwrap();
         app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
 
         app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
@@ -6164,7 +6408,21 @@ mod tests {
         ))
         .unwrap();
 
-        assert_eq!(app.preview_scroll, 12);
+        let cache = app.preview_render_cache.as_ref().unwrap();
+        let user_rows: Vec<_> = cache
+            .blocks
+            .iter()
+            .filter(|block| matches!(block.id, crate::export::SessionBlockId::Message(0 | 4)))
+            .map(|block| cache.layout.rows_for_lines(block.lines.clone()).start)
+            .collect();
+        // The composite preview's Session Log heading precedes the first user.
+        assert_eq!(app.preview_scroll, user_rows[0]);
+        app.handle_search_key(crossterm_key_mods(
+            KeyCode::Down,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ))
+        .unwrap();
+        assert_eq!(app.preview_scroll, user_rows[1]);
     }
 
     #[test]
@@ -6561,18 +6819,30 @@ mod tests {
         });
         app.preview_render_cache = Some(super::PreviewRenderCache {
             path,
+            session: None,
+            summaries: SummarySources::default(),
+            summary_inflight: false,
+            base_text: Text::default(),
+            sticky_markers: Vec::new(),
             query: "alpha".to_owned(),
             width: preview_area.width.saturating_sub(2),
             theme_name: app.current_frame_theme_name(),
             display_options: app.display_options,
-            wrapped_height: None,
-            text: Text::from(
-                (0..30)
-                    .map(|index| Line::from(format!("line {index} alpha")))
-                    .collect::<Vec<_>>(),
+            visibility: app.visibility_search,
+            layout: crate::tui::text_layout::LayoutDocument::new(
+                &Text::from(
+                    (0..30)
+                        .map(|index| Line::from(format!("line {index} alpha")))
+                        .collect::<Vec<_>>(),
+                ),
+                preview_area.width.saturating_sub(2),
             ),
+            map: crate::search_match::DocumentMap::default(),
+            projection: crate::search_projection::SearchProjection::default(),
+            match_ranges: vec![vec![7..12], vec![277..282]],
             match_rows: vec![0, 20],
             sticky_rows: Vec::new(),
+            blocks: Vec::new(),
         });
 
         app.handle_search_key(crossterm_key_mods(
@@ -6601,6 +6871,168 @@ mod tests {
         .unwrap();
         assert_eq!(app.preview_active_match, Some(1));
         assert!(app.preview_scroll > 0);
+    }
+
+    #[test]
+    fn preview_query_occurrences_respect_fields_negation_reflow_and_summary_sources() {
+        let mut app = test_app();
+        let theme = app.current_frame_theme();
+        let mut session = sample_preview_session();
+        session.messages.truncate(2);
+        session.messages[0].content = "alpha alpha".into();
+        session.messages[1].content = "alpha reply".into();
+        session.custom_title = None;
+        let path = session.file_path.clone();
+        let hit = sample_hit_with_path(Agent::Claude, path.clone());
+        app.results = vec![hit.clone()];
+        app.preview_cache.insert(path.clone(), Some(session));
+        let fingerprint = Fingerprint {
+            line_count: 1,
+            last_line_sha256: "abc".repeat(21) + "a",
+        };
+        let sources = SummarySources {
+            aics_sidecar: Some(AicsSummaryPreview {
+                sidecar: SummarySidecar::new(
+                    &path,
+                    &fingerprint,
+                    SummarizeBackend::Claude,
+                    "**alpha** alpha sidecar".into(),
+                ),
+                fingerprint,
+            }),
+            claude_autosummaries: vec![ClaudeAutosummaryPreview {
+                body: "alpha native".into(),
+                generated_at: None,
+            }],
+            codex_autosummary: None,
+        };
+        app.summary_cache.insert(path.clone(), sources.clone());
+        app.committed_query = "alpha".into();
+        let area = Rect::new(60, 3, 40, 20);
+        app.last_layout = Some(layout::AppLayout {
+            search: Rect::new(0, 0, 100, 3),
+            list: Rect::new(0, 3, 60, 20),
+            preview: Some(area),
+            status: Rect::new(0, 23, 100, 2),
+        });
+        app.preview_render_state(area, &theme).unwrap();
+        let cache = app.preview_render_cache.as_ref().unwrap();
+        assert_eq!(cache.match_ranges.len(), 3);
+        assert_eq!(cache.match_rows[0], cache.match_rows[1]);
+        let ranges = cache.match_ranges.clone();
+        let base_lines = cache.base_text.lines.as_ptr();
+        app.jump_preview_match(super::MatchDirection::Next);
+        app.jump_preview_match(super::MatchDirection::Next);
+        assert_eq!(app.preview_active_match, Some(1));
+        app.preview_render_state(Rect::new(60, 3, 10, 20), &theme)
+            .unwrap();
+        let cache = app.preview_render_cache.as_ref().unwrap();
+        assert_eq!(cache.match_ranges, ranges);
+        assert_eq!(cache.base_text.lines.as_ptr(), base_lines);
+        assert_eq!(app.preview_active_match, Some(1));
+        app.committed_query = "user:alpha -agent:alpha".into();
+        app.preview_render_state(area, &theme).unwrap();
+        assert_eq!(
+            app.preview_render_cache
+                .as_ref()
+                .unwrap()
+                .match_ranges
+                .len(),
+            2
+        );
+        app.committed_query = "agent:absentword -user:alpha".into();
+        app.preview_render_state(area, &theme).unwrap();
+        assert!(app
+            .preview_render_cache
+            .as_ref()
+            .unwrap()
+            .match_ranges
+            .is_empty());
+        app.snippet_mode = super::SnippetMode::AicsSummary;
+        let snippet = app.list_snippet_line(&hit, &theme);
+        assert!(snippet
+            .spans
+            .iter()
+            .all(|span| span.style.bg != Some(theme.search_match_bg)));
+        assert_eq!(app.summary_cache[&path], sources);
+    }
+
+    #[test]
+    fn preview_base_cache_tracks_transcript_summary_and_inflight_changes() {
+        let mut app = test_app();
+        let session = sample_preview_session();
+        let path = session.file_path.clone();
+        app.results = vec![sample_hit_with_path(Agent::Claude, path.clone())];
+        app.preview_cache.insert(path.clone(), Some(session));
+        app.summary_cache
+            .insert(path.clone(), SummarySources::default());
+        let area = Rect::new(0, 0, 60, 20);
+        let theme = app.current_frame_theme();
+        app.preview_render_state(area, &theme).unwrap();
+        app.preview_cache
+            .get_mut(&path)
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .messages[0]
+            .content = "updated transcript".into();
+        app.preview_render_state(area, &theme).unwrap();
+        assert!(app
+            .preview_render_cache
+            .as_ref()
+            .unwrap()
+            .map
+            .plain
+            .contains("updated transcript"));
+        app.summary_cache
+            .get_mut(&path)
+            .unwrap()
+            .claude_autosummaries
+            .push(ClaudeAutosummaryPreview {
+                body: "updated native summary".into(),
+                generated_at: None,
+            });
+        app.preview_render_state(area, &theme).unwrap();
+        assert!(app
+            .preview_render_cache
+            .as_ref()
+            .unwrap()
+            .map
+            .plain
+            .contains("updated native summary"));
+        app.summary_inflight.insert(path.clone());
+        app.preview_render_state(area, &theme).unwrap();
+        assert!(app.preview_render_cache.as_ref().unwrap().summary_inflight);
+        app.summary_inflight.remove(&path);
+        app.preview_render_state(area, &theme).unwrap();
+        assert!(!app.preview_render_cache.as_ref().unwrap().summary_inflight);
+    }
+
+    #[test]
+    fn preview_navigation_deduplicates_component_aliases_but_keeps_json_occurrences() {
+        let mut app = test_app();
+        let mut session = sample_preview_session();
+        session.messages.clear();
+        session.cells = vec![crate::parse::SessionCell::ToolCall {
+            tool: "alpha".into(),
+            raw_name: "alpha".into(),
+            summary: String::new(),
+            input: serde_json::json!({"first": "alpha alpha", "second": "alpha"}),
+            status: crate::parse::ToolStatus::Completed,
+            timestamp: None,
+        }];
+        let path = session.file_path.clone();
+        app.results = vec![sample_hit_with_path(Agent::Claude, path.clone())];
+        app.preview_cache.insert(path.clone(), Some(session));
+        app.summary_cache.insert(path, SummarySources::default());
+        app.committed_query = "alpha".into();
+        let theme = app.current_frame_theme();
+        app.preview_render_state(Rect::new(0, 0, 100, 30), &theme)
+            .unwrap();
+        let cache = app.preview_render_cache.as_ref().unwrap();
+        assert_eq!(cache.match_ranges.len(), 4);
+        assert_eq!(cache.match_rows[1], cache.match_rows[2]);
+        assert_ne!(cache.match_ranges[1], cache.match_ranges[2]);
     }
 
     #[test]
@@ -6832,6 +7264,118 @@ mod tests {
             app.active_summary_snippet_text(&hit).as_deref(),
             Some("Codex builtin body")
         );
+    }
+
+    #[test]
+    fn native_summary_snippet_highlights_only_its_indexed_positive_occurrences() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("native-summary.jsonl");
+        let records = [
+            serde_json::json!({
+                "type": "user", "sessionId": "native-summary",
+                "message": {"role": "user", "content": "alpha user text"}
+            }),
+            serde_json::json!({
+                "type": "summary", "summary": "older alpha summary"
+            }),
+            serde_json::json!({
+                "type": "system", "subtype": "away_summary",
+                "content": "  alpha alpha alphabet  "
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{
+                    "type": "tool_use", "name": "Bash", "id": "call",
+                    "input": {"command": "echo alpha", "opaque": "SearchOnlyExportSentinel"}
+                }]}
+            }),
+        ];
+        fs::write(
+            &path,
+            records
+                .iter()
+                .map(|record| format!("{record}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let mut app = test_app();
+        let hit = sample_hit_with_path(Agent::Claude, path.clone());
+        let theme = app.current_frame_theme();
+        app.snippet_mode = super::SnippetMode::BuiltinSummary;
+        app.committed_query = "agent:alpha -user:alpha".into();
+        let highlighted = app.list_snippet_line(&hit, &theme);
+        let parsed = app.preview_cache[&path].as_ref().unwrap();
+        assert!(!parsed.search_fields.native_summaries.is_empty());
+        assert!(!parsed.search_fields.tool_call_sources.is_empty());
+        let mut without_search_metadata = parsed.clone();
+        without_search_metadata.search_fields = Default::default();
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap(),
+            serde_json::to_value(&without_search_metadata).unwrap()
+        );
+        let exported = [
+            crate::export::session_to_plain_text(parsed),
+            crate::export::session_to_markdown(parsed),
+            crate::rules::session_to_rule_context_json(parsed, &path, false, None).unwrap(),
+        ];
+        assert!(exported
+            .iter()
+            .all(|text| !text.contains("SearchOnlyExportSentinel")));
+        let highlighted_text = |line: &ratatui::text::Line<'_>| {
+            line.spans
+                .iter()
+                .filter(|span| span.style.bg == Some(theme.search_match_bg))
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        assert_eq!(highlighted_text(&highlighted), "alphaalpha");
+        assert_eq!(
+            highlighted
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "alpha alpha alphabet"
+        );
+
+        app.committed_query = "user:alpha".into();
+        assert!(highlighted_text(&app.list_snippet_line(&hit, &theme)).is_empty());
+        app.committed_query = "-agent:alpha".into();
+        assert!(highlighted_text(&app.list_snippet_line(&hit, &theme)).is_empty());
+        app.committed_query = "agent:<alph.*>".into();
+        assert_eq!(
+            highlighted_text(&app.list_snippet_line(&hit, &theme)),
+            "alphaalphaalphabet"
+        );
+
+        let sources = app.summary_cache.get_mut(&path).unwrap();
+        let body = sources.claude_autosummaries.last().unwrap().body.clone();
+        sources.aics_sidecar = Some(AicsSummaryPreview {
+            sidecar: SummarySidecar::new(
+                &path,
+                &Fingerprint {
+                    line_count: 3,
+                    last_line_sha256: "abc".repeat(21) + "a",
+                },
+                SummarizeBackend::Claude,
+                body,
+            ),
+            fingerprint: Fingerprint {
+                line_count: 3,
+                last_line_sha256: "abc".repeat(21) + "a",
+            },
+        });
+        app.snippet_mode = super::SnippetMode::AicsSummary;
+        assert!(highlighted_text(&app.list_snippet_line(&hit, &theme)).is_empty());
+        app.snippet_mode = super::SnippetMode::BuiltinSummary;
+        app.summary_cache
+            .get_mut(&path)
+            .unwrap()
+            .claude_autosummaries
+            .last_mut()
+            .unwrap()
+            .body = "alpha stale summary".into();
+        assert!(highlighted_text(&app.list_snippet_line(&hit, &theme)).is_empty());
     }
 
     #[test]

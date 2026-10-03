@@ -4,12 +4,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use log::warn;
 use tantivy::collector::TopDocs;
 use tantivy::query::{AllQuery, BooleanQuery, BoostQuery, Query, QueryParser};
 use tantivy::query_grammar::{UserInputAst, UserInputLeaf};
 use tantivy::schema::{IndexRecordOption, Value};
-use tantivy::snippet::{Snippet, SnippetGenerator};
 use tantivy::{
     DocAddress, DocSet, Index, IndexReader, Order, ReloadPolicy, TantivyDocument, TERMINATED,
 };
@@ -19,7 +17,7 @@ use crate::index::writer::{IndexPaths, StoredSession};
 use crate::live::{LiveSessionSnapshot, LiveSessionTracker};
 use crate::parse::{strip_project_docs_autodump_preamble, Agent, DerivationType};
 use crate::search_query::{
-    extract_highlight_terms, extract_visibility_search, has_explicit_boolean_operators,
+    extract_highlight_terms, extract_visibility_search, has_explicit_boolean_operators, QueryPlan,
     VisibilitySearch,
 };
 use crate::settings::DisplayOptions;
@@ -325,12 +323,12 @@ impl SearchEngine {
 
         let (query_parser, default_snippet_fields) =
             self.query_parser(visibility_search, display_options);
-        let (base_query, has_non_bare_syntax, snippet_fields) =
+        let (base_query, has_non_bare_syntax, _snippet_fields) =
             parse_query_with_aliases(&query_parser, query_text, &default_snippet_fields);
         let final_query =
             build_phrase_boosted_query(&query_parser, query_text, base_query, has_non_bare_syntax);
         let snippet_generators =
-            self.make_snippet_generators(&searcher, &*final_query, &snippet_fields);
+            QueryPlan::compile(query_text, visibility_search, display_options)?;
 
         let mut candidates = Vec::new();
         let mut offset = 0usize;
@@ -499,12 +497,12 @@ impl SearchEngine {
     ) -> Result<Vec<SearchHit>> {
         let (query_parser, default_snippet_fields) =
             self.query_parser(visibility_search, display_options);
-        let (base_query, has_non_bare_syntax, snippet_fields) =
+        let (base_query, has_non_bare_syntax, _snippet_fields) =
             parse_query_with_aliases(&query_parser, query_text, &default_snippet_fields);
         let final_query =
             build_phrase_boosted_query(&query_parser, query_text, base_query, has_non_bare_syntax);
         let snippet_generators =
-            self.make_snippet_generators(searcher, &*final_query, &snippet_fields);
+            QueryPlan::compile(query_text, visibility_search, display_options)?;
         let modified_ts_field = self.fields.schema.get_field_name(self.fields.modified_ts);
         let candidate_limit = candidate_limit(request, false);
 
@@ -533,7 +531,7 @@ impl SearchEngine {
                 }
 
                 let snippet_html =
-                    build_snippet_html(&snippet_generators, &document, &session, query_text);
+                    build_snippet_html(&snippet_generators, &document, &self.fields, &session);
                 hits.push(SearchHit {
                     snippet_html,
                     score: session.modified_ts as f32,
@@ -558,82 +556,12 @@ impl SearchEngine {
         visibility_search: VisibilitySearch,
         display_options: DisplayOptions,
     ) -> (QueryParser, Vec<String>) {
-        let fields = self.default_search_fields(visibility_search, display_options);
-        let default_fields = fields.iter().map(|(field, _)| *field).collect();
-        let snippet_fields = fields.iter().map(|(_, name)| (*name).to_owned()).collect();
-        let mut query_parser = QueryParser::for_index(&self.index, default_fields);
-        query_parser.set_conjunction_by_default();
-        query_parser.set_field_fuzzy(self.fields.working_dir, true, 0, false);
-        for field in [self.fields.dirs, self.fields.files, self.fields.paths] {
-            query_parser.set_field_fuzzy(field, true, 0, false);
-        }
-        query_parser.allow_regexes();
-        (query_parser, snippet_fields)
-    }
-
-    fn default_search_fields(
-        &self,
-        visibility_search: VisibilitySearch,
-        display_options: DisplayOptions,
-    ) -> Vec<(tantivy::schema::Field, &'static str)> {
-        if visibility_search == VisibilitySearch::All {
-            return vec![(self.fields.content, "content")];
-        }
-
-        const USER: u8 = 1 << 0;
-        const AGENT: u8 = 1 << 1;
-        const TOOL_CALL: u8 = 1 << 2;
-        const TOOL_RESULT: u8 = 1 << 3;
-        const PROJECT_DOCS: u8 = 1 << 4;
-        const SKILL: u8 = 1 << 5;
-        const INTERNAL_CONTEXT: u8 = 1 << 6;
-
-        let hidden_bit = |hidden: bool, bit| if hidden { bit } else { 0 };
-        let hidden = hidden_bit(display_options.hide_user_messages, USER)
-            | hidden_bit(display_options.hide_agent_replies, AGENT)
-            | hidden_bit(display_options.hide_tool_calls, TOOL_CALL)
-            | hidden_bit(display_options.hide_tool_results, TOOL_RESULT)
-            | hidden_bit(display_options.hide_project_docs_autodump, PROJECT_DOCS)
-            | hidden_bit(display_options.hide_skill_text_injection, SKILL)
-            | hidden_bit(display_options.hide_internal_context, INTERNAL_CONTEXT);
-        let candidates = [
-            (self.fields.vis_always, "_vis_always", 0),
-            (self.fields.vis_user, "_vis_user", USER),
-            (self.fields.vis_agent, "_vis_agent", AGENT),
-            (self.fields.vis_tool_call, "_vis_toolcall", TOOL_CALL),
-            (self.fields.vis_tool_result, "_vis_toolresult", TOOL_RESULT),
-            (
-                self.fields.vis_tool_call_result,
-                "_vis_toolcall_result",
-                TOOL_CALL | TOOL_RESULT,
-            ),
-            (
-                self.fields.vis_project_docs,
-                "_vis_projectdocs",
-                PROJECT_DOCS,
-            ),
-            (
-                self.fields.vis_user_project_docs,
-                "_vis_user_projectdocs",
-                USER | PROJECT_DOCS,
-            ),
-            (self.fields.vis_user_skill, "_vis_user_skill", USER | SKILL),
-            (
-                self.fields.vis_user_internal_context,
-                "_vis_user_internal_context",
-                USER | INTERNAL_CONTEXT,
-            ),
-        ];
-
-        candidates
-            .into_iter()
-            .filter(|(_, _, required_visible)| match visibility_search {
-                VisibilitySearch::Visible => required_visible & hidden == 0,
-                VisibilitySearch::Hidden => required_visible & hidden != 0,
-                VisibilitySearch::All => unreachable!(),
-            })
-            .map(|(field, name, _)| (field, name))
-            .collect()
+        crate::search_query::query_parser(
+            &self.index,
+            &self.fields,
+            visibility_search,
+            display_options,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -642,7 +570,7 @@ impl SearchEngine {
         searcher: &tantivy::Searcher,
         docs: Vec<(f32, DocAddress)>,
         request: &SearchRequest,
-        snippet_generators: &[SnippetGenerator],
+        snippet_generators: &QueryPlan,
         live_ids: &LiveSessionSnapshot,
         session_cache: &mut HashMap<DocAddress, StoredSession>,
         hits: &mut Vec<SearchCandidate>,
@@ -655,12 +583,8 @@ impl SearchEngine {
                 continue;
             }
 
-            let snippet_html = build_snippet_html(
-                snippet_generators,
-                &document,
-                &session,
-                request.query.trim(),
-            );
+            let snippet_html =
+                build_snippet_html(snippet_generators, &document, &self.fields, &session);
             hits.push(SearchCandidate {
                 score: score * recency_boost(session.modified_ts),
                 session,
@@ -712,53 +636,6 @@ impl SearchEngine {
         let session = stored_session_from_document(document, self.fields.session_json)?;
         session_cache.insert(address, session.clone());
         Ok(session)
-    }
-
-    fn make_snippet_generators(
-        &self,
-        searcher: &tantivy::Searcher,
-        query: &dyn Query,
-        field_names: &[String],
-    ) -> Vec<SnippetGenerator> {
-        let mut generators = Vec::new();
-        for field_name in field_names {
-            let Some(field) = self.snippet_field(field_name) else {
-                continue;
-            };
-            match SnippetGenerator::create(searcher, query, field) {
-                Ok(mut generator) => {
-                    generator.set_max_num_chars(SNIPPET_MAX_CHARS);
-                    generators.push(generator);
-                }
-                Err(error) => {
-                    warn!("failed to build snippet generator for field {field_name}: {error:#}")
-                }
-            }
-        }
-        generators
-    }
-
-    fn snippet_field(&self, name: &str) -> Option<tantivy::schema::Field> {
-        match name {
-            "content" => Some(self.fields.content),
-            "user" => Some(self.fields.user),
-            "agent" => Some(self.fields.agent),
-            "toolcall" => Some(self.fields.tool_call),
-            "toolresult" => Some(self.fields.tool_result),
-            "dirs" => Some(self.fields.dirs),
-            "files" => Some(self.fields.files),
-            "paths" => Some(self.fields.paths),
-            "_vis_always" => Some(self.fields.vis_always),
-            "_vis_user" => Some(self.fields.vis_user),
-            "_vis_agent" => Some(self.fields.vis_agent),
-            "_vis_toolcall" => Some(self.fields.vis_tool_call),
-            "_vis_toolresult" => Some(self.fields.vis_tool_result),
-            "_vis_toolcall_result" => Some(self.fields.vis_tool_call_result),
-            "_vis_projectdocs" => Some(self.fields.vis_project_docs),
-            "_vis_user_projectdocs" => Some(self.fields.vis_user_project_docs),
-            "_vis_user_skill" => Some(self.fields.vis_user_skill),
-            _ => None,
-        }
     }
 }
 
@@ -818,7 +695,7 @@ fn parse_query_with_aliases(
     (query, has_non_bare_syntax, snippet_fields)
 }
 
-fn prepare_query_ast(
+pub(crate) fn prepare_query_ast(
     ast: &mut UserInputAst,
     snippet_fields: &mut Vec<String>,
     default_snippet_fields: &[String],
@@ -909,7 +786,7 @@ fn record_snippet_field(fields: &mut Vec<String>, field: Option<&str>, default_f
     }
 }
 
-fn translate_angle_regexes(query: &str) -> Result<String> {
+pub(crate) fn translate_angle_regexes(query: &str) -> Result<String> {
     let chars = query.chars().collect::<Vec<_>>();
     let mut translated = String::with_capacity(query.len());
     let mut index = 0;
@@ -1148,26 +1025,91 @@ fn recency_boost(modified_ts: u64) -> f32 {
 }
 
 fn build_snippet_html(
-    snippet_generators: &[SnippetGenerator],
+    plan: &QueryPlan,
     document: &TantivyDocument,
+    fields: &IndexSchema,
     session: &StoredSession,
-    query: &str,
 ) -> String {
-    for generator in snippet_generators {
-        let snippet = generator.snippet_from_doc(document);
-        if !snippet.fragment().is_empty() {
-            return render_snippet_html(&snippet, query);
-        }
+    let text_fields = fields
+        .schema
+        .fields()
+        .filter_map(|(field, entry)| {
+            if entry.name().starts_with("_search_") || entry.name() == "session_json" {
+                return None;
+            }
+            let values = document
+                .get_all(field)
+                .filter_map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| value.as_u64().map(|value| value.to_string()))
+                })
+                .collect::<Vec<_>>();
+            (!values.is_empty()).then_some((entry.name().to_owned(), values))
+        })
+        .collect();
+    let provenance = document
+        .get_first(fields.search_provenance)
+        .and_then(|value| value.as_str())
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+    let projection =
+        crate::search_projection::SearchProjection::from_stored_fields(text_fields, provenance);
+    let (_, matches) = plan.field_matches(&projection);
+    let Some(first) = matches.first() else {
+        return fallback_snippet(session, "");
+    };
+    let text = &projection.fields[&first.field][first.value].text;
+    let before = text[..first.range.start]
+        .char_indices()
+        .rev()
+        .nth(60)
+        .map_or(0, |(index, _)| index);
+    let end = text[before..]
+        .char_indices()
+        .nth(SNIPPET_MAX_CHARS)
+        .map_or(text.len(), |(index, _)| before + index);
+    let ranges = matches
+        .iter()
+        .filter(|matched| matched.field == first.field && matched.value == first.value)
+        .filter_map(|matched| {
+            let start = matched.range.start.max(before);
+            let end = matched.range.end.min(end);
+            (start < end).then_some(start - before..end - before)
+        })
+        .collect::<Vec<_>>();
+    let mut result = String::new();
+    if before > 0 {
+        result.push('…');
     }
-    fallback_snippet(session, query)
+    result.push_str(&emphasize_ranges(&text[before..end], &ranges));
+    if end < text.len() {
+        result.push('…');
+    }
+    result
 }
 
-/// Build `<b>…</b>` markup from a Tantivy-chosen fragment using AICS query terms.
-/// This keeps bare multi-word queries aligned with our AND-by-default search
-/// semantics: each displayed term can be highlighted independently, even when
-/// the terms are not adjacent in the document.
-fn render_snippet_html(snippet: &Snippet, query: &str) -> String {
-    emphasize_terms(snippet.fragment(), query)
+fn emphasize_ranges(text: &str, ranges: &[std::ops::Range<usize>]) -> String {
+    let mut merged = Vec::<std::ops::Range<usize>>::new();
+    for range in ranges {
+        if let Some(last) = merged.last_mut().filter(|last| last.end >= range.start) {
+            last.end = last.end.max(range.end);
+        } else {
+            merged.push(range.clone());
+        }
+    }
+    let mut result = String::new();
+    let mut position = 0;
+    for range in merged {
+        result.push_str(&text[position..range.start]);
+        result.push_str("<b>");
+        result.push_str(&text[range.clone()]);
+        result.push_str("</b>");
+        position = range.end;
+    }
+    result.push_str(&text[position..]);
+    result
 }
 
 pub(crate) fn fallback_snippet(session: &StoredSession, query: &str) -> String {
@@ -1183,7 +1125,7 @@ pub(crate) fn fallback_snippet(session: &StoredSession, query: &str) -> String {
     if query.is_empty() {
         snippet
     } else {
-        emphasize_terms(&snippet, query)
+        emphasize_query(&snippet, query)
     }
 }
 
@@ -1235,41 +1177,34 @@ fn strip_tag_block<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     Some(&rest[end + close.len()..])
 }
 
-fn emphasize_terms(text: &str, query: &str) -> String {
-    let mut result = text.to_owned();
-    for term in extract_highlight_terms(query) {
-        result = replace_case_insensitive(&result, &term);
-    }
-    result
-}
-
-fn replace_case_insensitive(haystack: &str, needle: &str) -> String {
-    let lower_haystack = haystack.to_ascii_lowercase();
-    let lower_needle = needle.to_ascii_lowercase();
-    if lower_needle.is_empty() {
-        return haystack.to_owned();
-    }
-
-    let mut output = String::with_capacity(haystack.len());
-    let mut index = 0usize;
-    while let Some(found) = lower_haystack[index..].find(&lower_needle) {
-        let start = index + found;
-        let end = start + lower_needle.len();
-        output.push_str(&haystack[index..start]);
-        output.push_str("<b>");
-        output.push_str(&haystack[start..end]);
-        output.push_str("</b>");
-        index = end;
-    }
-    output.push_str(&haystack[index..]);
-    output
+fn emphasize_query(text: &str, query: &str) -> String {
+    let Ok(plan) = QueryPlan::compile(query, VisibilitySearch::All, DisplayOptions::SHOW_ALL)
+    else {
+        return text.to_owned();
+    };
+    let mut projection = crate::search_projection::SearchProjection::default();
+    projection.fields.insert(
+        "content".to_owned(),
+        vec![crate::search_projection::ProjectedText {
+            text: text.to_owned(),
+            origins: Vec::new(),
+        }],
+    );
+    let (_, matches) = plan.field_matches(&projection);
+    emphasize_ranges(
+        text,
+        &matches
+            .into_iter()
+            .map(|matched| matched.range)
+            .collect::<Vec<_>>(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        emphasize_terms, fallback_snippet, matches_scope, paths_equal, paths_equal_windows,
-        replace_case_insensitive, snippet_display_text, translate_angle_regexes, Scope,
+        emphasize_query, fallback_snippet, matches_scope, paths_equal, paths_equal_windows,
+        snippet_display_text, translate_angle_regexes, Scope,
     };
     use crate::index::writer::StoredSession;
     use crate::parse::{Agent, DerivationType};
@@ -1299,6 +1234,41 @@ mod tests {
             original_path: None,
             superseded_by: None,
         }
+    }
+
+    #[test]
+    fn indexed_snippets_use_positive_field_phrase_and_regex_occurrences() -> anyhow::Result<()> {
+        let schema = crate::index::schema::IndexSchema::new();
+        let mut document = tantivy::TantivyDocument::default();
+        document.add_text(schema.content, "Alpha **beta** needle needles alphabet");
+        document.add_text(schema.user, "needle in user");
+        document.add_text(schema.agent, "needle in agent");
+        let session = stub_session("/repo", None);
+        let render = |query| -> anyhow::Result<String> {
+            let plan = crate::search_query::QueryPlan::compile(
+                query,
+                crate::search_query::VisibilitySearch::All,
+                crate::settings::DisplayOptions::SHOW_ALL,
+            )?;
+            Ok(super::build_snippet_html(
+                &plan, &document, &schema, &session,
+            ))
+        };
+        assert_eq!(
+            render("alpha NOT beta")?,
+            "<b>Alpha</b> **beta** needle needles alphabet"
+        );
+        assert_eq!(
+            render("\"alpha beta\"")?,
+            "<b>Alpha **beta</b>** needle needles alphabet"
+        );
+        assert_eq!(
+            render("<need.*>")?,
+            "Alpha **beta** <b>needle</b> <b>needles</b> alphabet"
+        );
+        assert_eq!(render("agent:needle")?, "<b>needle</b> in agent");
+        assert_eq!(render("user:needle")?, "<b>needle</b> in user");
+        Ok(())
     }
 
     #[test]
@@ -1712,25 +1682,27 @@ mod tests {
     }
 
     #[test]
-    fn replace_case_insensitive_preserves_original_match_casing() {
-        let highlighted = replace_case_insensitive("INSTRUCTIONS", "on");
-        assert_eq!(highlighted, "INSTRUCTI<b>ON</b>S");
+    fn snippet_highlighting_uses_indexed_words() {
+        assert_eq!(
+            emphasize_query("INSTRUCTIONS on", "on"),
+            "INSTRUCTIONS <b>on</b>"
+        );
     }
 
     #[test]
-    fn emphasize_terms_preserves_original_match_casing() {
-        let highlighted = emphasize_terms(
+    fn snippet_highlighting_preserves_original_match_casing() {
+        let highlighted = emphasize_query(
             "INSTRUCTIONS You are running on Android.",
             "running on android",
         );
-        assert!(highlighted.contains("INSTRUCTI<b>ON</b>S"));
+        assert!(highlighted.starts_with("INSTRUCTIONS"));
         assert!(highlighted.contains("<b>running</b>"));
         assert!(highlighted.contains("<b>Android</b>"));
     }
 
     #[test]
-    fn emphasize_terms_treats_bare_multi_word_query_as_independent_terms() {
-        let highlighted = emphasize_terms(
+    fn snippet_highlighting_treats_bare_multi_word_query_as_independent_terms() {
+        let highlighted = emphasize_query(
             "wordB appears first. Later, wordA appears by itself.",
             "wordA wordB",
         );
@@ -1741,9 +1713,9 @@ mod tests {
     }
 
     #[test]
-    fn emphasize_terms_highlights_phrase_tokens_across_punctuation() {
-        let highlighted = emphasize_terms("commit /commit --all", "\"commit all\"");
+    fn snippet_highlighting_keeps_phrase_occurrences_whole() {
+        let highlighted = emphasize_query("commit /commit --all", "\"commit all\"");
 
-        assert_eq!(highlighted, "<b>commit</b> /<b>commit</b> --<b>all</b>");
+        assert_eq!(highlighted, "commit /<b>commit --all</b>");
     }
 }

@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use log::warn;
 use serde_json::Value;
 
-use super::search_fields::{authored_user_text, SessionSearchFields};
+use super::search_fields::{authored_user_text, SessionSearchFields, ToolCallSource};
 use super::session::{
     cells_from_messages, earliest_timestamp, fallback_session_id, first_message_fields,
     first_user_message, infer_derivation_type, last_message_fields, latest_timestamp,
@@ -142,7 +142,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             "system" if is_away_summary(&value) => {
                 if let Some(summary) = extract_claude_summary_text(&value) {
                     contributed = true;
-                    search_fields.push_agent(summary.clone());
+                    search_fields.push_native_summary(summary.clone());
                     push_unique_chunk(&mut summary_chunks, summary.clone());
                     push_unique_chunk(&mut content_chunks, summary);
                 }
@@ -191,8 +191,9 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
                             push_unique_message(&mut messages, role, text.clone(), entry_timestamp);
                             push_unique_chunk(&mut content_chunks, text);
                         }
-                        MessageBlock::ToolCall { name, text } => {
+                        MessageBlock::ToolCall { name, text, input } => {
                             let label = tool_format::tool_label(&name).to_owned();
+                            let cell_index = messages.len();
                             push_tool_message(
                                 &mut messages,
                                 MessageRole::ToolCall,
@@ -200,6 +201,15 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
                                 text.clone(),
                                 entry_timestamp,
                             );
+                            if messages.len() > cell_index {
+                                search_fields.tool_call_sources.insert(
+                                    cell_index,
+                                    ToolCallSource {
+                                        raw_name: name,
+                                        input,
+                                    },
+                                );
+                            }
                             push_unique_chunk(&mut content_chunks, text);
                         }
                         MessageBlock::ToolResult(text) => {
@@ -218,7 +228,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             "summary" => {
                 if let Some(summary) = extract_claude_summary_text(&value) {
                     contributed = true;
-                    search_fields.push_agent(summary.clone());
+                    search_fields.push_native_summary(summary.clone());
                     push_unique_chunk(&mut summary_chunks, summary.clone());
                     push_unique_chunk(&mut content_chunks, summary);
                 }
@@ -514,7 +524,11 @@ fn extract_claude_summary_text(value: &Value) -> Option<String> {
 
 enum MessageBlock {
     Text(String),
-    ToolCall { name: String, text: String },
+    ToolCall {
+        name: String,
+        text: String,
+        input: Value,
+    },
     ToolResult(String),
 }
 
@@ -574,6 +588,7 @@ fn extract_message_blocks(
                         blocks.push(MessageBlock::ToolCall {
                             name,
                             text: formatted,
+                            input: input.clone(),
                         });
                     }
                     Some("tool_result") => {

@@ -88,7 +88,10 @@ event outside the aborted turn or a changed retry line still prevents
 supersession.
 
 Use `--rebuild-index` to discard and rebuild the current profile's index before
-searching. Use `--delete-index` to delete it and exit.
+searching. Use `--delete-index` to delete it and exit. Index format 18 adds source
+coordinates and user-command visibility fields; older profiles rebuild
+automatically. These coordinates stay inside the index and are excluded from
+session JSON and exports.
 
 ## Index profiles and files
 
@@ -116,8 +119,12 @@ An empty query shows recent sessions. A non-empty interactive query defaults to
 **Visible** content, following the current `^F` Visibility toggles. **Search
 content** in the same dialog selects Visible, All, or Hidden; Enter applies it,
 `^S` applies and saves it as the startup preference, and `^R` resets it to Visible.
-All searches the full indexed content, including the custom thread title, first
-user or resume-preview text, and the parsed transcript.
+All searches the union of the same source-text segments used by Visible and
+Hidden. Custom thread titles remain searchable in All and Visible, independently
+of message visibility. The transcript projection is
+shared across indexing, query matching, and display provenance; it retains
+Markdown source syntax and readable tool arguments rather than indexing the
+pretty-rendered screen.
 
 Field prefixes narrow a query to semantic parts of the source session:
 
@@ -165,7 +172,8 @@ or end of a query. Explicit field clauses are not constrained by them, so
 `visible: rust toolcall:cargo` still searches `toolcall:cargo` when tool calls
 are hidden. For structured exec and patch cells, output counts as hidden when
 either Tool Calls or Tool Results hides it, matching what the transcript viewer
-can display.
+can display. User exec commands follow the separate User Tool Calls and User Tool
+Results toggles; their output requires both toggles to allow it.
 
 Internal/goal wrapper messages count as hidden when either **Internal Context**
 or **User Messages** hides them. Internal Context is hidden by default. Use
@@ -198,8 +206,29 @@ time. Relevance sort starts with Tantivy relevance, applies an AICS recency
 boost, and uses timestamps as tie-breakers.
 
 Scope, agent, branch, date, line-count, derivation, sub-agent, live, superseded,
-and trash filters can exclude otherwise matching sessions. Snippets prefer
-Tantivy-selected fragments and fall back to session text when no fragment is
-available.
+and trash filters can exclude otherwise matching sessions. Query highlights use
+matching positive clauses with their field restrictions; negative clauses do not
+produce highlights. Phrases and term regexes retain their query semantics rather
+than being split into substring highlights.
+
+In the full viewer, **Search** starts with the list query and can be edited
+independently. Matching positive clauses are highlighted even when the complete
+Boolean expression does not match that session; the Search box reports that
+status separately. Source matches hidden by filters, removed by rendering, or
+located only in metadata remain search evidence without becoming unrelated
+highlights in the visible body. Match navigation follows individual occurrences,
+including repeated matches on the same wrapped row.
+
+Tantivy's matching of phrases with three or more terms and nonzero slop can
+depend on term frequencies in the index segment. Session retrieval keeps
+Tantivy's results. For these expressions, local phrase highlights and match
+status can differ; the viewer shows this limitation instead of a definitive
+query-mismatch notice. Exact phrases and two-term slop use the shared token
+positions without this qualification.
+
+The separate viewer-only **Find** box searches displayed readable text with
+literal substring or Rust regex matching. It does not change the list query or
+Tantivy syntax, and is not present in the preview. See the
+[viewer controls and jump preference](keybindings.md#session-viewer).
 
 [Back to the README.](../README.md#indexing)

@@ -66,17 +66,24 @@ find text or noninteractive commands. `^R` does nothing on the main screen when
 
 | Key | Action |
 | --- | --- |
-| Type | Edit the viewer's inline search query |
+| Type | Edit the focused Search or Find box |
+| `Tab` / `Shift+Tab` | Switch between Search and Find |
 | `↑` / `↓` | Scroll one line |
 | `PgUp` / `PgDn` | Scroll one page |
 | `Home` / `End` | Jump to the top or bottom |
 | `Shift+↑` / `Shift+↓` | Jump to the previous or next message/event |
 | `^Shift+↑` / `^Shift+↓` | Jump to the previous or next user message |
-| `^N` / `^P` | Jump to the next or previous highlighted match |
-| `^U` / `^E` | Use readline-style editing in the search box |
-| `^F` | Open filters and display options |
-| `^T` or `Enter` → `d` | Move the current session to AICS trash, including the complete local Antigravity bundle |
-| `⏎` | Open the current session's actions menu |
+| `^N` / `^P` | Jump to the next or previous occurrence for the focused box |
+| `^U` / `^E` | Use readline-style editing in the focused box |
+| `^F` | Focus Find |
+| `^Shift+F` | Open filters and display options |
+| `Alt+R` in Find | Toggle substring/regex mode |
+| `Alt+I` in Find | Toggle case sensitivity |
+| Click Find's Substring/Regex label | Toggle substring/regex mode |
+| Click Find's Ignore case/Case label | Toggle case sensitivity |
+| `^T` or Search `Enter` → `d` | Move the current session to AICS trash, including the complete local Antigravity bundle |
+| `⏎` in Search | Open the current session's actions menu |
+| `⏎` / `Shift+⏎` in Find | Next/previous Find occurrence |
 | `^L` | Open contextual help on the Viewer tab |
 | `Esc` | Close the viewer |
 | Mouse wheel | Scroll the conversation |
@@ -85,6 +92,27 @@ find text or noninteractive commands. `^R` does nothing on the main screen when
 | `Shift+left-click` or `Alt+Shift+left-click` | Select the inclusive range from the anchor, replacing the selection |
 | `Ctrl+Shift+left-click` or `Alt+Ctrl+Shift+left-click` | Add the inclusive anchored range to the selection |
 | `Alt+C` | Copy selected blocks as source Markdown, in conversation order |
+
+Search starts with the session-list query. Editing it changes only the viewer's
+query highlights. Find starts empty and focused, searching case-insensitively
+for literal substrings; regex mode uses Rust regex syntax. Both highlight sets
+remain visible, with independent match counts and navigation. The boxes sit side
+by side at widths of 80 columns or more and stack in narrower terminals.
+
+Find searches readable, unwrapped content, including displayed summaries, session
+context, metrics, and body headings. Hidden blocks, borders, footer controls, and
+duplicated sticky headers are excluded. Regexes can match logical newlines and
+cross blocks; terminal wrapping adds no searchable newlines. Invalid regexes show
+an error and clear their matches. Empty Find text clears its highlights.
+
+Find jumps incrementally by default. Prefix the expression with `(?-j)` to keep
+the current scroll position, or `(?j)` to enable jumping for that expression.
+These prefixes work in both modes and override the saved `viewer_find_jump`
+preference without changing it. Consecutive prefixes use the last value.
+Manual next/previous navigation remains available when jumping is disabled.
+In substring mode, quote a literal leading directive with a backslash, for
+example `\(?j)`. In regex mode use ordinary regex escaping: `\(\?j\)`.
+Find is available only in the full viewer, not in the preview pane.
 
 Blocks include messages, tool events, reasoning, plans, summaries, session context,
 and metrics. Markdown headings within a message remain part of that message.

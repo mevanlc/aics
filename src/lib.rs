@@ -10,6 +10,8 @@ pub mod ring_cursor;
 pub mod rules;
 pub mod scan;
 pub mod search_history;
+pub mod search_match;
+pub mod search_projection;
 pub mod search_query;
 pub mod settings;
 pub mod summary;

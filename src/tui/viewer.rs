@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -12,30 +13,28 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use crate::export::{selected_blocks_to_markdown, SessionBlockId};
-use crate::parse::{
-    is_internal_context_injection, is_project_docs_autodump, MessageRole, Session, SessionCell,
-};
-use crate::search_query::extract_highlight_terms;
+use crate::parse::{MessageRole, Session, SessionCell};
+use crate::search_match::{DocumentMap, SourceBlock};
+use crate::search_projection::SearchProjection;
+use crate::search_query::{QueryPlan, VisibilitySearch};
 use crate::settings::{DisplayOptions, ThemeName};
 use crate::summary::SummarySidecar;
 use crate::tui::keymap_hint::{self, KeymapHint};
 use crate::tui::markdown::render_markdown_message;
 use crate::tui::preview::{
-    render_message_body, render_session_document_with_options, split_sticky_body, DisplayBlock,
-    DisplayDocument, SessionRenderOptions,
+    render_session_document_with_options, split_sticky_body, DisplayBlock, DisplayDocument,
+    SessionRenderOptions,
 };
 use crate::tui::profile;
 use crate::tui::statusline;
+use crate::tui::text_layout::LayoutDocument;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
     abbreviate_home_path, agent_badge, block_title, format_line_count, relative_time,
-    right_block_title, session_display_title, session_message_label, sticky_header_for_scroll,
-    sticky_rows_from_line_markers, wrapped_text_height, FullLineBackgroundParagraph,
-    StickyHeaderWidget, StickyRowMarker, STICKY_HEADER_HEIGHT,
+    right_block_title, session_display_title, sticky_header_for_scroll,
+    FullLineBackgroundParagraph, StickyHeaderWidget, StickyRowMarker, STICKY_HEADER_HEIGHT,
 };
 
 const VIEWER_PAGE_STEP: usize = 12;
@@ -48,6 +47,15 @@ const VIEWER_MATCH_SCROLLOFF: usize = 3;
 pub struct ViewerState {
     pub scroll: usize,
     search: Input,
+    find: Input,
+    input_focus: ViewerInputFocus,
+    find_regex: bool,
+    find_case_sensitive: bool,
+    find_title_hits: [Rect; 2],
+    find_jump: bool,
+    find_anchor: Option<usize>,
+    active_find: Option<usize>,
+    visibility_search: VisibilitySearch,
     active_match: Option<usize>,
     render_cache: Option<ViewerRenderCache>,
     filter_scroll_snapshot: Option<FilterScrollSnapshot>,
@@ -61,15 +69,39 @@ pub struct ViewerState {
 struct ViewerRenderCache {
     path: PathBuf,
     query: String,
+    visibility_search: VisibilitySearch,
+    session: Session,
+    projection: SearchProjection,
+    map: DocumentMap,
+    layout: LayoutDocument,
+    query_ranges: Vec<Vec<Range<usize>>>,
+    query_match: bool,
+    query_match_is_certain: bool,
+    query_undisplayed: usize,
+    query_hidden: usize,
+    query_metadata: usize,
+    query_source_only: usize,
+    query_error: Option<String>,
+    find_signature: Option<(String, bool, bool)>,
+    find_ranges: Vec<Range<usize>>,
+    find_rows: Vec<usize>,
+    find_error: Option<String>,
     width: u16,
     theme_name: ThemeName,
     display_options: DisplayOptions,
-    summary_stamp: Option<(i64, usize, usize)>,
+    summary_stamp: Option<(i64, usize, u64)>,
     total_rows: usize,
     text: Text<'static>,
     match_rows: Vec<usize>,
     sticky_rows: Vec<StickyRowMarker>,
+    sticky_markers: Vec<crate::tui::util::StickyLineMarker>,
     blocks: Vec<ViewerBlock>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewerInputFocus {
+    Search,
+    Find,
 }
 
 #[derive(Debug, Clone)]
@@ -140,13 +172,14 @@ impl Default for ViewerState {
 }
 
 impl ViewerState {
-    const HINTS: [KeymapHint; 8] = [
-        KeymapHint::new("↑↓/PgUp/PgDn/Home/End", "scroll"),
-        KeymapHint::new("⇧Up/⇧Dn", "message"),
-        KeymapHint::new("^⇧Up/^⇧Dn", "user"),
+    const HINTS: [KeymapHint; 9] = [
+        KeymapHint::new("↑↓/Pg", "scroll"),
+        KeymapHint::new("⇧↑↓/^⇧↑↓", "message/user"),
         KeymapHint::new("^N/^P", "matches"),
-        KeymapHint::new("^U/^E", "edit"),
-        KeymapHint::new("^Click/⇧Click (+Alt)", "select"),
+        KeymapHint::new("Tab/^F", "focus"),
+        KeymapHint::new("Alt+R/I", "regex/case"),
+        KeymapHint::new("^⇧F", "filters"),
+        KeymapHint::new("^/⇧Click", "select"),
         KeymapHint::new("Alt+C", "copy"),
         KeymapHint::new("Esc", "close"),
     ];
@@ -159,6 +192,15 @@ impl ViewerState {
         Self {
             scroll: 0,
             search: Input::default().with_value(query.to_owned()),
+            find: Input::default(),
+            input_focus: ViewerInputFocus::Find,
+            find_regex: false,
+            find_case_sensitive: false,
+            find_title_hits: [Rect::ZERO; 2],
+            find_jump: true,
+            find_anchor: None,
+            active_find: None,
+            visibility_search: VisibilitySearch::default(),
             active_match: None,
             render_cache: None,
             filter_scroll_snapshot: None,
@@ -173,6 +215,35 @@ impl ViewerState {
         self.search.value()
     }
 
+    pub fn find_query(&self) -> &str {
+        self.find.value()
+    }
+
+    pub(crate) fn search_is_focused(&self) -> bool {
+        self.input_focus == ViewerInputFocus::Search
+    }
+
+    pub(crate) fn set_search_options(&mut self, visibility: VisibilitySearch, find_jump: bool) {
+        if self.visibility_search != visibility {
+            self.visibility_search = visibility;
+        }
+        self.find_jump = find_jump;
+    }
+
+    pub(crate) fn reset_find_anchor(&mut self) {
+        self.find_anchor = None;
+    }
+
+    fn toggle_find_regex(&mut self) {
+        self.find_regex = !self.find_regex;
+        self.active_find = None;
+    }
+
+    fn toggle_find_case(&mut self) {
+        self.find_case_sensitive = !self.find_case_sensitive;
+        self.active_find = None;
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn handle_key(
         &mut self,
@@ -184,8 +255,67 @@ impl ViewerState {
         theme_name: ThemeName,
         display_options: DisplayOptions,
     ) -> ViewerOutcome {
+        if matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+        ) {
+            self.reset_find_anchor();
+        }
         match key.code {
             KeyCode::Esc => ViewerOutcome::Close,
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.input_focus = match self.input_focus {
+                    ViewerInputFocus::Search => ViewerInputFocus::Find,
+                    ViewerInputFocus::Find => ViewerInputFocus::Search,
+                };
+                ViewerOutcome::Stay
+            }
+            KeyCode::Char('f') if key.modifiers == KeyModifiers::CONTROL => {
+                self.input_focus = ViewerInputFocus::Find;
+                ViewerOutcome::Stay
+            }
+            KeyCode::Char('r')
+                if key.modifiers == KeyModifiers::ALT
+                    && self.input_focus == ViewerInputFocus::Find =>
+            {
+                self.toggle_find_regex();
+                if let Some(session) = session {
+                    self.render_cache(area, session, summary, theme, theme_name, display_options);
+                }
+                ViewerOutcome::Stay
+            }
+            KeyCode::Char('i')
+                if key.modifiers == KeyModifiers::ALT
+                    && self.input_focus == ViewerInputFocus::Find =>
+            {
+                self.toggle_find_case();
+                if let Some(session) = session {
+                    self.render_cache(area, session, summary, theme, theme_name, display_options);
+                }
+                ViewerOutcome::Stay
+            }
+            KeyCode::Enter if self.input_focus == ViewerInputFocus::Find => {
+                let direction = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    MatchDirection::Previous
+                } else {
+                    MatchDirection::Next
+                };
+                self.jump_to_match(
+                    direction,
+                    area,
+                    session,
+                    summary,
+                    theme,
+                    theme_name,
+                    display_options,
+                );
+                ViewerOutcome::Stay
+            }
             KeyCode::Char('c') if key.modifiers == KeyModifiers::ALT => {
                 if let Some(session) = session {
                     self.render_cache(area, session, summary, theme, theme_name, display_options);
@@ -293,11 +423,30 @@ impl ViewerState {
                 ViewerOutcome::Stay
             }
             _ => {
-                let before = self.search.value().to_owned();
-                self.search.handle_event(&Event::Key(key));
-                if self.search.value() != before {
-                    self.active_match = None;
-                    self.render_cache = None;
+                let input = match self.input_focus {
+                    ViewerInputFocus::Search => &mut self.search,
+                    ViewerInputFocus::Find => &mut self.find,
+                };
+                let before = input.value().to_owned();
+                input.handle_event(&Event::Key(key));
+                if input.value() != before {
+                    match self.input_focus {
+                        ViewerInputFocus::Search => self.active_match = None,
+                        ViewerInputFocus::Find => {
+                            self.active_find = None;
+                            self.find_anchor.get_or_insert(self.scroll);
+                        }
+                    }
+                    if let Some(session) = session {
+                        self.render_cache(
+                            area,
+                            session,
+                            summary,
+                            theme,
+                            theme_name,
+                            display_options,
+                        );
+                    }
                 }
                 ViewerOutcome::Stay
             }
@@ -321,27 +470,50 @@ impl ViewerState {
         let chunks = split_viewer(area);
         let body_area = chunks[0];
 
-        let (total_rows, mut text, match_rows, sticky_rows, blocks) = {
-            let cache =
-                self.render_cache(area, session, summary, theme, theme_name, display_options);
+        self.render_cache(area, session, summary, theme, theme_name, display_options);
+        let (total_rows, mut text, sticky_rows, blocks) = {
+            let cache = self
+                .render_cache
+                .as_ref()
+                .expect("viewer cache should exist");
+            let mut text = cache.layout.text.clone();
+            let query_ranges: Vec<_> = cache.query_ranges.iter().flatten().cloned().collect();
+            cache
+                .layout
+                .overlay_ranges(&mut text, &query_ranges, theme.search_match_style());
+            cache.layout.overlay_ranges(
+                &mut text,
+                &cache.find_ranges,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::UNDERLINED),
+            );
+            let active_ranges = match self.input_focus {
+                ViewerInputFocus::Search => self
+                    .active_match
+                    .and_then(|index| cache.query_ranges.get(index))
+                    .cloned()
+                    .unwrap_or_default(),
+                ViewerInputFocus::Find => self
+                    .active_find
+                    .and_then(|index| cache.find_ranges.get(index))
+                    .cloned()
+                    .into_iter()
+                    .collect(),
+            };
+            cache
+                .layout
+                .overlay_ranges(&mut text, &active_ranges, theme.active_match_style());
             (
                 cache.total_rows,
-                cache.text.clone(),
-                cache.match_rows.clone(),
+                text,
                 cache.sticky_rows.clone(),
                 cache.blocks.clone(),
             )
         };
-        if let Some(active_match_row) = self
-            .active_match
-            .and_then(|index| match_rows.get(index).copied())
-        {
-            let viewport_width = body_area.width.saturating_sub(2);
-            highlight_active_match(&mut text, active_match_row, viewport_width, theme);
-        }
         for block in &blocks {
             if self.selected_blocks.contains(&block.source.id) {
-                for line in &mut text.lines[block.source.lines.clone()] {
+                for line in &mut text.lines[block.rows.clone()] {
                     line.style = line.style.bg(theme.selection);
                     for span in &mut line.spans {
                         if span.style.bg != Some(theme.search_match_bg)
@@ -390,17 +562,11 @@ impl ViewerState {
                 .set_style(header_area, Style::default().bg(theme.selection));
         }
         frame.render_widget(
-            FullLineBackgroundParagraph::new(text).scroll(scroll),
+            FullLineBackgroundParagraph::prewrapped(text).scroll(scroll),
             body_content_area,
         );
 
-        // Split footer into search bar (bordered) and keymap hints.
-        let footer_chunks = Layout::vertical([
-            Constraint::Length(VIEWER_SEARCH_HEIGHT),
-            Constraint::Length(VIEWER_HINTS_HEIGHT),
-        ])
-        .split(chunks[1]);
-
+        let (input_areas, hints_area) = viewer_inputs(area);
         let status = self.status.as_ref().filter(|entry| !entry.expired());
         let selection_label = status.map(|entry| entry.label.clone()).unwrap_or_else(|| {
             if self.selected_blocks.is_empty() {
@@ -409,41 +575,97 @@ impl ViewerState {
                 format!("{} selected · Alt+C copy", self.selected_blocks.len())
             }
         });
-        let search_bar = Paragraph::new(Line::from(Span::styled(
-            self.search.value().to_owned(),
-            Style::default().fg(theme.text),
-        )))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme.border_style(false))
-                .title(block_title(Span::styled(
-                    "Search",
-                    Style::default().fg(theme.accent),
-                )))
-                .title(right_block_title(Span::styled(
-                    selection_label,
-                    Style::default().fg(
-                        if status.is_some_and(|entry| {
-                            matches!(entry.kind, statusline::EntryKind::Failed)
-                        }) {
-                            ratatui::style::Color::Red
-                        } else {
-                            theme.accent
-                        },
-                    ),
-                ))),
+        let cache = self
+            .render_cache
+            .as_ref()
+            .expect("viewer cache should exist");
+        let search_label = {
+            let mut label = match_count(self.active_match, cache.query_ranges.len());
+            if cache.query_undisplayed > 0 {
+                label.push_str(&format!(" · {} undisplayed", cache.query_undisplayed));
+            }
+            label
+        };
+        render_viewer_input(
+            frame,
+            input_areas[0],
+            &self.search,
+            Line::from("Search"),
+            &search_label,
+            self.input_focus == ViewerInputFocus::Search,
+            theme,
         );
-        frame.render_widget(search_bar, footer_chunks[0]);
-
-        keymap_hint::render(frame, footer_chunks[1], &Self::HINTS, theme, "");
-
-        let cursor_x = footer_chunks[0]
-            .x
-            .saturating_add(1 + self.search.visual_cursor() as u16)
-            .min(footer_chunks[0].right().saturating_sub(1));
-        frame.set_cursor_position((cursor_x, footer_chunks[0].y.saturating_add(1)));
+        let find_label = if cache.find_error.is_some() {
+            "Invalid regex".to_owned()
+        } else {
+            match_count(self.active_find, cache.find_ranges.len())
+        };
+        let (find_title, hits) = find_input_title(
+            input_areas[1],
+            self.find_regex,
+            self.find_case_sensitive,
+            &find_label,
+        );
+        self.find_title_hits = hits;
+        render_viewer_input(
+            frame,
+            input_areas[1],
+            &self.find,
+            find_title,
+            &find_label,
+            self.input_focus == ViewerInputFocus::Find,
+            theme,
+        );
+        let notice = cache
+            .find_error
+            .as_ref()
+            .or(cache.query_error.as_ref())
+            .map(String::as_str)
+            .or_else(|| {
+                (!cache.query_match
+                    && cache.query_match_is_certain
+                    && !self.search.value().is_empty())
+                .then_some("Query does not match this session")
+            });
+        if let Some(notice) = notice {
+            frame.render_widget(
+                Paragraph::new(notice.lines().last().unwrap_or(notice))
+                    .style(Style::default().fg(theme.accent)),
+                Rect::new(
+                    hints_area.x,
+                    hints_area.y,
+                    hints_area.width,
+                    hints_area.height.min(1),
+                ),
+            );
+            keymap_hint::render(
+                frame,
+                Rect::new(
+                    hints_area.x,
+                    hints_area.y + 1,
+                    hints_area.width,
+                    hints_area.height.saturating_sub(1),
+                ),
+                &Self::HINTS,
+                theme,
+                &selection_label,
+            );
+        } else {
+            let mut labels = Vec::new();
+            if cache.query_hidden > 0 {
+                labels.push(format!("{} hidden", cache.query_hidden));
+            }
+            if cache.query_metadata > 0 {
+                labels.push(format!("{} metadata", cache.query_metadata));
+            }
+            if cache.query_source_only > 0 {
+                labels.push(format!("{} source-only", cache.query_source_only));
+            }
+            if !selection_label.is_empty() {
+                labels.push(selection_label);
+            }
+            keymap_hint::render(frame, hints_area, &Self::HINTS, theme, &labels.join(" · "));
+        }
     }
 
     pub fn max_scroll(
@@ -494,6 +716,27 @@ impl ViewerState {
 
     /// Hit test against the same wrapped rows and clamped scroll used by rendering.
     pub(crate) fn handle_mouse(&mut self, area: Rect, mouse: MouseEvent) {
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            let (inputs, _) = viewer_inputs(area);
+            for (index, input) in inputs.iter().enumerate() {
+                if input.contains((mouse.column, mouse.row).into()) {
+                    self.input_focus = if index == 0 {
+                        ViewerInputFocus::Search
+                    } else {
+                        ViewerInputFocus::Find
+                    };
+                    if index == 1 && mouse.modifiers.is_empty() {
+                        let position = (mouse.column, mouse.row).into();
+                        if self.find_title_hits[0].contains(position) {
+                            self.toggle_find_regex();
+                        } else if self.find_title_hits[1].contains(position) {
+                            self.toggle_find_case();
+                        }
+                    }
+                    return;
+                }
+            }
+        }
         // Alt is optional for toggle/range gestures, but Alt-click alone is ignored.
         let modifiers = mouse.modifiers.difference(KeyModifiers::ALT);
         if mouse.kind != MouseEventKind::Down(MouseButton::Left)
@@ -629,35 +872,49 @@ impl ViewerState {
         display_options: DisplayOptions,
     ) {
         let Some(session) = session else {
-            self.active_match = None;
+            match self.input_focus {
+                ViewerInputFocus::Search => self.active_match = None,
+                ViewerInputFocus::Find => self.active_find = None,
+            }
             return;
         };
 
         let body_area = Self::body_area(area);
-        let matches = self
-            .render_cache(area, session, summary, theme, theme_name, display_options)
-            .match_rows
-            .clone();
+        self.render_cache(area, session, summary, theme, theme_name, display_options);
+        let cache = self
+            .render_cache
+            .as_ref()
+            .expect("viewer cache should exist");
+        let (matches, active) = match self.input_focus {
+            ViewerInputFocus::Search => (&cache.match_rows, self.active_match),
+            ViewerInputFocus::Find => (&cache.find_rows, self.active_find),
+        };
         if matches.is_empty() {
-            self.active_match = None;
+            match self.input_focus {
+                ViewerInputFocus::Search => self.active_match = None,
+                ViewerInputFocus::Find => self.active_find = None,
+            }
             return;
         }
 
         let next_index = match direction {
-            MatchDirection::Next => next_match_index(&matches, self.active_match, self.scroll),
-            MatchDirection::Previous => {
-                previous_match_index(&matches, self.active_match, self.scroll)
-            }
+            MatchDirection::Next => next_match_index(matches, active, self.scroll),
+            MatchDirection::Previous => previous_match_index(matches, active, self.scroll),
         };
 
-        self.active_match = Some(next_index);
+        let row = matches[next_index];
+        match self.input_focus {
+            ViewerInputFocus::Search => self.active_match = Some(next_index),
+            ViewerInputFocus::Find => self.active_find = Some(next_index),
+        }
         let max_scroll =
             self.max_scroll(area, session, summary, theme, theme_name, display_options);
         let viewport_height = body_area
             .height
             .saturating_sub(2)
             .saturating_sub(STICKY_HEADER_HEIGHT) as usize;
-        self.scroll = scroll_for_match(matches[next_index], viewport_height, max_scroll);
+        self.scroll = scroll_for_match(row, viewport_height, max_scroll);
+        self.reset_find_anchor();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -676,16 +933,14 @@ impl ViewerState {
             return;
         };
 
-        let body_area = Self::body_area(area);
-        let viewport_width = body_area.width.saturating_sub(2);
-        let rows = collect_message_rows_with_options(
-            session,
-            summary,
-            theme,
-            viewport_width,
-            scope,
-            self.render_options(display_options),
-        );
+        let rows: Vec<_> = self
+            .render_cache(area, session, summary, theme, theme_name, display_options)
+            .blocks
+            .iter()
+            .filter_map(|block| {
+                navigable_block(session, block.source.id, scope).then_some(block.rows.start)
+            })
+            .collect();
         let Some(target_row) = message_row_for_scroll(&rows, self.scroll, direction) else {
             return;
         };
@@ -714,42 +969,51 @@ impl ViewerState {
         }
         let query = self.search.value().to_owned();
         let summary_stamp = summary.map(summary_stamp);
+        let previous_find_signature = self
+            .render_cache
+            .as_ref()
+            .and_then(|cache| cache.find_signature.clone());
 
-        let cache_miss = self.render_cache.as_ref().is_none_or(|cache| {
+        let base_changed = self.render_cache.as_ref().is_none_or(|cache| {
             cache.path != path
-                || cache.query != query
-                || cache.width != width
+                || cache.session != *session
                 || cache.theme_name != theme_name
                 || cache.display_options != display_options
                 || cache.summary_stamp != summary_stamp
         });
-        if cache_miss {
+        if base_changed {
             profile::event("viewer.cache.miss");
-            let highlight_query = (!query.is_empty()).then_some(query.as_str());
-            let document = render_viewer_document(
-                session,
-                summary,
-                theme,
-                highlight_query,
-                self.render_options(display_options),
-            );
+            let document = {
+                let _profile = profile::scope("viewer.base.render");
+                render_viewer_document(
+                    session,
+                    summary,
+                    theme,
+                    None,
+                    self.render_options(display_options),
+                )
+            };
             let text = document.text;
-            let total_rows = wrapped_text_height(&text, width).max(1);
-            let match_rows = collect_match_rows_in_text(&text, &query, width);
-            let sticky_rows = sticky_rows_from_line_markers(&text, &document.sticky_markers, width);
-            let mut row_offsets = Vec::with_capacity(text.lines.len() + 1);
-            row_offsets.push(0);
-            for line in &text.lines {
-                row_offsets.push(
-                    row_offsets.last().copied().unwrap_or(0)
-                        + wrapped_rendered_line_height(line, width as usize).max(1),
-                );
-            }
+            let layout = {
+                let _profile = profile::scope("viewer.layout");
+                LayoutDocument::new(&text, width)
+            };
+            let total_rows = layout.height().max(1);
+            let sticky_rows = document
+                .sticky_markers
+                .iter()
+                .map(|marker| StickyRowMarker {
+                    row: layout
+                        .rows_for_lines(marker.line_index..marker.line_index + 1)
+                        .start,
+                    header: marker.header.clone(),
+                })
+                .collect();
             let blocks: Vec<_> = document
                 .blocks
                 .into_iter()
                 .map(|source| ViewerBlock {
-                    rows: row_offsets[source.lines.start]..row_offsets[source.lines.end],
+                    rows: layout.rows_for_lines(source.lines.clone()),
                     source,
                 })
                 .collect();
@@ -763,19 +1027,196 @@ impl ViewerState {
             }
             self.render_cache = Some(ViewerRenderCache {
                 path,
-                query,
+                query: query.clone(),
+                visibility_search: self.visibility_search,
+                session: session.clone(),
+                projection: SearchProjection::from_session(session),
+                map: document.map,
+                layout,
+                query_ranges: Vec::new(),
+                query_match: true,
+                query_match_is_certain: true,
+                query_undisplayed: 0,
+                query_hidden: 0,
+                query_metadata: 0,
+                query_source_only: 0,
+                query_error: None,
+                find_signature: previous_find_signature,
+                find_ranges: Vec::new(),
+                find_rows: Vec::new(),
+                find_error: None,
                 width,
                 theme_name,
                 display_options,
                 summary_stamp,
                 total_rows,
                 text,
-                match_rows,
+                match_rows: Vec::new(),
                 sticky_rows,
+                sticky_markers: document.sticky_markers,
                 blocks,
             });
         } else {
             profile::event("viewer.cache.hit");
+        }
+
+        let cache = self
+            .render_cache
+            .as_mut()
+            .expect("viewer cache should exist");
+        let layout_changed = cache.width != width;
+        if layout_changed {
+            let _profile = profile::scope("viewer.layout");
+            cache.layout = LayoutDocument::new(&cache.text, width);
+            cache.width = width;
+            cache.total_rows = cache.layout.height().max(1);
+            cache.sticky_rows = cache
+                .sticky_markers
+                .iter()
+                .map(|marker| StickyRowMarker {
+                    row: cache
+                        .layout
+                        .rows_for_lines(marker.line_index..marker.line_index + 1)
+                        .start,
+                    header: marker.header.clone(),
+                })
+                .collect();
+            for block in &mut cache.blocks {
+                block.rows = cache.layout.rows_for_lines(block.source.lines.clone());
+            }
+        }
+        let query_changed = base_changed
+            || cache.query != query
+            || cache.visibility_search != self.visibility_search;
+        if query_changed {
+            let _profile = profile::scope("viewer.query.match");
+            cache.query = query;
+            cache.visibility_search = self.visibility_search;
+            cache.query_ranges.clear();
+            cache.query_error = None;
+            cache.query_undisplayed = 0;
+            cache.query_hidden = 0;
+            cache.query_metadata = 0;
+            cache.query_source_only = 0;
+            match QueryPlan::compile(&cache.query, self.visibility_search, display_options) {
+                Ok(plan) => {
+                    let matches = plan.matches(&cache.projection);
+                    cache.query_match = matches.is_match;
+                    cache.query_match_is_certain = matches.match_is_certain;
+                    if !matches.match_is_certain {
+                        cache.query_error = Some(
+                            "Phrase highlights and match status may differ from indexed results"
+                                .to_owned(),
+                        );
+                    }
+                    let projected = cache.map.project_matches(&matches.matches);
+                    for (matched, ranges) in matches.matches.into_iter().zip(projected) {
+                        if ranges.is_empty() {
+                            cache.query_undisplayed += 1;
+                            if matched.sources.iter().any(|source| {
+                                cache.projection.segments.iter().any(|segment| {
+                                    segment.source == source.source
+                                        && !segment.visibility.is_visible(display_options)
+                                })
+                            }) {
+                                cache.query_hidden += 1;
+                            } else if matched.sources.iter().any(|source| {
+                                matches!(
+                                    source.source.block,
+                                    SourceBlock::Title | SourceBlock::Context
+                                )
+                            }) {
+                                cache.query_metadata += 1;
+                            } else {
+                                cache.query_source_only += 1;
+                            }
+                        } else {
+                            cache.query_ranges.push(ranges);
+                        }
+                    }
+                    cache.query_ranges.sort_by(|left, right| {
+                        left.iter()
+                            .map(|range| (range.start, range.end))
+                            .cmp(right.iter().map(|range| (range.start, range.end)))
+                    });
+                    cache.query_ranges.dedup();
+                }
+                Err(error) => {
+                    cache.query_error = Some(error.to_string());
+                    cache.query_match = false;
+                    cache.query_match_is_certain = true;
+                }
+            }
+        }
+        if query_changed || layout_changed {
+            cache.match_rows = cache
+                .query_ranges
+                .iter()
+                .filter_map(|ranges| {
+                    ranges
+                        .first()
+                        .map(|range| cache.layout.row_for_offset(range.start))
+                })
+                .collect();
+        }
+        let signature = (
+            self.find.value().to_owned(),
+            self.find_regex,
+            self.find_case_sensitive,
+        );
+        let find_changed = cache.find_signature.as_ref() != Some(&signature);
+        if base_changed || find_changed {
+            let _profile = profile::scope("viewer.find.match");
+            profile::event("viewer.find.match");
+            cache.find_signature = Some(signature);
+            match find_occurrences(
+                &cache.map.plain,
+                self.find.value(),
+                self.find_regex,
+                self.find_case_sensitive,
+            ) {
+                Ok(ranges) => {
+                    cache.find_ranges = ranges;
+                    cache.find_error = None;
+                }
+                Err(error) => {
+                    cache.find_ranges.clear();
+                    cache.find_error = Some(format!("Invalid regex: {error}"));
+                }
+            }
+        }
+        if base_changed || find_changed || layout_changed {
+            cache.find_rows = cache
+                .find_ranges
+                .iter()
+                .map(|range| cache.layout.row_for_offset(range.start))
+                .collect();
+        }
+        if self
+            .active_match
+            .is_some_and(|index| index >= cache.query_ranges.len())
+        {
+            self.active_match = None;
+        }
+        if self
+            .active_find
+            .is_some_and(|index| index >= cache.find_ranges.len())
+        {
+            self.active_find = None;
+        }
+        if find_changed {
+            self.active_find = None;
+            let (_, jump) = find_directives(self.find.value(), self.find_jump);
+            if jump && !cache.find_rows.is_empty() {
+                let anchor = *self.find_anchor.get_or_insert(self.scroll);
+                let index = next_match_index(&cache.find_rows, None, anchor);
+                self.active_find = Some(index);
+                self.scroll = scroll_for_match(
+                    cache.find_rows[index],
+                    viewport_height(area),
+                    cache.total_rows.saturating_sub(viewport_height(area)),
+                );
+            }
         }
 
         let cache = self
@@ -798,9 +1239,175 @@ impl ViewerState {
 }
 
 fn split_viewer(area: Rect) -> [Rect; 2] {
-    let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(VIEWER_FOOTER_HEIGHT)])
-        .split(area);
+    let footer_height = VIEWER_FOOTER_HEIGHT
+        + if area.width < 80 {
+            VIEWER_SEARCH_HEIGHT
+        } else {
+            0
+        };
+    let chunks =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(footer_height)]).split(area);
     [chunks[0], chunks[1]]
+}
+
+fn viewer_inputs(area: Rect) -> ([Rect; 2], Rect) {
+    let footer = split_viewer(area)[1];
+    let input_height = VIEWER_SEARCH_HEIGHT * if area.width < 80 { 2 } else { 1 };
+    let chunks = Layout::vertical([
+        Constraint::Length(input_height),
+        Constraint::Length(VIEWER_HINTS_HEIGHT),
+    ])
+    .split(footer);
+    let inputs = if area.width < 80 {
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(chunks[0])
+    } else {
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[0])
+    };
+    ([inputs[0], inputs[1]], chunks[1])
+}
+
+fn match_count(active: Option<usize>, count: usize) -> String {
+    format!(
+        "{}/{}",
+        active
+            .filter(|index| *index < count)
+            .map_or(0, |index| index + 1),
+        count
+    )
+}
+
+/// Title controls use the same spans as drawing, clipped before the right title
+/// that Ratatui renders over them. Save these regions for the displayed frame.
+fn find_input_title(
+    area: Rect,
+    regex: bool,
+    case_sensitive: bool,
+    counter: &str,
+) -> (Line<'static>, [Rect; 2]) {
+    let prefix = "Find · ";
+    let separator = " · ";
+    let mode = if regex { "Regex" } else { "Substring" };
+    let case = if case_sensitive {
+        "Case"
+    } else {
+        "Ignore case"
+    };
+    let clickable = Style::default().add_modifier(Modifier::UNDERLINED);
+    let title = Line::from(vec![
+        Span::raw(prefix),
+        Span::styled(mode, clickable),
+        Span::raw(separator),
+        Span::styled(case, clickable),
+    ]);
+    if area.is_empty() {
+        return (title, [Rect::ZERO; 2]);
+    }
+    let left = area.x.saturating_add(1);
+    let right = area.right().saturating_sub(1);
+    let counter_width = right_block_title(counter.to_owned()).width() as u16;
+    let visible_end = right.saturating_sub(counter_width).max(left);
+    let mode_start = left.saturating_add(block_title(prefix).width() as u16);
+    let case_start = mode_start
+        .saturating_add(Span::raw(mode).width() as u16)
+        .saturating_add(Span::raw(separator).width() as u16);
+    let visible_label = |start: u16, label: &str| {
+        let end = start
+            .saturating_add(Span::raw(label).width() as u16)
+            .min(visible_end);
+        Rect::new(start.min(end), area.y, end.saturating_sub(start), 1)
+    };
+    (
+        title,
+        [
+            visible_label(mode_start, mode),
+            visible_label(case_start, case),
+        ],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_viewer_input(
+    frame: &mut Frame,
+    area: Rect,
+    input: &Input,
+    title: Line<'static>,
+    counter: &str,
+    focused: bool,
+    theme: &Theme,
+) {
+    let available = area.width.saturating_sub(2) as usize;
+    let scroll = input.visual_scroll(available);
+    frame.render_widget(
+        Paragraph::new(input.value().to_owned())
+            .style(Style::default().fg(theme.text))
+            .scroll((0, scroll.min(u16::MAX as usize) as u16))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(theme.border_style(focused))
+                    .title(block_title(title.style(Style::default().fg(theme.accent))))
+                    .title(right_block_title(Span::styled(
+                        counter.to_owned(),
+                        Style::default().fg(theme.accent),
+                    ))),
+            ),
+        area,
+    );
+    if focused && area.width >= 3 && area.height >= 3 {
+        let cursor_x = area
+            .x
+            .saturating_add(1 + input.visual_cursor().saturating_sub(scroll) as u16)
+            .min(area.right().saturating_sub(2));
+        frame.set_cursor_position((cursor_x, area.y.saturating_add(1)));
+    }
+}
+
+/// A leading backslash quotes a jump directive in Substring mode. Regex mode
+/// can use the ordinary `\(\?j\)` escaping to search for a literal directive.
+fn find_directives(mut expression: &str, default_jump: bool) -> (&str, bool) {
+    let mut jump = default_jump;
+    loop {
+        if let Some(quoted) = expression.strip_prefix('\\') {
+            if quoted.starts_with("(?j)") || quoted.starts_with("(?-j)") {
+                return (quoted, jump);
+            }
+        }
+        if let Some(rest) = expression.strip_prefix("(?j)") {
+            expression = rest;
+            jump = true;
+        } else if let Some(rest) = expression.strip_prefix("(?-j)") {
+            expression = rest;
+            jump = false;
+        } else {
+            return (expression, jump);
+        }
+    }
+}
+
+fn find_occurrences(
+    document: &str,
+    expression: &str,
+    regex_mode: bool,
+    case_sensitive: bool,
+) -> Result<Vec<Range<usize>>, regex::Error> {
+    let (pattern, _) = find_directives(expression, true);
+    if pattern.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pattern = if regex_mode {
+        pattern.to_owned()
+    } else {
+        regex::escape(pattern)
+    };
+    let regex = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!case_sensitive)
+        .build()?;
+    Ok(regex
+        .find_iter(document)
+        .map(|matched| matched.range())
+        .collect())
 }
 
 fn viewport_height(area: Rect) -> usize {
@@ -852,8 +1459,13 @@ fn render_viewer_document(
             header: marker.header,
         }
     }));
+    let text = Text::from(lines);
+    let mut map = DocumentMap::from_text(&text);
+    let session_offset = map.line_starts.get(session_start).copied().unwrap_or(0);
+    map.extend_origins(&session_doc.map, session_offset);
     DisplayDocument {
-        text: Text::from(lines),
+        text,
+        map,
         sticky_markers,
         blocks,
     }
@@ -872,11 +1484,13 @@ fn render_summary_leadin(
     )
 }
 
-fn summary_stamp(summary: &SummarySidecar) -> (i64, usize, usize) {
+fn summary_stamp(summary: &SummarySidecar) -> (i64, usize, u64) {
+    let mut hasher = DefaultHasher::new();
+    summary.body.hash(&mut hasher);
     (
         summary.generated_at.timestamp(),
         summary.line_count,
-        summary.body.len(),
+        hasher.finish(),
     )
 }
 
@@ -938,83 +1552,7 @@ pub(crate) fn scroll_for_match(
         .min(max_scroll)
 }
 
-/// Collect wrapped-row indices that contain a match for `query` within an
-/// already-rendered `Text`. Shared with the preview pane so it can navigate
-/// matches without re-rendering the session.
-pub(crate) fn collect_match_rows_in_text(text: &Text<'_>, query: &str, width: u16) -> Vec<usize> {
-    let terms = extract_highlight_terms(query);
-    if terms.is_empty() || width == 0 {
-        return Vec::new();
-    }
-
-    let width = width as usize;
-    let mut rows = Vec::new();
-    let mut row_offset = 0usize;
-    for line in &text.lines {
-        let content = line
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        for relative_row in collect_line_match_rows(&content, width, &terms) {
-            let absolute_row = row_offset + relative_row;
-            if rows.last().copied() != Some(absolute_row) {
-                rows.push(absolute_row);
-            }
-        }
-        row_offset += wrapped_rendered_line_height(line, width);
-    }
-    rows
-}
-
-/// Re-style search-match spans on the source line containing the active match
-/// row so the "current" match stands out from the rest.
-pub(crate) fn highlight_active_match(
-    text: &mut Text<'_>,
-    active_row: usize,
-    width: u16,
-    theme: &Theme,
-) {
-    if width == 0 {
-        return;
-    }
-    let width = width as usize;
-    let mut row_offset = 0usize;
-    let active_match_style = theme.active_match_style();
-    for line in text.lines.iter_mut() {
-        let h = wrapped_rendered_line_height(line, width);
-        if active_row >= row_offset && active_row < row_offset + h {
-            // This source line contains the active match row — promote highlights.
-            for span in &mut line.spans {
-                if span.style.bg == Some(theme.search_match_bg) {
-                    span.style = span.style.patch(active_match_style);
-                }
-            }
-            return;
-        }
-        row_offset += h;
-    }
-}
-
 #[cfg(test)]
-fn collect_match_rows(
-    session: &Session,
-    summary: Option<&SummarySidecar>,
-    theme: &Theme,
-    query: &str,
-    width: u16,
-) -> Vec<usize> {
-    let highlight_query = (!query.is_empty()).then_some(query);
-    let document = render_viewer_document(
-        session,
-        summary,
-        theme,
-        highlight_query,
-        SessionRenderOptions::default(),
-    );
-    collect_match_rows_in_text(&document.text, query, width)
-}
-
 pub(crate) fn collect_message_rows(
     session: &Session,
     summary: Option<&SummarySidecar>,
@@ -1027,6 +1565,7 @@ pub(crate) fn collect_message_rows(
     collect_message_rows_with_options(session, summary, theme, width, scope, options)
 }
 
+#[cfg(test)]
 pub(crate) fn collect_message_rows_with_options(
     session: &Session,
     summary: Option<&SummarySidecar>,
@@ -1039,112 +1578,35 @@ pub(crate) fn collect_message_rows_with_options(
         return Vec::new();
     }
 
-    let width = width as usize;
-    let mut rows = Vec::with_capacity(session.messages.len().max(session.cells.len()));
-    let mut row_offset = summary
-        .map(|summary| {
-            wrapped_text_height(&render_summary_leadin(summary, theme, None), width as u16) + 2
-        })
-        .unwrap_or(0);
-
-    if session.cells.is_empty() {
-        for message in &session.messages {
-            if should_skip_message_row(message.role, &message.content, options) {
-                continue;
-            }
-            if matches!(scope, MessageJumpScope::Any)
-                || matches!(scope, MessageJumpScope::UserOnly) && message.role == MessageRole::User
-            {
-                rows.push(row_offset);
-            }
-            row_offset += wrapped_line_height(&message_header_text(message), width);
-
-            let rendered = render_message_body(
-                session.agent,
-                message.role,
-                message.content.as_str(),
-                theme,
-                None,
-            );
-            for line in &rendered.lines {
-                row_offset += wrapped_rendered_line_height(line, width);
-            }
-            row_offset += 1;
-        }
-        return rows;
-    }
-
-    for cell in &session.cells {
-        if matches!(cell, SessionCell::SessionInfo(_) | SessionCell::Metrics(_)) {
-            continue;
-        }
-        let SessionCell::Message {
-            role,
-            content,
-            timestamp,
-        } = cell
-        else {
-            let before = row_offset;
-            row_offset += wrapped_text_height(
-                &render_session_document_with_options(
-                    &Session {
-                        cells: vec![cell.clone()],
-                        messages: Vec::new(),
-                        session_info: None,
-                        ..session.clone()
-                    },
-                    theme,
-                    None,
-                    options,
-                )
-                .text,
-                width as u16,
-            );
-            if row_offset == before {
-                row_offset += 1;
-            }
-            continue;
-        };
-        if should_skip_message_row(*role, content, options) {
-            continue;
-        }
-        if matches!(scope, MessageJumpScope::Any)
-            || matches!(scope, MessageJumpScope::UserOnly) && *role == MessageRole::User
-        {
-            rows.push(row_offset);
-        }
-        let message = crate::parse::SessionMessage {
-            role: *role,
-            content: content.clone(),
-            timestamp: *timestamp,
-            tool_name: None,
-        };
-        row_offset += wrapped_line_height(&message_header_text(&message), width);
-        let rendered = render_message_body(session.agent, *role, content.as_str(), theme, None);
-        for line in &rendered.lines {
-            row_offset += wrapped_rendered_line_height(line, width);
-        }
-        row_offset += 1;
-    }
-
-    rows
+    let document = render_viewer_document(session, summary, theme, None, options);
+    let layout = LayoutDocument::new(&document.text, width);
+    document
+        .blocks
+        .iter()
+        .filter(|block| navigable_block(session, block.id, scope))
+        .map(|block| layout.rows_for_lines(block.lines.clone()).start)
+        .collect()
 }
 
-fn should_skip_message_row(
-    role: MessageRole,
-    content: &str,
-    options: SessionRenderOptions,
-) -> bool {
-    !crate::tui::preview::shows_message_role(options.display_options, role)
-        || options.hide_project_docs_autodump && is_project_docs_autodump(role, content)
-        || options.display_options.hide_skill_text_injection
-            && crate::parse::is_skill_text_injection(role, content)
-        || options.display_options.hide_internal_context
-            && is_internal_context_injection(role, content)
+fn navigable_block(session: &Session, id: SessionBlockId, scope: MessageJumpScope) -> bool {
+    let is_user = match id {
+        SessionBlockId::Message(index) => session
+            .messages
+            .get(index)
+            .map(|message| message.role == MessageRole::User),
+        SessionBlockId::Cell(index) => match session.cells.get(index) {
+            Some(SessionCell::SessionInfo(_) | SessionCell::Metrics(_)) | None => None,
+            Some(SessionCell::Message { role, .. }) => Some(*role == MessageRole::User),
+            Some(_) => Some(false),
+        },
+        _ => None,
+    };
+    is_user.is_some_and(|is_user| scope == MessageJumpScope::Any || is_user)
 }
 
+#[cfg(test)]
 fn message_header_text(message: &crate::parse::SessionMessage) -> String {
-    let label = session_message_label(message);
+    let label = crate::tui::util::session_message_label(message);
     let timestamp = message
         .timestamp
         .map(|timestamp| timestamp.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -1154,173 +1616,6 @@ fn message_header_text(message: &crate::parse::SessionMessage) -> String {
     } else {
         format!("{label} {timestamp}")
     }
-}
-
-fn collect_line_match_rows(line: &str, width: usize, terms: &[String]) -> Vec<usize> {
-    if width == 0 {
-        return Vec::new();
-    }
-
-    let lower = line.to_ascii_lowercase();
-    let wrapped_ranges = wrapped_line_byte_ranges(line, width);
-    let mut rows = Vec::new();
-    let mut index = 0usize;
-
-    while index < line.len() {
-        let mut matched_len = 0usize;
-        for term in terms {
-            if lower[index..].starts_with(term) {
-                matched_len = matched_len.max(term.len());
-            }
-        }
-
-        if matched_len > 0 {
-            let row = wrapped_row_for_match(&wrapped_ranges, index, index + matched_len);
-            if rows.last().copied() != Some(row) {
-                rows.push(row);
-            }
-            index += matched_len;
-            continue;
-        }
-
-        index = line[index..]
-            .grapheme_indices(true)
-            .nth(1)
-            .map(|(offset, _)| index + offset)
-            .unwrap_or(line.len());
-    }
-
-    rows
-}
-
-#[derive(Debug, Clone, Copy)]
-struct WrappedGrapheme {
-    start: usize,
-    end: usize,
-    width: usize,
-    is_whitespace: bool,
-}
-
-fn wrapped_line_byte_ranges(line: &str, width: usize) -> Vec<Range<usize>> {
-    if width == 0 {
-        return Vec::new();
-    }
-
-    let mut rows = Vec::new();
-    let mut pending_line = Vec::new();
-    let mut line_width = 0usize;
-    let mut pending_word = Vec::new();
-    let mut word_width = 0usize;
-    let mut pending_whitespace = std::collections::VecDeque::<WrappedGrapheme>::new();
-    let mut whitespace_width = 0usize;
-    let mut non_whitespace_previous = false;
-
-    for (start, grapheme) in line.grapheme_indices(true) {
-        let symbol_width = UnicodeWidthStr::width(grapheme);
-        if symbol_width > width {
-            continue;
-        }
-
-        let grapheme = WrappedGrapheme {
-            start,
-            end: start + grapheme.len(),
-            width: symbol_width,
-            is_whitespace: is_wrapping_whitespace(grapheme),
-        };
-        let word_found = non_whitespace_previous && grapheme.is_whitespace;
-        let untrimmed_overflow =
-            pending_line.is_empty() && word_width + whitespace_width + grapheme.width > width;
-
-        if word_found || untrimmed_overflow {
-            pending_line.extend(pending_whitespace.drain(..));
-            line_width += whitespace_width;
-            pending_line.append(&mut pending_word);
-            line_width += word_width;
-
-            whitespace_width = 0;
-            word_width = 0;
-        }
-
-        let line_full = line_width >= width;
-        let pending_word_overflow =
-            grapheme.width > 0 && line_width + whitespace_width + word_width >= width;
-
-        if line_full || pending_word_overflow {
-            let mut remaining_width = width.saturating_sub(line_width);
-            push_wrapped_range(&mut rows, &pending_line);
-            pending_line.clear();
-            line_width = 0;
-
-            while let Some(grapheme) = pending_whitespace.front() {
-                if grapheme.width > remaining_width {
-                    break;
-                }
-
-                whitespace_width = whitespace_width.saturating_sub(grapheme.width);
-                remaining_width = remaining_width.saturating_sub(grapheme.width);
-                pending_whitespace.pop_front();
-            }
-
-            if grapheme.is_whitespace && pending_whitespace.is_empty() {
-                continue;
-            }
-        }
-
-        if grapheme.is_whitespace {
-            whitespace_width += grapheme.width;
-            pending_whitespace.push_back(grapheme);
-        } else {
-            word_width += grapheme.width;
-            pending_word.push(grapheme);
-        }
-
-        non_whitespace_previous = !grapheme.is_whitespace;
-    }
-
-    pending_line.extend(pending_whitespace);
-    pending_line.append(&mut pending_word);
-    if pending_line.is_empty() {
-        if rows.is_empty() {
-            rows.push(0..0);
-        }
-    } else {
-        push_wrapped_range(&mut rows, &pending_line);
-    }
-
-    rows
-}
-
-fn is_wrapping_whitespace(grapheme: &str) -> bool {
-    grapheme == "\u{200b}" || grapheme.chars().all(char::is_whitespace) && grapheme != "\u{00a0}"
-}
-
-fn push_wrapped_range(rows: &mut Vec<Range<usize>>, graphemes: &[WrappedGrapheme]) {
-    let Some(first) = graphemes.first() else {
-        rows.push(0..0);
-        return;
-    };
-    let start = first.start;
-    let end = graphemes
-        .last()
-        .map(|grapheme| grapheme.end)
-        .unwrap_or(first.end);
-    rows.push(start..end);
-}
-
-fn wrapped_row_for_match(ranges: &[Range<usize>], start: usize, end: usize) -> usize {
-    ranges
-        .iter()
-        .position(|range| start < range.end && end > range.start)
-        .or_else(|| ranges.iter().position(|range| start <= range.end))
-        .unwrap_or_else(|| ranges.len().saturating_sub(1))
-}
-
-fn wrapped_line_height(line: &str, width: usize) -> usize {
-    wrapped_text_height(&Text::from(Line::from(line.to_owned())), width as u16)
-}
-
-fn wrapped_rendered_line_height(line: &Line<'_>, width: usize) -> usize {
-    wrapped_text_height(&Text::from(line.clone()), width as u16)
 }
 
 pub(crate) fn next_match_index(
@@ -1378,8 +1673,8 @@ mod tests {
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use ratatui::layout::Rect;
-    use ratatui::style::{Modifier, Style};
-    use ratatui::text::{Line, Span, Text};
+    use ratatui::style::Modifier;
+    use ratatui::text::{Line, Text};
     use tui_input::Input;
 
     use crate::export::SessionBlockId;
@@ -1392,12 +1687,438 @@ mod tests {
     use crate::tui::util::wrapped_text_height;
 
     use super::{
-        collect_line_match_rows, collect_match_rows, collect_message_rows,
-        collect_message_rows_with_options, match_scrolloff, message_header_text,
-        message_row_for_scroll, next_match_index, previous_match_index, scroll_for_match,
-        scroll_progress_percent, viewer_title, MessageDirection, MessageJumpScope, ViewerOutcome,
-        ViewerState,
+        collect_message_rows, collect_message_rows_with_options, match_scrolloff,
+        message_header_text, message_row_for_scroll, next_match_index, previous_match_index,
+        scroll_for_match, scroll_progress_percent, viewer_title, MessageDirection,
+        MessageJumpScope, ViewerOutcome, ViewerState,
     };
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // Expected byte ranges, not integer collections.
+    fn find_patterns_support_unicode_literals_regex_directives_and_zero_width() {
+        assert_eq!(
+            super::find_occurrences("K k K", "k", false, false)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            super::find_occurrences("K k K", "k", false, true).unwrap(),
+            [4..5]
+        );
+        assert_eq!(
+            super::find_occurrences("a.*b aZZb", "a.*b", false, false).unwrap(),
+            [0..4]
+        );
+        assert_eq!(
+            super::find_occurrences("foo\nbar", "foo\\nbar", true, false).unwrap(),
+            [0..7]
+        );
+        assert_eq!(
+            super::find_occurrences("x\nx", "(?m)^", true, false).unwrap(),
+            [0..0, 2..2]
+        );
+        assert!(super::find_occurrences("x", "[", true, false).is_err());
+        assert!(super::find_occurrences("x", "(?-j)", false, false)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            super::find_directives("(?j)(?-j)(?j)needle", false),
+            ("needle", true)
+        );
+        assert_eq!(
+            super::find_directives("(?j)(?-j)needle", true),
+            ("needle", false)
+        );
+        assert_eq!(
+            super::find_occurrences("(?j)", "\\(?j)", false, false).unwrap(),
+            [0..4]
+        );
+        assert_eq!(super::find_directives("(?-j)\\(?j)", true), ("(?j)", false));
+        assert_eq!(
+            super::find_occurrences("(?j)", "\\(\\?j\\)", true, false).unwrap(),
+            [0..4]
+        );
+    }
+
+    #[test]
+    fn viewer_find_is_initially_focused_and_layout_stacks_below_eighty_columns() {
+        let viewer = ViewerState::with_search("alpha");
+        assert_eq!(viewer.search_query(), "alpha");
+        assert_eq!(viewer.find_query(), "");
+        assert!(!viewer.search_is_focused());
+        let (wide, _) = super::viewer_inputs(Rect::new(0, 0, 80, 30));
+        assert_eq!(wide[0].y, wide[1].y);
+        let (narrow, _) = super::viewer_inputs(Rect::new(0, 0, 79, 30));
+        assert_eq!(narrow[0].x, narrow[1].x);
+        assert_eq!(narrow[0].bottom(), narrow[1].y);
+    }
+
+    #[test]
+    fn viewer_fields_and_find_render_in_tiny_viewports() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let session = sample_session();
+        for (width, height) in [(1, 1), (2, 3), (20, 5), (79, 8), (80, 5)] {
+            let mut viewer = ViewerState::with_search("alpha");
+            viewer.find = Input::default().with_value("alpha".to_owned());
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    viewer.render(
+                        frame,
+                        frame.area(),
+                        &session,
+                        false,
+                        None,
+                        &Theme::default(),
+                        ThemeName::default(),
+                        DisplayOptions::SHOW_ALL,
+                    )
+                })
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn find_navigation_preserves_individual_same_row_occurrences_and_base_cache() {
+        let session = sample_session();
+        let area = Rect::new(0, 0, 100, 30);
+        let mut viewer = selection_viewer(&session, area);
+        viewer.find_jump = false;
+        let base_lines = viewer.render_cache.as_ref().unwrap().text.lines.as_ptr();
+        let layout_rows = viewer.render_cache.as_ref().unwrap().layout.rows.as_ptr();
+        viewer.find = Input::default().with_value("alpha".to_owned());
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        let cache = viewer.render_cache.as_ref().unwrap();
+        assert_eq!(cache.find_ranges.len(), 3);
+        assert_eq!(cache.find_rows[0], cache.find_rows[1]);
+        assert_eq!(cache.text.lines.as_ptr(), base_lines);
+        assert_eq!(cache.layout.rows.as_ptr(), layout_rows);
+        assert_eq!(viewer.active_find, None);
+        for expected in [Some(0), Some(1), Some(2), Some(0)] {
+            viewer.handle_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                area,
+                Some(&session),
+                None,
+                &Theme::default(),
+                ThemeName::default(),
+                DisplayOptions::SHOW_ALL,
+            );
+            assert_eq!(viewer.active_find, expected);
+        }
+        viewer.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            area,
+            Some(&session),
+            None,
+            &Theme::default(),
+            ThemeName::default(),
+            DisplayOptions::SHOW_ALL,
+        );
+        assert_eq!(viewer.active_find, Some(2));
+        viewer.find_regex = true;
+        viewer.find = Input::default().with_value("[".to_owned());
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        assert!(viewer.render_cache.as_ref().unwrap().find_ranges.is_empty());
+        assert!(viewer.render_cache.as_ref().unwrap().find_error.is_some());
+        assert_eq!(viewer.active_find, None);
+    }
+
+    #[test]
+    fn find_jump_directives_override_preference_and_navigation_remains_available() {
+        let session = multi_turn_session();
+        let area = Rect::new(0, 0, 80, 12);
+        let mut viewer = selection_viewer(&session, area);
+        viewer.scroll = 3;
+        viewer.find = Input::default().with_value("(?-j)second".to_owned());
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        assert_eq!(viewer.scroll, 3);
+        assert_eq!(viewer.active_find, None);
+        viewer.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            area,
+            Some(&session),
+            None,
+            &Theme::default(),
+            ThemeName::default(),
+            DisplayOptions::SHOW_ALL,
+        );
+        assert_eq!(viewer.active_find, Some(0));
+        viewer.find_jump = false;
+        viewer.find = Input::default().with_value("(?j)first".to_owned());
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        assert!(viewer.active_find.is_some());
+    }
+
+    #[test]
+    fn incremental_find_keeps_original_anchor_until_explicit_scrolling() {
+        let mut session = sample_session();
+        let paragraphs = (0..30)
+            .map(|index| match index {
+                5 => "needy".to_owned(),
+                6 => "needle".to_owned(),
+                _ => format!("filler {index}"),
+            })
+            .collect::<Vec<_>>();
+        session.messages.truncate(1);
+        session.messages[0].content = paragraphs.join("\n\n");
+        let area = Rect::new(0, 0, 100, 18);
+        let mut viewer = selection_viewer(&session, area);
+        viewer.find_jump = false;
+        viewer.find = Input::default().with_value("nee".to_owned());
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        let target_row = viewer.render_cache.as_ref().unwrap().find_rows[1];
+        viewer.scroll = target_row - 1;
+        viewer.find_jump = true;
+        viewer.find = Input::default().with_value("needle".to_owned());
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        assert_eq!(viewer.active_find, Some(0));
+        viewer.find = Input::default().with_value("nee".to_owned());
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        assert_eq!(viewer.active_find, Some(1));
+        viewer.handle_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            area,
+            Some(&session),
+            None,
+            &Theme::default(),
+            ThemeName::default(),
+            DisplayOptions::SHOW_ALL,
+        );
+        viewer.find = Input::default().with_value("ne".to_owned());
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        assert_eq!(viewer.active_find, Some(0));
+    }
+
+    #[test]
+    fn viewer_mouse_and_keyboard_switch_focus_without_editing_other_box() {
+        let session = sample_session();
+        let area = Rect::new(0, 0, 100, 30);
+        let mut viewer = selection_viewer(&session, area);
+        viewer.handle_key(
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+            area,
+            Some(&session),
+            None,
+            &Theme::default(),
+            ThemeName::default(),
+            DisplayOptions::SHOW_ALL,
+        );
+        assert_eq!(viewer.find_query(), "z");
+        assert_eq!(viewer.search_query(), "");
+        let (inputs, _) = super::viewer_inputs(area);
+        viewer.handle_mouse(
+            area,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: inputs[0].x + 1,
+                row: inputs[0].y + 1,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(viewer.search_is_focused());
+        viewer.handle_key(
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            area,
+            Some(&session),
+            None,
+            &Theme::default(),
+            ThemeName::default(),
+            DisplayOptions::SHOW_ALL,
+        );
+        assert!(!viewer.search_is_focused());
+        viewer.handle_key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT),
+            area,
+            Some(&session),
+            None,
+            &Theme::default(),
+            ThemeName::default(),
+            DisplayOptions::SHOW_ALL,
+        );
+        assert!(viewer.find_regex);
+        viewer.handle_key(
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT),
+            area,
+            Some(&session),
+            None,
+            &Theme::default(),
+            ThemeName::default(),
+            DisplayOptions::SHOW_ALL,
+        );
+        assert!(viewer.find_case_sensitive);
+    }
+
+    #[test]
+    fn viewer_query_occurrences_keep_positive_matches_when_expression_fails() {
+        let session = sample_session();
+        let area = Rect::new(0, 0, 100, 30);
+        let mut viewer = ViewerState::with_search("alpha absentword");
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        let cache = viewer.render_cache.as_ref().unwrap();
+        assert!(!cache.query_match);
+        assert_eq!(cache.query_ranges.len(), 3);
+        assert_eq!(cache.match_rows[0], cache.match_rows[1]);
+        viewer.search = Input::default().with_value("all: alpha".to_owned());
+        refresh_viewer(
+            &mut viewer,
+            &session,
+            area,
+            DisplayOptions {
+                hide_user_messages: true,
+                ..DisplayOptions::SHOW_ALL
+            },
+        );
+        let cache = viewer.render_cache.as_ref().unwrap();
+        assert_eq!(cache.query_ranges.len(), 1);
+        assert_eq!(cache.query_hidden, 2);
+        viewer.search = Input::default().with_value("demo".to_owned());
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        assert_eq!(viewer.render_cache.as_ref().unwrap().query_metadata, 1);
+    }
+
+    #[test]
+    fn query_source_only_match_has_no_display_navigation_location() {
+        let mut session = sample_session();
+        session.messages[0].content =
+            "[label](https://example.invalid/unrenderedneedle)".to_owned();
+        session.content = session.messages[0].content.clone();
+        let area = Rect::new(0, 0, 100, 30);
+        let mut viewer = ViewerState::with_search("unrenderedneedle");
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        let cache = viewer.render_cache.as_ref().unwrap();
+        assert!(cache.query_match);
+        assert!(cache.query_ranges.is_empty());
+        assert_eq!(cache.query_source_only, 1);
+    }
+
+    #[test]
+    fn corpus_dependent_phrase_keeps_occurrences_and_shows_provisional_status() {
+        let session = sample_session();
+        let area = Rect::new(0, 0, 120, 30);
+        let mut viewer = ViewerState::with_search("\"alpha beta gamma\"~2");
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        let cache = viewer.render_cache.as_ref().unwrap();
+        assert!(!cache.query_match_is_certain);
+        assert!(!cache.query_ranges.is_empty());
+        assert!(cache
+            .query_error
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("may differ from indexed results")));
+
+        viewer.search = Input::default().with_value("alpha absentword".into());
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        let cache = viewer.render_cache.as_ref().unwrap();
+        assert!(cache.query_match_is_certain);
+        assert!(!cache.query_match);
+        assert!(cache.query_error.is_none());
+        assert_eq!(cache.query_ranges.len(), 3);
+    }
+
+    #[test]
+    fn query_navigation_deduplicates_component_aliases_but_keeps_json_occurrences() {
+        let mut session = sample_session();
+        session.messages.clear();
+        session.cells = vec![SessionCell::ToolCall {
+            tool: "alpha".into(),
+            raw_name: "alpha".into(),
+            summary: String::new(),
+            input: serde_json::json!({"first": "alpha alpha", "second": "alpha"}),
+            status: crate::parse::ToolStatus::Completed,
+            timestamp: None,
+        }];
+        let mut viewer = ViewerState::with_search("alpha");
+        refresh_viewer(
+            &mut viewer,
+            &session,
+            Rect::new(0, 0, 100, 30),
+            DisplayOptions::SHOW_ALL,
+        );
+        let cache = viewer.render_cache.as_ref().unwrap();
+        assert_eq!(cache.query_ranges.len(), 4);
+        assert_eq!(cache.match_rows[1], cache.match_rows[2]);
+        assert_ne!(cache.query_ranges[1], cache.query_ranges[2]);
+        assert!(cache.query_ranges.iter().all(|ranges| {
+            ranges
+                .iter()
+                .all(|range| &cache.map.plain[range.clone()] == "alpha")
+        }));
+    }
+
+    #[test]
+    fn find_preserves_occurrence_identity_during_resize_and_search_highlights_are_independent() {
+        let session = sample_session();
+        let mut viewer = ViewerState::with_search("alpha");
+        let area = Rect::new(0, 0, 100, 30);
+        viewer.find_jump = false;
+        viewer.find = Input::default().with_value("alpha".to_owned());
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        viewer.active_find = Some(1);
+        let range = viewer.render_cache.as_ref().unwrap().find_ranges[1].clone();
+        let base_lines = viewer.render_cache.as_ref().unwrap().text.lines.as_ptr();
+        refresh_viewer(
+            &mut viewer,
+            &session,
+            Rect::new(0, 0, 20, 30),
+            DisplayOptions::SHOW_ALL,
+        );
+        let cache = viewer.render_cache.as_ref().unwrap();
+        assert_eq!(cache.find_ranges[1], range);
+        assert_eq!(cache.query_ranges.len(), 3);
+        assert_eq!(viewer.active_find, Some(1));
+        assert_eq!(cache.text.lines.as_ptr(), base_lines);
+    }
+
+    #[test]
+    fn overlapping_search_and_find_promote_only_the_focused_active_occurrence() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let session = sample_session();
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 100, 30);
+        let mut viewer = ViewerState::with_search("alpha");
+        viewer.find_jump = false;
+        viewer.find = Input::default().with_value("alpha".to_owned());
+        refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+        viewer.active_find = Some(1);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                viewer.render(
+                    frame,
+                    area,
+                    &session,
+                    false,
+                    None,
+                    &theme,
+                    ThemeName::default(),
+                    DisplayOptions::SHOW_ALL,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer
+                .content
+                .iter()
+                .filter(|cell| cell.bg == theme.active_match_bg)
+                .count(),
+            5
+        );
+        assert_eq!(
+            buffer
+                .content
+                .iter()
+                .filter(|cell| cell.bg == theme.search_match_bg)
+                .count(),
+            10
+        );
+        assert!(buffer
+            .content
+            .iter()
+            .filter(|cell| cell.bg == theme.search_match_bg)
+            .all(|cell| cell.modifier.contains(Modifier::UNDERLINED)));
+    }
 
     fn selection_viewer(session: &Session, area: Rect) -> ViewerState {
         let mut viewer = ViewerState::new();
@@ -2079,50 +2800,32 @@ mod tests {
     }
 
     #[test]
-    fn active_match_uses_theme_foreground() {
-        let theme = Theme::lazygit();
-        let mut text = Text::from(Line::from(vec![
-            Span::styled(
-                "alpha",
-                Style::default()
-                    .fg(theme.text)
-                    .bg(theme.search_match_bg)
-                    .add_modifier(Modifier::ITALIC),
-            ),
-            Span::styled(" beta", Style::default().fg(theme.text)),
-        ]));
-
-        super::highlight_active_match(&mut text, 0, 80, &theme);
-
-        let alpha = &text.lines[0].spans[0];
-        assert_eq!(alpha.style.fg, Some(theme.active_match_fg));
-        assert_eq!(alpha.style.bg, Some(theme.active_match_bg));
-        assert!(alpha.style.add_modifier.contains(Modifier::ITALIC));
-        assert!(alpha.style.add_modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn collect_match_rows_tracks_wrapped_content_lines() {
+    fn query_occurrence_rows_track_wrapped_content_lines() {
         let session = sample_session();
-        let rows = collect_match_rows(&session, None, &Theme::default(), "alpha", 12);
-
-        assert_eq!(rows, vec![3, 5, 10]);
+        let mut viewer = ViewerState::with_search("alpha");
+        refresh_viewer(
+            &mut viewer,
+            &session,
+            Rect::new(0, 0, 14, 60),
+            DisplayOptions::SHOW_ALL,
+        );
+        assert_eq!(
+            viewer.render_cache.as_ref().unwrap().match_rows,
+            vec![3, 5, 10]
+        );
     }
 
     #[test]
-    fn collect_line_match_rows_follows_word_wrap_boundaries() {
-        let terms = vec!["world".to_owned()];
-        let rows = collect_line_match_rows("Hello World", 10, &terms);
-
-        assert_eq!(rows, vec![1]);
-    }
-
-    #[test]
-    fn collect_match_rows_follow_rendered_markdown_instead_of_raw_source() {
+    fn query_occurrence_rows_follow_markdown_code_provenance() {
         let session = markdown_code_session();
-        let rows = collect_match_rows(&session, None, &Theme::default(), "alpha", 80);
-
-        assert_eq!(rows, vec![1]);
+        let mut viewer = ViewerState::with_search("alpha");
+        refresh_viewer(
+            &mut viewer,
+            &session,
+            Rect::new(0, 0, 82, 30),
+            DisplayOptions::SHOW_ALL,
+        );
+        assert_eq!(viewer.render_cache.as_ref().unwrap().match_rows, vec![1]);
     }
 
     #[test]
@@ -2374,7 +3077,7 @@ mod tests {
         );
 
         assert_eq!(hidden_rows, vec![0]);
-        assert_eq!(visible_rows, vec![0, 5]);
+        assert_eq!(visible_rows, vec![0, 7]); // HTML source lines keep their logical newlines.
     }
 
     #[test]
@@ -2443,7 +3146,7 @@ mod tests {
     }
 
     #[test]
-    fn viewer_hints_match_always_focused_search() {
+    fn viewer_hints_match_focused_search_and_find() {
         let keys = ViewerState::HINTS
             .iter()
             .map(|hint| hint.key)
@@ -2452,16 +3155,28 @@ mod tests {
         assert!(!keys.contains(&"/"));
         assert!(!keys.contains(&"n/p"));
         assert!(keys.contains(&"^N/^P"));
-        assert!(keys.contains(&"^U/^E"));
+        assert!(keys.contains(&"Tab/^F"));
+        assert!(keys.contains(&"Alt+R/I"));
+        assert!(keys.contains(&"^⇧F"));
     }
 
     #[test]
-    fn summary_leadin_offsets_message_boundaries_and_match_rows() {
+    fn summary_leadin_offsets_messages_and_is_searchable_only_by_find() {
         let session = sample_session();
         let summary = sample_summary("alpha summary");
 
-        let match_rows =
-            collect_match_rows(&session, Some(&summary), &Theme::default(), "alpha", 80);
+        let mut viewer = ViewerState::with_search("alpha");
+        viewer.find_jump = false;
+        viewer.find = Input::default().with_value("alpha".to_owned());
+        viewer.render_cache(
+            Rect::new(0, 0, 82, 30),
+            &session,
+            Some(&summary),
+            &Theme::default(),
+            ThemeName::default(),
+            DisplayOptions::SHOW_ALL,
+        );
+        let cache = viewer.render_cache.as_ref().unwrap();
         let message_rows = collect_message_rows(
             &session,
             Some(&summary),
@@ -2471,7 +3186,8 @@ mod tests {
             DisplayOptions::default(),
         );
 
-        assert_eq!(match_rows, vec![2, 6, 9]);
+        assert_eq!(cache.match_rows, vec![6, 6, 9]);
+        assert_eq!(cache.find_rows, vec![2, 6, 6, 9]);
         assert_eq!(message_rows, vec![5, 8]);
     }
 
@@ -2499,6 +3215,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 20);
         let session = sample_session();
         let mut state = ViewerState::new();
+        state.input_focus = super::ViewerInputFocus::Search;
 
         state.handle_key(
             KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
@@ -2529,6 +3246,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 20);
         let session = sample_session();
         let mut state = ViewerState::new();
+        state.input_focus = super::ViewerInputFocus::Search;
 
         let outcome = state.handle_key(
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
@@ -2549,6 +3267,7 @@ mod tests {
         let session = sample_session();
         let area = Rect::new(0, 0, 80, 20);
         let mut state = ViewerState::new();
+        state.input_focus = super::ViewerInputFocus::Search;
         state.search = Input::default().with_value("alpha".to_owned());
 
         let next = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);

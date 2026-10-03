@@ -60,7 +60,7 @@ fn search_query_returns_matching_sessions() -> Result<()> {
 }
 
 #[test]
-fn quoted_phrase_search_highlights_each_normalized_token() -> Result<()> {
+fn quoted_phrase_search_highlights_one_complete_occurrence() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
     let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
@@ -80,9 +80,7 @@ fn quoted_phrase_search_highlights_each_normalized_token() -> Result<()> {
         .iter()
         .find(|hit| hit.session.file_path.ends_with("basic_session.jsonl"))
         .expect("basic_session should match the quoted phrase");
-    assert!(hit.snippet_html.contains("<b>current</b>"));
-    assert!(hit.snippet_html.contains("<b>git</b>"));
-    assert!(hit.snippet_html.contains("<b>status</b>"));
+    assert!(hit.snippet_html.contains("<b>current git status</b>"));
     Ok(())
 }
 

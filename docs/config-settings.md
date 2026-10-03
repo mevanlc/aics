@@ -45,6 +45,9 @@ stderr and in the TUI status line.
 - `default_filter`: saved startup scope, sort order, and search filters
 - `viewer_filter_exclusion`: `ask` (default), `keep`, or `close`; controls what happens
   when updated filters exclude the session open in the full viewer
+- `viewer_find_jump`: whether local Find jumps to matches while typing, default
+  `true`; editable as **Find: jump while typing** in Settings. Leading `(?j)` or
+  `(?-j)` in Find temporarily overrides it in either substring or regex mode.
 
 Unknown theme names fall back to `lazygit` without discarding the other settings
 in the file.

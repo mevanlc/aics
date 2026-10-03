@@ -15,6 +15,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Filter modal: search content (Visible / All / Hidden), scope, agent, date range, minimum length, session kind (original / trimmed / rollover / sub-agent), live, superseded, and trashed sessions
 - Sort by time or text relevance
 - Markdown rendering with syntax highlighting and search-term highlighting in the viewer
+- Separate viewer Search and Find boxes, with substring/regex Find over readable text and individual match navigation
 - Ctrl/Shift-click block selection, optional Alt-modified alternatives, and Alt+C copying as source Markdown
 - Multiple themes (lazygit, aics, sunset, late), configurable via settings modal
 - Configurable Claude, Codex, and Antigravity launch commands so `aics` can hand off to resume a session
@@ -94,7 +95,8 @@ Rules automatically exclude live or locked Claude, Codex, and Antigravity sessio
 | `PgUp` / `PgDn` | Preview/viewer page scroll |
 | `Home` / `End` | Preview/viewer jump to beginning/end |
 | `Esc` | Cancel / close modal / go back |
-| `^F` | Edit Filters |
+| `^F` | Edit filters in the session list; focus Find in the viewer |
+| `^Shift+F` | Edit filters in the viewer |
 | `^S` | Edit Settings |
 | `^R` | Recall search history |
 | `^L` | Help |

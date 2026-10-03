@@ -148,18 +148,18 @@ const SESSION_LIST_ITEMS: [HelpItem; 22] = [
     ),
 ];
 
-const VIEWER_ITEMS: [HelpItem; 23] = [
+const VIEWER_ITEMS: [HelpItem; 28] = [
     HelpItem::new(
         "^T / Enter d",
         "trash session",
-        "Move the current session to AICS trash and close the viewer with ^T, or press Enter then d in the actions menu. Trashing an item already in trash permanently deletes it.",
+        "Move the current session to AICS trash and close the viewer with ^T, or focus Search and press Enter then d in the actions menu. Trashing an item already in trash permanently deletes it.",
     ),
     HelpItem::new("Left click", "select one block", "Select one whole message, tool event, summary, context, or metrics block. Clicking empty conversation space clears selection."),
     HelpItem::new("Ctrl+click (+Alt)", "toggle block selection", "Ctrl-click or Alt+Ctrl-click adds or removes the clicked block and establishes the range anchor. The terminal must forward the modified mouse event; Alt-click alone is ignored."),
     HelpItem::new("Shift+click (+Alt)", "select block range", "Shift-click or Alt+Shift-click replaces the selection with the inclusive range from the anchor. Repeated range clicks retain the anchor; without an anchor, select the clicked block. The terminal must forward the modified mouse event."),
     HelpItem::new("Ctrl+Shift+click (+Alt)", "add block range", "Ctrl+Shift-click or Alt+Ctrl+Shift-click adds the inclusive anchored range to the selection, including offscreen blocks and skipping filtered-out blocks. The terminal must forward the modified mouse event."),
     HelpItem::new("Alt+C", "copy selected blocks as Markdown", "Copy selected blocks in conversation order, preserving source Markdown and respecting display filters. The selection remains after copying."),
-    HelpItem::new("^F", "apply filters and return to viewer", "Apply or save filters and return to the same session. Blocks hidden by display filters are deselected. If search filters exclude the session, choose Close session or Keep session open; Keep is selected by default. Tab switches buttons, Enter executes, K keeps, C closes, Space/R toggles Remember my choice, and Esc keeps without remembering."),
+    HelpItem::new("^Shift F", "apply filters and return to viewer", "Apply or save filters and return to the same session. Blocks hidden by display filters are deselected. If search filters exclude the session, choose Close session or Keep session open; Keep is selected by default. Tab switches buttons, Enter executes, K keeps, C closes, Space/R toggles Remember my choice, and Esc keeps without remembering."),
     HelpItem::new(
         "^L",
         "open this help",
@@ -171,30 +171,35 @@ const VIEWER_ITEMS: [HelpItem; 23] = [
         "Close the dedicated viewer and return to the session list. Esc no longer clears the viewer search field first.",
     ),
     HelpItem::new(
-        "Enter",
+        "Enter in Search",
         "open actions menu",
-        "Open the session actions menu for the session currently shown in the dedicated viewer. Cancelling that menu returns you to the same viewer state.",
+        "Open the session actions menu while Search is focused. Enter in Find advances to its next occurrence; Shift+Enter moves to its previous occurrence. Cancelling actions returns to the same viewer state.",
     ),
     HelpItem::new(
         "Type",
-        "edit viewer search",
-        "The viewer search field is always focused. Typing updates the inline search immediately and highlights matching text inside the full conversation.",
+        "edit Search or Find",
+        "Typing edits the focused box. Search uses the inherited Tantivy query and affects only this viewer. Find starts focused and searches readable displayed text; it is available only in the full viewer.",
     ),
     HelpItem::new(
         "^N",
         "next match",
-        "Jump to the next highlighted match in the viewer. Navigation wraps when you reach the last match.",
+        "Jump to the next occurrence for the focused Search or Find box, including separate occurrences on the same row. Navigation wraps at the last occurrence.",
     ),
     HelpItem::new(
         "^P",
         "previous match",
-        "Jump to the previous highlighted match in the viewer. Navigation wraps when you move backward from the first match.",
+        "Jump to the previous occurrence for the focused Search or Find box. Navigation wraps at the first occurrence.",
     ),
     HelpItem::new(
         "^U / ^E",
         "edit line",
-        "Use readline-style editing in the always-focused search box, such as Ctrl+U to clear backward and Ctrl+E to move to the end.",
+        "Use readline-style editing in the focused box, such as Ctrl+U to clear backward and Ctrl+E to move to the end.",
     ),
+    HelpItem::new("Tab / Shift+Tab", "switch Search and Find", "Switch the focused input box. Both highlight sets remain visible, and the focused box owns occurrence navigation and active highlighting. Clicking a box also focuses it."),
+    HelpItem::new("^F", "focus Find", "Focus Find in the full viewer. The main screen keeps Ctrl+F for Filters; use Ctrl+Shift+F to open Filters from this viewer."),
+    HelpItem::new("Alt+R", "toggle Find regex", "While Find is focused, toggle between literal Substring and Rust Regex modes. Clicking the Substring/Regex label in Find's title also toggles the mode. Regexes search logical newlines across lines and blocks, and zero-width occurrences can be navigated. Invalid patterns show an inline error and clear stale matches."),
+    HelpItem::new("Alt+I", "toggle Find case sensitivity", "Find starts with Unicode-aware case-insensitive matching. Alt+I toggles case sensitivity while Find is focused. Clicking the Ignore case/Case label in Find's title also toggles case sensitivity."),
+    HelpItem::new("(?j) / (?-j)", "Find jump while typing", "Leading (?j) enables jumping while typing and (?-j) disables it for this expression; consecutive directives use the last value. The default is configured in Settings. In Substring mode, quote a literal directive with a leading backslash; in Regex mode, escape its parentheses and question mark."),
     HelpItem::new(
         "Shift ↑",
         "jump to previous message/event",

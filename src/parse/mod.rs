@@ -2,6 +2,7 @@ pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod codex_summary;
+pub(crate) mod json_sources;
 pub mod search_fields;
 pub mod session;
 pub mod tool_format;
@@ -9,7 +10,7 @@ pub mod tool_format;
 pub use claude::parse_claude_session_file;
 pub use codex::parse_codex_session_file;
 pub(crate) use codex::parse_codex_session_meta_lineage_file;
-pub use search_fields::SessionSearchFields;
+pub use search_fields::{SessionSearchFields, ToolCallSource};
 pub use session::{
     decode_claude_project_dir, decode_claude_project_from_path, default_project_for_cwd,
     is_contextual_user_message_content, is_internal_context_injection, is_project_docs_autodump,

@@ -5,7 +5,7 @@
 //! All entry points are infallible: invalid input falls back to plain spans
 //! styled with `base_style`, so the renderer never has to branch on errors.
 
-use std::sync::LazyLock;
+use std::{collections::BTreeMap, sync::LazyLock};
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -15,7 +15,8 @@ use syntect::highlighting::{Color as SyntectColor, FontStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
-use crate::tui::ansi::strip_terminal_escapes;
+use crate::parse::json_sources::{json_string_units, json_tokens};
+use crate::tui::ansi::{push_origin, sanitize_with_origins, strip_terminal_escapes, TextOrigin};
 use crate::tui::markdown::SYNTECT_THEME;
 use crate::tui::theme::Theme;
 use crate::tui::util::highlight_styled_spans;
@@ -114,6 +115,91 @@ fn pretty_print_if_parseable(text: &str) -> Option<String> {
     }
     let value: Value = serde_json::from_str(trimmed).ok()?;
     serde_json::to_string_pretty(&value).ok()
+}
+
+/// Match lexical leaves by their JSON path, rather than by repeated string
+/// contents or token order (pretty printing can reorder object members).
+pub(crate) fn json_string_origins(text: &str) -> Vec<TextOrigin> {
+    let Some(pretty) = pretty_print_if_parseable(text) else {
+        return sanitize_with_origins(text).origins;
+    };
+    let source = json_tokens(text);
+    let targets: BTreeMap<_, _> = json_tokens(&pretty)
+        .into_iter()
+        .map(|token| ((token.path.clone(), token.key), token))
+        .collect();
+    let mut origins = Vec::new();
+    for token in source {
+        let Some(target) = targets.get(&(token.path.clone(), token.key)) else {
+            continue;
+        };
+        if token.string && target.string {
+            let source_units = json_string_units(text, token.range);
+            let target_units = json_string_units(&pretty, target.range.clone());
+            for (source, rendered) in source_units.iter().zip(&target_units) {
+                if source.rendered == rendered.rendered {
+                    push_origin(
+                        &mut origins,
+                        TextOrigin {
+                            source: source.source.clone(),
+                            rendered: rendered.source.clone(),
+                        },
+                    );
+                }
+            }
+        } else {
+            origins.push(TextOrigin {
+                source: token.range,
+                rendered: target.range.clone(),
+            });
+        }
+    }
+    origins
+}
+
+/// Origins for string leaves use decoded input string offsets. The path starts
+/// at `input`; keys and JSON punctuation have no leaf-string source location.
+pub(crate) fn json_value_origins(value: &Value) -> Vec<(String, TextOrigin)> {
+    let pretty = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    json_value_origins_in_formatted(&pretty)
+}
+
+/// The formatter may use compact JSON before applying truncation. The decoded
+/// leaf coordinates remain the same for either serialization.
+pub(crate) fn json_value_origins_in_formatted(formatted: &str) -> Vec<(String, TextOrigin)> {
+    let mut origins = Vec::new();
+    for token in json_tokens(formatted) {
+        if token.key {
+            continue;
+        }
+        let part = format!("input{}", token.path);
+        if token.string {
+            let mut leaf_origins = Vec::new();
+            for unit in json_string_units(formatted, token.range) {
+                push_origin(
+                    &mut leaf_origins,
+                    TextOrigin {
+                        rendered: unit.source,
+                        source: unit.rendered,
+                    },
+                );
+            }
+            origins.extend(
+                leaf_origins
+                    .into_iter()
+                    .map(|origin| (part.clone(), origin)),
+            );
+        } else {
+            origins.push((
+                part,
+                TextOrigin {
+                    source: 0..token.range.len(),
+                    rendered: token.range,
+                },
+            ));
+        }
+    }
+    origins
 }
 
 fn create_highlighter() -> Option<HighlightLines<'static>> {
@@ -218,6 +304,71 @@ mod tests {
             .collect::<Vec<_>>()
             .join("");
         assert_eq!(text, "not json at all");
+    }
+
+    #[test]
+    fn raw_json_provenance_follows_paths_when_members_reorder() {
+        let raw = r#"{"z":"same","a":"same","escaped":"\uD83D\uDE00\n"}"#;
+        let pretty = pretty_print_if_parseable(raw).unwrap();
+        let origins = json_string_origins(raw);
+        let first = raw.find("same").unwrap();
+        let mapped: String = origins
+            .iter()
+            .filter(|origin| origin.source.start >= first && origin.source.end <= first + 4)
+            .map(|origin| &pretty[origin.rendered.clone()])
+            .collect();
+        assert_eq!(mapped, "same");
+        let first_target = origins
+            .iter()
+            .find(|origin| origin.source.start == first)
+            .unwrap()
+            .rendered
+            .start;
+        assert_eq!(first_target, pretty.rfind("same").unwrap());
+        let emoji_start = raw.find("\\uD83D").unwrap();
+        let emoji = origins
+            .iter()
+            .find(|origin| origin.source.start == emoji_start)
+            .unwrap();
+        assert_eq!(emoji.source, emoji_start..emoji_start + 12);
+        assert_eq!(&pretty[emoji.rendered.clone()], "😀");
+    }
+
+    #[test]
+    fn overwritten_raw_json_values_stay_source_only() {
+        let raw = r#"{"x":"alpha discarded","x":"alpha"}"#;
+        let pretty = pretty_print_if_parseable(raw).unwrap();
+        let origins = json_string_origins(raw);
+        let first = raw.find("alpha").unwrap();
+        assert!(origins.iter().all(|origin| {
+            origin.source.start >= first + "alpha discarded".len() || origin.source.end <= first
+        }));
+        let final_value = raw.rfind("alpha").unwrap();
+        let mapped = origins
+            .iter()
+            .find(|origin| origin.source.start == final_value)
+            .unwrap();
+        assert_eq!(&pretty[mapped.rendered.clone()], "alpha");
+    }
+
+    #[test]
+    fn value_provenance_maps_decoded_strings_to_json_escapes() {
+        let value = json!({"a": "a\nb", "b": ["a\nb", true]});
+        let pretty = serde_json::to_string_pretty(&value).unwrap();
+        let origins = json_value_origins(&value);
+        let newline = origins
+            .iter()
+            .find(|(part, origin)| part == "input/a" && origin.source == (1..2))
+            .unwrap();
+        assert_eq!(&pretty[newline.1.rendered.clone()], "\\n");
+        let other = origins
+            .iter()
+            .find(|(part, origin)| part == "input/b/0" && origin.source == (1..2))
+            .unwrap();
+        assert_ne!(newline.1.rendered, other.1.rendered);
+        assert!(origins
+            .iter()
+            .all(|(_, origin)| origin.rendered.end <= pretty.len()));
     }
 
     #[test]

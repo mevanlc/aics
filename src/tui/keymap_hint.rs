@@ -65,18 +65,16 @@ pub fn layout_hints<'a>(
         let prefix_width: usize = prefix_spans.iter().map(Span::width).sum();
         if prefix_width > 0 {
             spans.extend(prefix_spans);
-            // Add separator after prefix
-            spans.push(Span::styled(SEP, Style::default().fg(theme.muted_greater)));
-            line_width += prefix_width + SEP_WIDTH;
+            line_width += prefix_width;
         }
     }
 
     for hint in hints.iter() {
         let hint_w = hint.width();
-        let need = if spans.is_empty() || line_width == 0 {
-            hint_w
-        } else {
+        let need = if line_width > PAD_WIDTH {
             SEP_WIDTH + hint_w
+        } else {
+            hint_w
         };
 
         if line_width + need > width && line_width > PAD_WIDTH {
