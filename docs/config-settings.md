@@ -60,10 +60,25 @@ changing the saved preference. JSON/export modes ignore saved defaults.
 
 `display_options.hide_internal_context` defaults to `true`, including when the
 key is absent from existing settings. The **Internal Context** visibility toggle
-in `Ctrl+F` (mnemonic `7`) shows or hides user messages consisting entirely of
+in `Ctrl+F` (mnemonic `9`) shows or hides user messages consisting entirely of
 `<codex_internal_context …>` or `<goal_context>` blocks. Messages with ordinary
 prose outside the blocks or incomplete wrappers remain visible. Other generated
 context, such as environment blocks, keeps its existing visibility behavior.
+It also hides recognized Antigravity task polling reminders, server restart
+notices, and stop-hook feedback.
+
+Antigravity generated records use the existing visibility toggles:
+
+| Toggle | Antigravity content |
+| --- | --- |
+| AGENTS.md/CLAUDE.md | Injected directory rules |
+| Tool Results | Task completion/cancellation/stall output and execution errors |
+| Internal Context | Polling reminders, restart notices, and hook feedback |
+| Agent Replies | Worker messages and compaction checkpoints |
+
+Original System/Summary roles are preserved. Unknown or malformed provider
+envelopes remain visible. User metadata/settings wrappers are still omitted
+before filtering; changing visibility cannot recover them.
 
 ## Search history
 

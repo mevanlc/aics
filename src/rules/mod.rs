@@ -1798,6 +1798,7 @@ impl RuleTurns {
                     role,
                     content,
                     timestamp,
+                    ..
                 } => match role {
                     MessageRole::User if is_contextual_user_message_content(*role, content) => {
                         turns
@@ -2048,6 +2049,7 @@ mod tests {
 
     fn message(role: MessageRole, content: &str) -> SessionCell {
         SessionCell::Message {
+            antigravity_kind: None,
             role,
             content: content.to_owned(),
             timestamp: None,

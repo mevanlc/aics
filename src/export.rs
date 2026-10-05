@@ -29,9 +29,8 @@ use crate::fs_safename::{
     validate_windows_filename_component, validate_windows_stem_with_extension,
 };
 use crate::parse::{
-    is_internal_context_injection, is_project_docs_autodump, is_skill_text_injection, ExecStatus,
-    MessageRole, PatchOp, PlanItemStatus, RuntimeMetrics, Session, SessionCell, SessionInfo,
-    SessionMessage, ToolStatus,
+    ExecStatus, MessageRole, PatchOp, PlanItemStatus, RuntimeMetrics, Session, SessionCell,
+    SessionInfo, SessionMessage, ToolStatus,
 };
 use crate::settings::DisplayOptions;
 
@@ -74,7 +73,12 @@ pub(crate) fn selected_blocks_to_markdown(
             }
             SessionBlockId::Message(index) => {
                 if let Some(message) = session.messages.get(index) {
-                    if !hides_message(display_options, message.role, &message.content) {
+                    if !hides_message(
+                        display_options,
+                        message.role,
+                        &message.content,
+                        message.antigravity_kind,
+                    ) {
                         push_message(&mut output, message);
                     }
                 }
@@ -107,7 +111,12 @@ pub fn session_to_plain_text_with_options(
 ) -> String {
     let mut output = String::new();
     for message in &session.messages {
-        if hides_message(display_options, message.role, &message.content) {
+        if hides_message(
+            display_options,
+            message.role,
+            &message.content,
+            message.antigravity_kind,
+        ) {
             continue;
         }
         let role_display = match (&message.role, &message.tool_name) {
@@ -151,7 +160,12 @@ pub fn session_to_markdown_with_options(
 
     if session.cells.is_empty() {
         for message in &session.messages {
-            if hides_message(display_options, message.role, &message.content) {
+            if hides_message(
+                display_options,
+                message.role,
+                &message.content,
+                message.antigravity_kind,
+            ) {
                 continue;
             }
             push_message(&mut output, message);
@@ -193,19 +207,14 @@ pub fn write_session_markdown(
 
 /// Mirror the preview's per-message visibility rules so `--hide` means the same
 /// thing in an export as it does in the TUI.
-fn hides_message(display_options: DisplayOptions, role: MessageRole, content: &str) -> bool {
-    let role_hidden = match role {
-        MessageRole::User => display_options.hide_user_messages,
-        MessageRole::Assistant => display_options.hide_agent_replies,
-        MessageRole::ToolCall => display_options.hide_tool_calls,
-        MessageRole::ToolResult => display_options.hide_tool_results,
-        MessageRole::System | MessageRole::Summary => false,
-    };
-
-    role_hidden
-        || display_options.hide_project_docs_autodump && is_project_docs_autodump(role, content)
-        || display_options.hide_skill_text_injection && is_skill_text_injection(role, content)
-        || display_options.hide_internal_context && is_internal_context_injection(role, content)
+fn hides_message(
+    display_options: DisplayOptions,
+    role: MessageRole,
+    content: &str,
+    antigravity_kind: Option<crate::parse::AntigravityMessageKind>,
+) -> bool {
+    !crate::search_projection::message_visibility(role, content, antigravity_kind)
+        .is_visible(display_options)
 }
 
 /// Write `rendered` as a `.txt` file in the current directory.
@@ -441,8 +450,9 @@ fn push_cell(
             role,
             content,
             timestamp,
+            antigravity_kind,
         } => {
-            if hides_message(display_options, *role, content) {
+            if hides_message(display_options, *role, content, *antigravity_kind) {
                 return;
             }
             push_heading(output, role.as_str(), *timestamp);
@@ -987,6 +997,56 @@ mod tests {
     }
 
     #[test]
+    fn selected_antigravity_blocks_respect_generated_message_visibility() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            include_str!("../tests/fixtures/sessions/antigravity-visibility.jsonl"),
+        )
+        .unwrap();
+        let session = crate::parse::parse_antigravity_session_file(path)
+            .unwrap()
+            .unwrap();
+        let hidden = DisplayOptions {
+            hide_tool_results: true,
+            hide_internal_context: true,
+            hide_agent_replies: true,
+            hide_project_docs_autodump: true,
+            ..DisplayOptions::SHOW_ALL
+        };
+        for message_only in [false, true] {
+            let blocks: Vec<_> = if message_only {
+                (0..session.messages.len())
+                    .map(SessionBlockId::Message)
+                    .collect()
+            } else {
+                (0..session.cells.len()).map(SessionBlockId::Cell).collect()
+            };
+            let all = selected_blocks_to_markdown(
+                &session,
+                None,
+                blocks.iter().copied(),
+                DisplayOptions::SHOW_ALL,
+            );
+            let filtered = selected_blocks_to_markdown(&session, None, blocks, hidden);
+            for beacon in [
+                "PROJECT_DOCS_BEACON",
+                "CHECKPOINT_BEACON",
+                "CANCEL_BEACON",
+                "REMINDER_BEACON",
+                "WORKER_BEACON",
+            ] {
+                assert!(all.contains(beacon));
+                assert!(!filtered.contains(beacon));
+            }
+            assert!(filtered.contains("AUTHORED_BEACON"));
+            assert!(filtered.contains("QUOTED_CANCELLATION_BEACON"));
+            assert!(filtered.contains("UNKNOWN_BEACON"));
+        }
+    }
+
+    #[test]
     fn selected_result_markdown_keeps_call_context_and_fences_nested_code() {
         let mut session = sample_session();
         session.cells.push(SessionCell::ToolResult {
@@ -1089,24 +1149,28 @@ mod tests {
         let mut session = sample_session();
         session.messages = vec![
             SessionMessage {
+                antigravity_kind: None,
                 role: MessageRole::User,
                 content: "run the tests".to_owned(),
                 timestamp: None,
                 tool_name: None,
             },
             SessionMessage {
+                antigravity_kind: None,
                 role: MessageRole::Assistant,
                 content: "on it".to_owned(),
                 timestamp: None,
                 tool_name: None,
             },
             SessionMessage {
+                antigravity_kind: None,
                 role: MessageRole::ToolCall,
                 content: "cargo nextest run".to_owned(),
                 timestamp: None,
                 tool_name: Some("exec".to_owned()),
             },
             SessionMessage {
+                antigravity_kind: None,
                 role: MessageRole::ToolResult,
                 content: "all green".to_owned(),
                 timestamp: None,
@@ -1134,6 +1198,7 @@ mod tests {
     fn markdown_writes_message_bodies_verbatim() {
         let mut session = sample_session();
         session.cells = vec![SessionCell::Message {
+            antigravity_kind: None,
             role: MessageRole::Assistant,
             content: "## Findings\n\n- one\n- two".to_owned(),
             timestamp: timestamp(12),
@@ -1299,12 +1364,14 @@ mod tests {
         let mut session = sample_session();
         session.messages = vec![
             SessionMessage {
+                antigravity_kind: None,
                 role: MessageRole::User,
                 content: "run the tests".to_owned(),
                 timestamp: timestamp(12),
                 tool_name: None,
             },
             SessionMessage {
+                antigravity_kind: None,
                 role: MessageRole::ToolResult,
                 content: "# not a heading".to_owned(),
                 timestamp: None,
@@ -1390,11 +1457,13 @@ mod tests {
         let mut session = sample_session();
         session.cells = vec![
             SessionCell::Message {
+                antigravity_kind: None,
                 role: MessageRole::User,
                 content: "run the tests".to_owned(),
                 timestamp: None,
             },
             SessionCell::Message {
+                antigravity_kind: None,
                 role: MessageRole::Assistant,
                 content: "on it".to_owned(),
                 timestamp: None,
@@ -1536,12 +1605,14 @@ mod tests {
         let mut session = sample_session();
         session.messages = vec![
             SessionMessage {
+                antigravity_kind: None,
                 role: MessageRole::User,
                 content: "run the tests".to_owned(),
                 timestamp: None,
                 tool_name: None,
             },
             SessionMessage {
+                antigravity_kind: None,
                 role: MessageRole::ToolResult,
                 content: "all green".to_owned(),
                 timestamp: None,

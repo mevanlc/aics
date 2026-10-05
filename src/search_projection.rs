@@ -11,8 +11,8 @@ use serde_json::Value;
 
 use crate::parse::search_fields::{authored_user_text, readable_tool_text};
 use crate::parse::{
-    is_internal_context_injection, is_project_docs_autodump, is_skill_text_injection, MessageRole,
-    Session, SessionCell,
+    is_internal_context_injection, is_project_docs_autodump, is_skill_text_injection,
+    AntigravityMessageKind, MessageRole, Session, SessionCell,
 };
 use crate::search_match::{SourceBlock, SourceId, SourceMatch, SourceRange};
 use crate::search_query::VisibilitySearch;
@@ -55,6 +55,7 @@ impl VisibilityRequirement {
             TOOL_RESULT => "_vis_toolresult",
             value if value == TOOL_CALL | TOOL_RESULT => "_vis_toolcall_result",
             PROJECT_DOCS => "_vis_projectdocs",
+            INTERNAL_CONTEXT => "_vis_internal_context",
             value if value == USER | PROJECT_DOCS => "_vis_user_projectdocs",
             value if value == USER | SKILL => "_vis_user_skill",
             value if value == USER | INTERNAL_CONTEXT => "_vis_user_internal_context",
@@ -65,7 +66,29 @@ impl VisibilityRequirement {
     }
 }
 
-pub fn message_visibility(role: MessageRole, content: &str) -> VisibilityRequirement {
+pub fn message_visibility(
+    role: MessageRole,
+    content: &str,
+    antigravity_kind: Option<AntigravityMessageKind>,
+) -> VisibilityRequirement {
+    use AntigravityMessageKind as Kind;
+
+    // Only the Antigravity parser supplies these annotations. Keep original roles
+    // for display and rules, and never apply them to user-authored messages.
+    if matches!(role, MessageRole::System | MessageRole::Summary) {
+        if let Some(kind) = antigravity_kind {
+            return VisibilityRequirement(match kind {
+                Kind::DirectoryRules => PROJECT_DOCS,
+                Kind::Checkpoint | Kind::AgentMessage => AGENT,
+                Kind::Error
+                | Kind::TaskCanceled
+                | Kind::TaskFinished
+                | Kind::TaskStalled
+                | Kind::SubagentError => TOOL_RESULT,
+                Kind::TaskReminder | Kind::RestartNotice | Kind::HookFeedback => INTERNAL_CONTEXT,
+            });
+        }
+    }
     let user = if role == MessageRole::User { USER } else { 0 };
     VisibilityRequirement(if is_project_docs_autodump(role, content) {
         user | PROJECT_DOCS
@@ -86,9 +109,12 @@ pub fn message_visibility(role: MessageRole, content: &str) -> VisibilityRequire
 
 pub fn cell_visible(cell: &SessionCell, options: &DisplayOptions) -> bool {
     match cell {
-        SessionCell::Message { role, content, .. } => {
-            message_visibility(*role, content).is_visible(*options)
-        }
+        SessionCell::Message {
+            role,
+            content,
+            antigravity_kind,
+            ..
+        } => message_visibility(*role, content, *antigravity_kind).is_visible(*options),
         SessionCell::Reasoning { .. } => !options.hide_agent_replies,
         SessionCell::Exec { is_user: true, .. } => !options.hide_user_tool_calls,
         SessionCell::ToolCall { .. }
@@ -115,6 +141,7 @@ pub fn default_search_field_names(
         TOOL_RESULT,
         TOOL_CALL | TOOL_RESULT,
         PROJECT_DOCS,
+        INTERNAL_CONTEXT,
         USER | PROJECT_DOCS,
         USER | SKILL,
         USER | INTERNAL_CONTEXT,
@@ -360,7 +387,7 @@ impl SearchProjection {
                     SourceBlock::Message(index),
                     "content",
                     &message.content,
-                    message_visibility(message.role, &message.content),
+                    message_visibility(message.role, &message.content, message.antigravity_kind),
                 );
                 if let Some(source) = session.search_fields.tool_call_sources.get(&index) {
                     result.segment(
@@ -526,8 +553,17 @@ impl SearchProjection {
             );
         };
         match cell {
-            SessionCell::Message { role, content, .. } => {
-                add("content", content, message_visibility(*role, content).0);
+            SessionCell::Message {
+                role,
+                content,
+                antigravity_kind,
+                ..
+            } => {
+                add(
+                    "content",
+                    content,
+                    message_visibility(*role, content, *antigravity_kind).0,
+                );
             }
             SessionCell::Reasoning { header, body, .. } => {
                 if let Some(header) = header {
@@ -1280,6 +1316,7 @@ mod tests {
         let mut session = session();
         session.cells = vec![
             SessionCell::Message {
+                antigravity_kind: None,
                 role: MessageRole::User,
                 content: "  userword  ".to_owned(),
                 timestamp: None,
@@ -1331,6 +1368,7 @@ mod tests {
         session.cwd = Some("/repo/needle".to_owned());
         session.cells = vec![
             SessionCell::Message {
+                antigravity_kind: None,
                 role: MessageRole::User,
                 content: "/repo/needle needle".to_owned(),
                 timestamp: None,
@@ -1390,6 +1428,7 @@ mod tests {
     fn compact_provenance_roundtrip_retains_occurrences() {
         let mut session = session();
         session.cells.push(SessionCell::Message {
+            antigravity_kind: None,
             role: MessageRole::User,
             content: "alpha alpha **beta**".to_owned(),
             timestamp: None,

@@ -191,7 +191,8 @@ defaults, so a scripted export selects exactly what its flags asked for. Use
 | `--hide ITEM` | Hide one transcript part; repeat the flag for more than one |
 
 `ITEM` is one of `project-docs-autodump`, `skill-text-injection`, `tool-calls`,
-`tool-results`, `agent-replies`, `user-messages`, or `internal-context` — the seven
+`tool-results`, `user-tool-calls`, `user-tool-results`, `agent-replies`,
+`user-messages`, or `internal-context` — the nine
 toggles the filter modal offers, each named after its `display_options` key in `settings.json` with
 `hide_` stripped.
 
@@ -218,8 +219,15 @@ invocations; `tool-results` also suppresses the stdout and stderr inside exec an
 patch blocks while leaving the invocations themselves in place.
 
 `internal-context` hides complete user-message `<codex_internal_context …>` and
-`<goal_context>` injections. The TUI hides these by default; complete exports
-include them unless `--hide internal-context` is specified.
+`<goal_context>` injections, plus recognized Antigravity polling reminders,
+restart notices, and stop-hook feedback. The TUI hides these by default;
+complete exports include them unless `--hide internal-context` is specified.
+
+For Antigravity, `project-docs-autodump` also hides injected directory rules,
+`tool-results` hides asynchronous task outcomes (including cancellations) and
+execution errors, and `agent-replies` hides worker messages and compaction
+checkpoints. Original message roles are preserved, and unknown provider messages
+remain visible. These mappings also apply to the corresponding TUI toggles.
 
 Session provenance — the id, project, branch, timestamps, and source path at the
 top of an exported file — is not part of the transcript and is never hidden.

@@ -2381,6 +2381,7 @@ mod tests {
                 is_user: false,
             },
             SessionCell::Message {
+                antigravity_kind: None,
                 role: MessageRole::User,
                 content: "following message\n\n".repeat(30),
                 timestamp: None,
@@ -2462,6 +2463,7 @@ mod tests {
                 ..Default::default()
             }),
             SessionCell::Message {
+                antigravity_kind: None,
                 role: MessageRole::User,
                 content: "# Inside message\n\n**request**".into(),
                 timestamp: None,
@@ -2964,6 +2966,79 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_visibility_refreshes_find_navigation_and_block_copy() {
+        crate::settings::isolate_config_root_for_tests();
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("transcript.jsonl");
+        std::fs::write(
+            &path,
+            include_str!("../../tests/fixtures/sessions/antigravity-visibility.jsonl"),
+        )
+        .unwrap();
+        let parsed = crate::parse::parse_antigravity_session_file(path)
+            .unwrap()
+            .unwrap();
+        let area = Rect::new(0, 0, 120, 40);
+        let hidden = DisplayOptions {
+            hide_tool_results: true,
+            hide_internal_context: true,
+            hide_project_docs_autodump: true,
+            hide_agent_replies: true,
+            ..DisplayOptions::SHOW_ALL
+        };
+        for message_only in [false, true] {
+            let mut session = parsed.clone();
+            if message_only {
+                session.cells.clear();
+            }
+            let mut viewer = selection_viewer(&session, area);
+            viewer.find = Input::default().with_value("REMINDER_BEACON".to_owned());
+            viewer.search = Input::default().with_value("all: REMINDER_BEACON".to_owned());
+            refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+            assert_eq!(viewer.render_cache.as_ref().unwrap().find_ranges.len(), 1);
+            let shown_rows = collect_message_rows(
+                &session,
+                None,
+                &Theme::default(),
+                116,
+                MessageJumpScope::Any,
+                DisplayOptions::SHOW_ALL,
+            );
+            viewer.selected_blocks = viewer
+                .render_cache
+                .as_ref()
+                .unwrap()
+                .blocks
+                .iter()
+                .map(|block| block.source.id)
+                .collect();
+            refresh_viewer(&mut viewer, &session, area, hidden);
+            let cache = viewer.render_cache.as_ref().unwrap();
+            assert!(cache.find_ranges.is_empty());
+            assert_eq!(cache.query_hidden, 1);
+            let text = rendered_lines(&cache.text).join("\n");
+            assert!(!text.contains("REMINDER_BEACON"));
+            assert!(!text.contains("CANCEL_BEACON"));
+            assert!(!text.contains("CHECKPOINT_BEACON"));
+            let hidden_rows = collect_message_rows(
+                &session,
+                None,
+                &Theme::default(),
+                116,
+                MessageJumpScope::Any,
+                hidden,
+            );
+            assert_eq!(shown_rows.len() - hidden_rows.len(), 12);
+            let (_, copied) = viewer.selected_markdown(&session, None, hidden);
+            assert!(copied.contains("AUTHORED_BEACON"));
+            assert!(copied.contains("UNKNOWN_BEACON"));
+            assert!(!copied.contains("CANCEL_BEACON"));
+            refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+            assert_eq!(viewer.render_cache.as_ref().unwrap().find_ranges.len(), 1);
+        }
+    }
+
+    #[test]
     fn internal_context_visibility_updates_viewer_and_message_navigation() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/sessions/codex/internal_context.jsonl");
@@ -3402,12 +3477,14 @@ mod tests {
             custom_title: Some("demo".to_owned()),
             messages: vec![
                 SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "alpha beta gamma delta alpha".to_owned(),
                     timestamp: Some(Utc::now()),
                     tool_name: None,
                 },
                 SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::Assistant,
                     content: "omega alpha".to_owned(),
                     timestamp: Some(Utc::now()),
@@ -3449,11 +3526,13 @@ mod tests {
             search_fields: Default::default(),
             cells: vec![
                 SessionCell::Message {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: docs.to_owned(),
                     timestamp: Some(Utc::now()),
                 },
                 SessionCell::Message {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: request.to_owned(),
                     timestamp: Some(Utc::now()),
@@ -3485,6 +3564,7 @@ mod tests {
             is_sidechain: false,
             custom_title: Some("demo markdown".to_owned()),
             messages: vec![SessionMessage {
+                antigravity_kind: None,
                 role: MessageRole::Assistant,
                 content: "```rust\nfn alpha() {}\n```".to_owned(),
                 timestamp: Some(Utc::now()),
@@ -3532,36 +3612,42 @@ mod tests {
             custom_title: Some("demo multi turn".to_owned()),
             messages: vec![
                 SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "first user".to_owned(),
                     timestamp: Some(Utc::now()),
                     tool_name: None,
                 },
                 SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::Assistant,
                     content: "first assistant".to_owned(),
                     timestamp: Some(Utc::now()),
                     tool_name: None,
                 },
                 SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::ToolCall,
                     content: "run tool".to_owned(),
                     timestamp: Some(Utc::now()),
                     tool_name: Some("Read".to_owned()),
                 },
                 SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::ToolResult,
                     content: "tool output".to_owned(),
                     timestamp: Some(Utc::now()),
                     tool_name: Some("Read".to_owned()),
                 },
                 SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "second user".to_owned(),
                     timestamp: Some(Utc::now()),
                     tool_name: None,
                 },
                 SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::Assistant,
                     content: "second assistant".to_owned(),
                     timestamp: Some(Utc::now()),
@@ -3600,12 +3686,14 @@ mod tests {
             custom_title: Some("wrapped navigation".to_owned()),
             messages: vec![
                 SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "This line wraps hard in the preview and viewer.".to_owned(),
                     timestamp: Some(Utc::now()),
                     tool_name: None,
                 },
                 SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::Assistant,
                     content: "Short reply".to_owned(),
                     timestamp: Some(Utc::now()),

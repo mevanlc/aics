@@ -891,6 +891,7 @@ mod tests {
 
     fn message(role: crate::parse::MessageRole, text: &str) -> crate::parse::SessionCell {
         crate::parse::SessionCell::Message {
+            antigravity_kind: None,
             role,
             content: text.to_owned(),
             timestamp: None,

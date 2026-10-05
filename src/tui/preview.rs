@@ -9,7 +9,7 @@ use ratatui::Frame;
 
 use crate::parse::{
     Agent, ExecStatus, MessageRole, PatchFile, PatchOp, PlanItemStatus, RuntimeMetrics, Session,
-    SessionCell, SessionInfo, ToolStatus,
+    SessionCell, SessionInfo, SessionMessage, ToolStatus,
 };
 use crate::search_match::{DocumentMap, RenderOrigin, SourceBlock, SourceId, SourceRange};
 use crate::settings::DisplayOptions;
@@ -196,8 +196,9 @@ pub fn render_session_document_with_options(
     session: &Session,
     theme: &Theme,
     highlight_query: Option<&str>,
-    options: SessionRenderOptions,
+    mut options: SessionRenderOptions,
 ) -> DisplayDocument {
+    options.display_options.hide_project_docs_autodump = options.hide_project_docs_autodump;
     let _profile = profile::scope("preview.render_session_text");
     let mut lines = Vec::new();
     let mut sticky_markers = Vec::new();
@@ -221,7 +222,7 @@ pub fn render_session_document_with_options(
     if session.cells.is_empty() {
         // Backwards compatibility: if no cells were emitted, fall back to messages.
         for (index, message) in session.messages.iter().enumerate() {
-            if should_hide_message(message.role, &message.content, options) {
+            if should_hide_message(message, options) {
                 continue;
             }
             let start = lines.len();
@@ -344,10 +345,15 @@ pub fn render_session_document_with_options(
     }
 }
 
-fn should_hide_message(role: MessageRole, content: &str, options: SessionRenderOptions) -> bool {
+fn should_hide_message(message: &SessionMessage, options: SessionRenderOptions) -> bool {
     let mut display_options = options.display_options;
     display_options.hide_project_docs_autodump = options.hide_project_docs_autodump;
-    !crate::search_projection::message_visibility(role, content).is_visible(display_options)
+    !crate::search_projection::message_visibility(
+        message.role,
+        &message.content,
+        message.antigravity_kind,
+    )
+    .is_visible(display_options)
 }
 
 fn should_hide_cell(cell: &SessionCell, options: SessionRenderOptions) -> bool {
@@ -667,16 +673,6 @@ pub fn render_session_section_document_with_options(
                 block
             })
             .collect(),
-    }
-}
-
-pub(crate) fn shows_message_role(display_options: DisplayOptions, role: MessageRole) -> bool {
-    match role {
-        MessageRole::User => !display_options.hide_user_messages,
-        MessageRole::Assistant => !display_options.hide_agent_replies,
-        MessageRole::ToolCall => !display_options.hide_tool_calls,
-        MessageRole::ToolResult => !display_options.hide_tool_results,
-        MessageRole::System | MessageRole::Summary => true,
     }
 }
 
@@ -1142,8 +1138,9 @@ fn render_cell_into(
             role,
             content,
             timestamp,
+            antigravity_kind,
         } => {
-            if !shows_message_role(display_options, *role) {
+            if !crate::search_projection::cell_visible(cell, &display_options) {
                 return Vec::new();
             }
             let synthetic = crate::parse::SessionMessage {
@@ -1151,6 +1148,7 @@ fn render_cell_into(
                 content: content.clone(),
                 timestamp: *timestamp,
                 tool_name: None,
+                antigravity_kind: *antigravity_kind,
             };
             let origins = render_message_into(
                 lines,
@@ -2765,6 +2763,7 @@ mod tests {
             Agent::Codex,
             vec![
                 SessionCell::Message {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "same **same**".to_owned(),
                     timestamp: None,
@@ -2887,6 +2886,7 @@ mod tests {
             Agent::Codex,
             vec![
                 SessionCell::Message {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "alpha **beta** [linked](https://sourceonly.invalid)\n\n界".to_owned(),
                     timestamp: None,
@@ -2983,6 +2983,7 @@ mod tests {
             Agent::Claude,
             vec![
                 SessionCell::Message {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "rawneedle".to_owned(),
                     timestamp: None,
@@ -3235,11 +3236,13 @@ mod tests {
             Agent::Claude,
             vec![
                 SessionCell::Message {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "same".to_owned(),
                     timestamp: None,
                 },
                 SessionCell::Message {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "same".to_owned(),
                     timestamp: None,
@@ -3738,11 +3741,13 @@ mod tests {
             Agent::Codex,
             vec![
                 SessionCell::Message {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "# CLAUDE.md instructions for /tmp/demo\nUse cargo test.".to_owned(),
                     timestamp: None,
                 },
                 SessionCell::Message {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content:
                         "<INSTRUCTIONS># Using `lat` to examine files\nPrefer lat.\n</INSTRUCTIONS>"
@@ -3750,6 +3755,7 @@ mod tests {
                     timestamp: None,
                 },
                 SessionCell::Message {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "real request".to_owned(),
                     timestamp: None,
@@ -3792,11 +3798,13 @@ mod tests {
             Agent::Codex,
             vec![
                 SessionCell::Message {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "$commit --all".to_owned(),
                     timestamp: None,
                 },
                 SessionCell::Message {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "<skill><name>commit</name>helper instructions</skill>".to_owned(),
                     timestamp: None,
@@ -3928,11 +3936,13 @@ mod tests {
             Agent::Codex,
             vec![
                 SessionCell::Message {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "user text".to_owned(),
                     timestamp: None,
                 },
                 SessionCell::Message {
+                    antigravity_kind: None,
                     role: MessageRole::Assistant,
                     content: "agent text".to_owned(),
                     timestamp: None,
@@ -4110,6 +4120,7 @@ mod tests {
         let mut session = empty_session(
             Agent::Codex,
             vec![SessionCell::Message {
+                antigravity_kind: None,
                 role: MessageRole::User,
                 content: "hi".to_owned(),
                 timestamp: None,
@@ -4352,6 +4363,7 @@ mod tests {
             is_sidechain: false,
             custom_title: None,
             messages: vec![SessionMessage {
+                antigravity_kind: None,
                 role: MessageRole::Assistant,
                 content: "**alpha**\n\n- beta".to_owned(),
                 timestamp: Some(Utc::now()),
@@ -4416,6 +4428,7 @@ mod tests {
             is_sidechain: false,
             custom_title: None,
             messages: vec![SessionMessage {
+                antigravity_kind: None,
                 role: MessageRole::User,
                 content: "# Topic\n\nBody".to_owned(),
                 timestamp: Some(Utc.with_ymd_and_hms(2026, 4, 25, 10, 11, 12).unwrap()),
@@ -4464,6 +4477,7 @@ mod tests {
             is_sidechain: false,
             custom_title: None,
             messages: vec![SessionMessage {
+                antigravity_kind: None,
                 role: MessageRole::Assistant,
                 content: body.to_owned(),
                 timestamp: Some(Utc.with_ymd_and_hms(2026, 4, 27, 9, 0, 0).unwrap()),
@@ -4622,6 +4636,7 @@ mod tests {
             is_sidechain: false,
             custom_title: None,
             messages: vec![SessionMessage {
+                antigravity_kind: None,
                 role: MessageRole::Assistant,
                 content: "alpha".to_owned(),
                 timestamp: Some(Utc::now()),

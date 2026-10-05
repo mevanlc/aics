@@ -117,6 +117,23 @@ impl std::fmt::Display for DerivationType {
     }
 }
 
+/// Provider-generated message provenance, independent of its original role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AntigravityMessageKind {
+    DirectoryRules,
+    Checkpoint,
+    Error,
+    TaskCanceled,
+    TaskFinished,
+    TaskReminder,
+    TaskStalled,
+    RestartNotice,
+    AgentMessage,
+    SubagentError,
+    HookFeedback,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMessage {
     pub role: MessageRole,
@@ -124,6 +141,8 @@ pub struct SessionMessage {
     pub timestamp: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antigravity_kind: Option<AntigravityMessageKind>,
 }
 
 /// Status of a tool call — pending until paired with output, then completed/failed.
@@ -280,6 +299,8 @@ pub enum SessionCell {
         content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<DateTime<Utc>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        antigravity_kind: Option<AntigravityMessageKind>,
     },
     Reasoning {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -892,6 +913,7 @@ pub fn cells_from_messages(messages: &[SessionMessage]) -> Vec<SessionCell> {
                         role: message.role,
                         content: message.content.clone(),
                         timestamp: message.timestamp,
+                        antigravity_kind: message.antigravity_kind,
                     });
                 }
             }
@@ -901,6 +923,7 @@ pub fn cells_from_messages(messages: &[SessionMessage]) -> Vec<SessionCell> {
                     role: message.role,
                     content: message.content.clone(),
                     timestamp: message.timestamp,
+                    antigravity_kind: message.antigravity_kind,
                 });
             }
         }
@@ -970,6 +993,7 @@ pub fn push_unique_message(
     }
 
     messages.push(SessionMessage {
+        antigravity_kind: None,
         role,
         content,
         timestamp,
@@ -996,6 +1020,7 @@ pub fn push_tool_message(
     }
 
     messages.push(SessionMessage {
+        antigravity_kind: None,
         role,
         content,
         timestamp,

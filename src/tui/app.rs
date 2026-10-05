@@ -8044,36 +8044,42 @@ mod tests {
             custom_title: Some("preview users".to_owned()),
             messages: vec![
                 crate::parse::SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "first user".to_owned(),
                     timestamp: None,
                     tool_name: None,
                 },
                 crate::parse::SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::Assistant,
                     content: "first assistant".to_owned(),
                     timestamp: None,
                     tool_name: None,
                 },
                 crate::parse::SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::ToolCall,
                     content: "run tool".to_owned(),
                     timestamp: None,
                     tool_name: Some("Read".to_owned()),
                 },
                 crate::parse::SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::ToolResult,
                     content: "tool output".to_owned(),
                     timestamp: None,
                     tool_name: Some("Read".to_owned()),
                 },
                 crate::parse::SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::User,
                     content: "second user".to_owned(),
                     timestamp: None,
                     tool_name: None,
                 },
                 crate::parse::SessionMessage {
+                    antigravity_kind: None,
                     role: MessageRole::Assistant,
                     content: "second assistant".to_owned(),
                     timestamp: None,

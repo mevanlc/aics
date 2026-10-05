@@ -11,8 +11,9 @@ use serde_json::Value;
 use super::search_fields::{authored_user_text, SessionSearchFields};
 use super::session::{
     first_message_fields, first_user_message, last_message_fields, metadata_created,
-    metadata_modified, modified_ts, parse_timestamp_str, DerivationType, ExecStatus, MessageRole,
-    RuntimeMetrics, Session, SessionCell, SessionInfo, SessionLineage, SessionMessage, ToolStatus,
+    metadata_modified, modified_ts, parse_timestamp_str, AntigravityMessageKind, DerivationType,
+    ExecStatus, MessageRole, RuntimeMetrics, Session, SessionCell, SessionInfo, SessionLineage,
+    SessionMessage, ToolStatus,
 };
 use super::tool_format;
 use crate::scan::{antigravity_session_file, SessionFile};
@@ -48,6 +49,7 @@ impl SessionBuilder {
         content: impl Into<String>,
         timestamp: Option<DateTime<Utc>>,
         searchable: bool,
+        antigravity_kind: Option<AntigravityMessageKind>,
     ) {
         let content = content.into();
         let content = content.trim();
@@ -60,11 +62,13 @@ impl SessionBuilder {
             content: content.clone(),
             timestamp,
             tool_name: None,
+            antigravity_kind,
         });
         self.cells.push(SessionCell::Message {
             role,
             content: content.clone(),
             timestamp,
+            antigravity_kind,
         });
         match role {
             MessageRole::User => {
@@ -129,6 +133,7 @@ impl SessionBuilder {
             });
         }
         self.messages.push(SessionMessage {
+            antigravity_kind: None,
             role: MessageRole::ToolCall,
             content: summary.clone(),
             timestamp,
@@ -221,6 +226,7 @@ impl SessionBuilder {
 
         if !output.trim().is_empty() {
             self.messages.push(SessionMessage {
+                antigravity_kind: None,
                 role: MessageRole::ToolResult,
                 content: output.clone(),
                 timestamp,
@@ -289,6 +295,7 @@ pub fn parse_antigravity_session(file: &SessionFile) -> Result<Option<Session>> 
         let step_type = string_field(value, "type").unwrap_or_default();
         let content = display_value(value.get("content").unwrap_or(&Value::Null));
         let thinking = string_field(value, "thinking").unwrap_or_default();
+        let antigravity_kind = classify_generated_message(source, step_type, &content);
 
         match step_type {
             "USER_INPUT" => {
@@ -296,18 +303,24 @@ pub fn parse_antigravity_session(file: &SessionFile) -> Result<Option<Session>> 
                 if model.is_none() {
                     model = settings.as_deref().and_then(model_from_settings);
                 }
-                builder.push_message(MessageRole::User, request, timestamp, true);
+                builder.push_message(MessageRole::User, request, timestamp, true, None);
             }
             "PLANNER_RESPONSE" => {
                 builder.push_reasoning(thinking, timestamp);
-                builder.push_message(MessageRole::Assistant, content, timestamp, true);
+                builder.push_message(MessageRole::Assistant, content, timestamp, true, None);
                 for call in parse_tool_calls(value) {
                     builder.push_call(call, timestamp);
                 }
             }
             "CONVERSATION_HISTORY" => {}
             "CHECKPOINT" => {
-                builder.push_message(MessageRole::Summary, content, timestamp, true);
+                builder.push_message(
+                    MessageRole::Summary,
+                    content,
+                    timestamp,
+                    true,
+                    antigravity_kind,
+                );
             }
             _ if source == "MODEL" => {
                 builder.push_reasoning(thinking, timestamp);
@@ -317,7 +330,13 @@ pub fn parse_antigravity_session(file: &SessionFile) -> Result<Option<Session>> 
                 builder.push_result(value, timestamp);
             }
             _ => {
-                builder.push_message(MessageRole::System, content, timestamp, false);
+                builder.push_message(
+                    MessageRole::System,
+                    content,
+                    timestamp,
+                    false,
+                    antigravity_kind,
+                );
             }
         }
     }
@@ -391,6 +410,111 @@ pub fn parse_antigravity_session(file: &SessionFile) -> Result<Option<Session>> 
         session_info: Some(session_info),
         lineage: SessionLineage::default(),
     }))
+}
+
+fn classify_generated_message(
+    source: &str,
+    step_type: &str,
+    content: &str,
+) -> Option<AntigravityMessageKind> {
+    use AntigravityMessageKind as Kind;
+
+    if source != "SYSTEM" || content.trim().is_empty() {
+        return None;
+    }
+    match step_type {
+        "DIRECTORY_RULES" => Some(Kind::DirectoryRules),
+        "CHECKPOINT" => Some(Kind::Checkpoint),
+        "ERROR_MESSAGE" => Some(Kind::Error),
+        "SYSTEM_MESSAGE" => classify_system_message(content),
+        _ => None,
+    }
+}
+
+fn classify_system_message(content: &str) -> Option<AntigravityMessageKind> {
+    use AntigravityMessageKind as Kind;
+
+    const PREAMBLE: &str = "The following is a <SYSTEM_MESSAGE> not actually sent by the user. It is provided by the system as important information to pay attention to.";
+    let body = content
+        .trim()
+        .strip_prefix(PREAMBLE)?
+        .trim_start()
+        .strip_prefix("<SYSTEM_MESSAGE>")?
+        .strip_suffix("</SYSTEM_MESSAGE>")?
+        .trim();
+    if body.starts_with("Stop hook blocked termination:") {
+        return Some(Kind::HookFeedback);
+    }
+
+    let header = body.strip_prefix("[Message] timestamp=")?;
+    let (timestamp, rest) = header.split_once(" sender=")?;
+    parse_timestamp_str(timestamp)?;
+    let (sender, rest) = rest.split_once(" priority=")?;
+    let (priority, payload) = rest.split_once(" content=")?;
+    let priority = priority.strip_prefix("MESSAGE_PRIORITY_")?;
+    if priority.is_empty()
+        || !priority
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte == b'_')
+        || payload.trim().is_empty()
+    {
+        return None;
+    }
+
+    if let Some((conversation, task)) = sender.split_once("/task-") {
+        if !is_conversation_id(conversation)
+            || task.is_empty()
+            || !task.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        if let Some((task_id, outcome)) = payload
+            .strip_prefix("Task id \"")
+            .and_then(|rest| rest.split_once('"'))
+        {
+            if task_id != sender {
+                return None;
+            }
+            if outcome.starts_with(" was canceled with result:") {
+                return Some(Kind::TaskCanceled);
+            }
+            if outcome.starts_with(" finished with result:") {
+                return Some(Kind::TaskFinished);
+            }
+        } else if payload.starts_with("Check ") {
+            return Some(Kind::TaskReminder);
+        } else if payload.starts_with("The command output has stabilized for ") {
+            return Some(Kind::TaskStalled);
+        }
+        return None;
+    }
+
+    if sender == "system" {
+        if payload.starts_with("[Notice] All your subagents and background tasks have been stopped due to server restart.") {
+            return Some(Kind::RestartNotice);
+        }
+        if payload.starts_with("The subagent ")
+            && payload.contains(
+                " encountered an error and has either stopped or failed to start execution:",
+            )
+        {
+            return Some(Kind::SubagentError);
+        }
+        return None;
+    }
+
+    is_conversation_id(sender).then_some(Kind::AgentMessage)
+}
+
+fn is_conversation_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
 }
 
 fn read_merged_records(file: &SessionFile) -> Result<Vec<TranscriptRecord>> {

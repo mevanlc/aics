@@ -180,6 +180,15 @@ or **User Messages** hides them. Internal Context is hidden by default. Use
 `hidden: "Continue working toward the active thread goal"` to find those messages
 while they are hidden, or `all:` to include them alongside visible content.
 
+Antigravity directory rules follow **AGENTS.md/CLAUDE.md**, task outcomes and
+execution errors follow **Tool Results**, polling/restart/hook notices follow
+**Internal Context**, and worker messages/checkpoints follow **Agent Replies**.
+Visible/Hidden searches use those same classifications, while All includes all
+retained text. Original roles and explicit semantic fields are unchanged: a
+System-role task notification is still excluded from `toolresult:` even though
+Tool Results controls its visibility. Unknown or malformed messages remain
+visible. Metadata discarded by the parser is unavailable even to All.
+
 Queries use Tantivy's lenient query parser:
 
 - Bare words are token searches and multiple bare words are ANDed by default.

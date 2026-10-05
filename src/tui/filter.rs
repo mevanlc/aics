@@ -916,17 +916,17 @@ impl DisplayField {
     fn description(self) -> &'static str {
         match self {
             Self::ProjectDocsAutodump => {
-                "Hide harness injections of AGENTS.md/CLAUDE.md into session context."
+                "Hide injected project instructions, including AGENTS.md/CLAUDE.md and Antigravity directory rules."
             }
             Self::SkillTextInjection => "Hide skill definition text injected into session context.",
             Self::ToolCalls => "Hide tool call request blocks from previews and viewers.",
-            Self::ToolResults => "Hide tool result blocks from previews and viewers.",
+            Self::ToolResults => "Hide tool results, including Antigravity task outcomes and execution errors.",
             Self::UserToolCalls => "Hide user shell command executions from previews and viewers.",
             Self::UserToolResults => "Hide user shell command outputs from previews and viewers.",
-            Self::AgentReplies => "Hide assistant reply messages from previews and viewers.",
+            Self::AgentReplies => "Hide agent messages and reasoning, including Antigravity worker messages and checkpoints.",
             Self::UserMessages => "Hide user messages from previews and viewers.",
             Self::InternalContext => {
-                "Hide generated codex_internal_context and goal_context messages."
+                "Hide generated internal/goal context and Antigravity polling, restart, and hook notices."
             }
         }
     }
