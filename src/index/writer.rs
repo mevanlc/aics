@@ -2,7 +2,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -394,7 +398,10 @@ impl IndexManager {
         };
         // Splitting 50 MB across all workers produced many tiny segments and
         // repeated merges on large rebuilds. Give each worker its own budget.
-        let writer_threads = std::thread::available_parallelism()?.get().min(4);
+        let cpu_count = thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let writer_threads = cpu_count.min(4);
         let mut writer =
             index.writer_with_num_threads(writer_threads, writer_threads * 50_000_000)?;
         let mut changed = rebuild;
@@ -439,42 +446,30 @@ impl IndexManager {
             total: pending_files.len(),
         });
 
+        let worker_count = session_read_worker_count(pending_files.len(), cpu_count);
+        debug!(
+            "index sync: reading {} changed files using {worker_count} workers",
+            pending_files.len()
+        );
+        let read_sessions = read_session_jobs(
+            &pending_files,
+            worker_count,
+            read_session_file,
+            |processed| {
+                progress.on_progress(SyncProgress::IndexingProgress {
+                    processed,
+                    total: pending_files.len(),
+                });
+            },
+        )?;
         let mut parsed_sessions = HashMap::<String, Session>::new();
-        for (index, file) in pending_files.iter().enumerate() {
+        for (file, read) in pending_files.iter().zip(read_sessions) {
             let key = normalize_path_key(&file.path);
-            let state = match parse_scanned_session_file(file) {
-                Ok(Some(session)) => {
-                    let state = IndexedFileState::from_session(file, &session);
-                    parsed_sessions.insert(key.clone(), session);
-                    stats.updated += 1;
-                    state
-                }
-                Ok(None) => {
-                    let mut state = IndexedFileState::from_file(file, false);
-                    if file.agent == Agent::Codex {
-                        match parse_codex_session_meta_lineage_file(&file.path) {
-                            Ok((session_id, lineage)) => {
-                                state.session_id = session_id;
-                                state.lineage = lineage;
-                            }
-                            Err(error) => warn!(
-                                "failed to read Codex lineage metadata from {}: {error:#}",
-                                file.path.display()
-                            ),
-                        }
-                    }
-                    state
-                }
-                Err(error) => {
-                    warn!("failed to parse {}: {error:#}", file.path.display());
-                    IndexedFileState::from_file(file, false)
-                }
-            };
-            next_state.files.insert(key, state);
-            progress.on_progress(SyncProgress::IndexingProgress {
-                processed: index + 1,
-                total: pending_files.len(),
-            });
+            if let Some(session) = read.session {
+                parsed_sessions.insert(key.clone(), session);
+                stats.updated += 1;
+            }
+            next_state.files.insert(key, read.state);
         }
 
         debug!("index sync: read sessions in {:?}", phase_started.elapsed());
@@ -673,6 +668,157 @@ impl IndexManager {
         IndexSchema::register_tokenizers(&index);
         Ok((index, schema))
     }
+}
+
+fn session_read_worker_count(file_count: usize, cpu_count: usize) -> usize {
+    cpu_count
+        .min(cpu_count.saturating_sub(1).max(2))
+        .min(file_count)
+}
+
+struct ReadSession {
+    state: IndexedFileState,
+    session: Option<Session>,
+}
+
+fn read_session_file(file: &SessionFile) -> ReadSession {
+    match parse_scanned_session_file(file) {
+        Ok(Some(session)) => ReadSession {
+            state: IndexedFileState::from_session(file, &session),
+            session: Some(session),
+        },
+        Ok(None) => {
+            let mut state = IndexedFileState::from_file(file, false);
+            if file.agent == Agent::Codex {
+                match parse_codex_session_meta_lineage_file(&file.path) {
+                    Ok((session_id, lineage)) => {
+                        state.session_id = session_id;
+                        state.lineage = lineage;
+                    }
+                    Err(error) => warn!(
+                        "failed to read Codex lineage metadata from {}: {error:#}",
+                        file.path.display()
+                    ),
+                }
+            }
+            ReadSession {
+                state,
+                session: None,
+            }
+        }
+        Err(error) => {
+            warn!("failed to parse {}: {error:#}", file.path.display());
+            ReadSession {
+                state: IndexedFileState::from_file(file, false),
+                session: None,
+            }
+        }
+    }
+}
+
+/// Read independently, report completions on the caller, and return file order.
+fn read_session_jobs<J, R, Read, Progress>(
+    jobs: &[J],
+    worker_count: usize,
+    read: Read,
+    mut on_progress: Progress,
+) -> Result<Vec<R>>
+where
+    J: Sync,
+    R: Send,
+    Read: Fn(&J) -> R + Sync,
+    Progress: FnMut(usize),
+{
+    if jobs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let worker_count = worker_count.clamp(1, jobs.len());
+    if worker_count == 1 {
+        let mut results = Vec::with_capacity(jobs.len());
+        for (index, job) in jobs.iter().enumerate() {
+            let result = catch_unwind(AssertUnwindSafe(|| read(job)))
+                .map_err(|_| anyhow::anyhow!("session reader panicked at file {index}"))?;
+            results.push(result);
+            on_progress(index + 1);
+        }
+        return Ok(results);
+    }
+
+    let next_job = AtomicUsize::new(0);
+    let cancelled = AtomicBool::new(false);
+    thread::scope(|scope| -> Result<Vec<R>> {
+        let (result_tx, result_rx) = mpsc::sync_channel(worker_count);
+        let mut workers = Vec::with_capacity(worker_count);
+        let mut spawn_error = None;
+
+        for worker_index in 0..worker_count {
+            let result_tx = result_tx.clone();
+            let next_job = &next_job;
+            let cancelled = &cancelled;
+            let read = &read;
+            match thread::Builder::new()
+                .name(format!("aics-read-{worker_index}"))
+                .spawn_scoped(scope, move || {
+                    let outcome = catch_unwind(AssertUnwindSafe(|| {
+                        while !cancelled.load(Ordering::Relaxed) {
+                            let job_index = next_job.fetch_add(1, Ordering::Relaxed);
+                            let Some(job) = jobs.get(job_index) else {
+                                break;
+                            };
+                            if result_tx.send(Ok((job_index, read(job)))).is_err() {
+                                break;
+                            }
+                        }
+                    }));
+                    if outcome.is_err() {
+                        cancelled.store(true, Ordering::Relaxed);
+                        let _ = result_tx.send(Err(anyhow::anyhow!(
+                            "session reader worker {worker_index} panicked"
+                        )));
+                    }
+                }) {
+                Ok(worker) => workers.push(worker),
+                Err(error) => {
+                    spawn_error = Some(
+                        anyhow::Error::new(error).context("failed to spawn session reader worker"),
+                    );
+                    break;
+                }
+            }
+        }
+        drop(result_tx);
+
+        let mut results = std::iter::repeat_with(|| None)
+            .take(jobs.len())
+            .collect::<Vec<_>>();
+        let mut outcome = match spawn_error {
+            Some(error) => Err(error),
+            None => (|| -> Result<()> {
+                for processed in 1..=jobs.len() {
+                    let (job_index, result) = result_rx
+                        .recv()
+                        .context("session readers stopped before completing all files")??;
+                    results[job_index] = Some(result);
+                    on_progress(processed);
+                }
+                Ok(())
+            })(),
+        };
+
+        cancelled.store(true, Ordering::Relaxed);
+        // Unblock bounded sends before joining, including partially spawned pools.
+        drop(result_rx);
+        for worker in workers {
+            if worker.join().is_err() && outcome.is_ok() {
+                outcome = Err(anyhow::anyhow!("session reader worker panicked"));
+            }
+        }
+        outcome?;
+        Ok(results
+            .into_iter()
+            .map(|result| result.expect("every session read completed"))
+            .collect())
+    })
 }
 
 fn add_session_document(
@@ -1316,6 +1462,221 @@ fn is_lock_busy_error(error: &anyhow::Error) -> bool {
 mod tests {
     use super::*;
     use crate::parse::{CodexUserTurn, TrailingAbortedTurn};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::{Barrier, Mutex};
+
+    #[test]
+    fn session_reader_worker_count_reserves_one_cpu_and_caps_to_work() {
+        for (files, cpus, expected) in [
+            (0, 16, 0),
+            (1, 16, 1),
+            (3, 16, 3),
+            (100, 1, 1),
+            (100, 2, 2),
+            (100, 3, 2),
+            (100, 4, 3),
+            (100, 16, 15),
+        ] {
+            assert_eq!(session_read_worker_count(files, cpus), expected);
+        }
+    }
+
+    #[test]
+    fn session_reader_empty_batch_does_no_work() -> Result<()> {
+        let results: Vec<usize> = read_session_jobs(
+            &[] as &[usize],
+            0,
+            |_| panic!("empty batch must not read"),
+            |_| panic!("empty batch must not report progress"),
+        )?;
+        assert!(results.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn session_reader_single_worker_runs_inline() -> Result<()> {
+        let caller = thread::current().id();
+        let progress = Rc::new(Cell::new(0));
+        let results = read_session_jobs(
+            &[2, 3, 4],
+            1,
+            |job| {
+                assert_eq!(thread::current().id(), caller);
+                job * 2
+            },
+            |processed| {
+                assert_eq!(thread::current().id(), caller);
+                assert_eq!(processed, progress.get() + 1);
+                progress.set(processed);
+            },
+        )?;
+        assert_eq!(results, [4, 6, 8]);
+        assert_eq!(progress.get(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn session_reader_parallel_completion_reports_progress_before_first_file_finishes() -> Result<()>
+    {
+        let caller = thread::current().id();
+        let jobs = (0..24).collect::<Vec<_>>();
+        let reads = jobs.iter().map(|_| AtomicUsize::new(0)).collect::<Vec<_>>();
+        let barrier = Barrier::new(2);
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let progress = Rc::new(Cell::new(0));
+
+        let results = read_session_jobs(
+            &jobs,
+            2,
+            |&job| {
+                assert_ne!(thread::current().id(), caller);
+                if job < 2 {
+                    // Both reads must start; file zero cannot finish until the
+                    // caller has observed another completed file.
+                    barrier.wait();
+                    if job == 0 {
+                        release_rx.lock().unwrap().recv().unwrap();
+                    }
+                }
+                reads[job].fetch_add(1, Ordering::Relaxed);
+                job
+            },
+            |processed| {
+                assert_eq!(thread::current().id(), caller);
+                assert_eq!(processed, progress.get() + 1);
+                progress.set(processed);
+                if processed == 1 {
+                    assert_eq!(reads[0].load(Ordering::Relaxed), 0);
+                    release_tx.send(()).unwrap();
+                }
+            },
+        )?;
+
+        assert_eq!(results, jobs, "results retain original file order");
+        assert_eq!(progress.get(), jobs.len());
+        assert!(reads.iter().all(|read| read.load(Ordering::Relaxed) == 1));
+        Ok(())
+    }
+
+    #[test]
+    fn session_reader_worker_panic_returns_error() {
+        let jobs = (0..64).collect::<Vec<_>>();
+        let error = read_session_jobs(
+            &jobs,
+            2,
+            |&job| {
+                assert_ne!(job, 0, "test reader panic");
+                job
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("session reader worker"));
+        assert!(error.to_string().contains("panicked"));
+    }
+
+    #[test]
+    fn session_reader_progress_panic_unblocks_and_joins_workers() {
+        let jobs = (0..64).collect::<Vec<_>>();
+        let outcome = catch_unwind(|| {
+            read_session_jobs(&jobs, 2, |job| *job, |_| panic!("test callback panic"))
+        });
+        assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn session_reader_serial_and_parallel_match_all_providers_and_failures() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sessions");
+        let roots = SessionRoots {
+            claude_projects: temp.path().join(".claude/projects"),
+            codex_sessions: temp.path().join(".codex/sessions"),
+            antigravity_home: fixtures.join("antigravity"),
+            live_sessions: Default::default(),
+            trash: None,
+        };
+        fs::create_dir_all(&roots.claude_projects)?;
+        fs::create_dir_all(&roots.codex_sessions)?;
+        fs::copy(
+            fixtures.join("claude/basic_session.jsonl"),
+            roots.claude_projects.join("basic.jsonl"),
+        )?;
+        fs::write(roots.claude_projects.join("empty.jsonl"), "")?;
+
+        let codex_path = roots.codex_sessions.join("minimal.jsonl");
+        let mut codex_body = fs::read_to_string(fixtures.join("codex/minimal.jsonl"))?;
+        codex_body.push_str("\nnot-json\n");
+        fs::write(&codex_path, codex_body)?;
+        let codex_id = crate::parse::parse_codex_session_file(&codex_path)?
+            .expect("Codex fixture")
+            .session_id;
+        fs::write(
+            temp.path().join(".codex/session_index.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({"id": codex_id, "thread_name": "Parallel reader title"})
+            ),
+        )?;
+        let meta_path = roots.codex_sessions.join("metadata-only.jsonl");
+        fs::write(
+            &meta_path,
+            format!(
+                "{}\n",
+                serde_json::json!({"type": "session_meta", "payload": {
+                    "id": "metadata-only", "forked_from_id": "parent"
+                }})
+            ),
+        )?;
+        fs::write(roots.codex_sessions.join("malformed.jsonl"), "not-json\n")?;
+        let missing_path = roots.claude_projects.join("disappeared.jsonl");
+        fs::write(&missing_path, "")?;
+        let files = crate::scan::scan_session_files(&roots)?;
+        fs::remove_file(&missing_path)?;
+
+        let serial = read_session_jobs(&files, 1, read_session_file, |_| {})?;
+        let parallel = read_session_jobs(&files, 3, read_session_file, |_| {})?;
+        for (expected, actual) in serial.iter().zip(&parallel) {
+            assert_eq!(actual.state, expected.state);
+            assert_eq!(actual.session, expected.session);
+        }
+        for agent in [Agent::Claude, Agent::Codex, Agent::Antigravity] {
+            assert!(parallel.iter().any(|read| read
+                .session
+                .as_ref()
+                .is_some_and(|session| session.agent == agent)));
+        }
+        let metadata = files
+            .iter()
+            .position(|file| file.path == meta_path)
+            .unwrap();
+        assert!(!parallel[metadata].state.indexed);
+        assert_eq!(
+            parallel[metadata].state.session_id.as_deref(),
+            Some("metadata-only")
+        );
+        assert_eq!(
+            parallel[metadata]
+                .state
+                .lineage
+                .forked_from_session_id
+                .as_deref(),
+            Some("parent")
+        );
+        let missing = files
+            .iter()
+            .position(|file| file.path == missing_path)
+            .unwrap();
+        assert!(!parallel[missing].state.indexed);
+        assert!(parallel[missing].session.is_none());
+        assert!(parallel.iter().any(|read| {
+            read.session.as_ref().is_some_and(|session| {
+                session.custom_title.as_deref() == Some("Parallel reader title")
+            })
+        }));
+        Ok(())
+    }
 
     #[test]
     fn default_cache_dir_is_home_relative_dot_cache() {

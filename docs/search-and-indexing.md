@@ -60,6 +60,14 @@ Antigravity bundle, changes to either transcript or the cache metadata invalidat
 the indexed record. Malformed or unrecognized session data is skipped rather
 than crashing the scan.
 
+The **Reading sessions** phase parses changed sessions concurrently, with one
+logical session per job. Its worker count is the smaller of the changed-session
+count and `min(cpu_count, max(2, cpu_count - 1))`: one worker on a single-CPU
+system, two on a two-CPU system, and one fewer than the available CPUs otherwise.
+CPU detection falls back to one worker. A single job runs on the calling thread.
+Progress advances as reads complete; results are folded in the original file
+order before resolving relationships and building the index.
+
 Fork lineage and stable semantic event IDs are cached in the same state. AICS
 uses declared parent session IDs to form fork families, then checks direct
 parent/child candidates for event-set coverage and groups equal semantic event

@@ -9,7 +9,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Full-text search across Claude Code, Codex CLI, and Antigravity CLI sessions
 - Persistent search history with a fuzzy-filtered Ctrl+R recall modal
 - Native Claude Code autosummaries and Codex rollout summaries in previews and summary snippets
-- Incremental indexing — only new or changed sessions get re-indexed on startup
+- Incremental indexing with parallel reading of new or changed sessions on startup
 - Interactive TUI with session list, snippet preview, and scrollable full-session viewer
 - Native session names centered in the preview border, or the session-list border when preview is hidden
 - Filter modal: search content (Visible / All / Hidden), scope, agent, date range, minimum length, session kind (original / trimmed / rollover / sub-agent), live, superseded, and trashed sessions

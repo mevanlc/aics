@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -1898,7 +1898,7 @@ const SESSION_INDEX_FILE: &str = "session_index.jsonl";
 struct CachedThreadNames {
     modified: SystemTime,
     size: u64,
-    names: HashMap<String, String>,
+    names: Arc<HashMap<String, String>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1944,9 +1944,11 @@ fn find_codex_thread_name(path: &Path, session_id: &str) -> Option<String> {
     names.get(session_id).cloned()
 }
 
-pub(crate) fn read_codex_thread_names(sessions_root: &Path) -> Result<HashMap<String, String>> {
+pub(crate) fn read_codex_thread_names(
+    sessions_root: &Path,
+) -> Result<Arc<HashMap<String, String>>> {
     let Some(home) = sessions_root.parent() else {
-        return Ok(HashMap::new());
+        return Ok(Arc::new(HashMap::new()));
     };
     load_thread_name_cache(&home.join(SESSION_INDEX_FILE))
 }
@@ -1961,10 +1963,12 @@ fn codex_session_index_path(path: &Path) -> Option<std::path::PathBuf> {
     Some(sessions_dir.parent()?.join(SESSION_INDEX_FILE))
 }
 
-fn load_thread_name_cache(index_path: &Path) -> Result<HashMap<String, String>> {
+fn load_thread_name_cache(index_path: &Path) -> Result<Arc<HashMap<String, String>>> {
     let metadata = match std::fs::metadata(index_path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Arc::new(HashMap::new()));
+        }
         Err(error) => {
             return Err(error)
                 .with_context(|| format!("failed to read metadata for {}", index_path.display()));
@@ -1985,8 +1989,10 @@ fn load_thread_name_cache(index_path: &Path) -> Result<HashMap<String, String>> 
         return Ok(cached.names);
     }
 
-    let names = read_thread_names(index_path)
-        .with_context(|| format!("failed to read {}", index_path.display()))?;
+    let names = Arc::new(
+        read_thread_names(index_path)
+            .with_context(|| format!("failed to read {}", index_path.display()))?,
+    );
     cache.lock().expect("thread name cache poisoned").insert(
         cache_key,
         CachedThreadNames {
