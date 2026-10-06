@@ -22,6 +22,7 @@ const VIS_TOOL_RESULT_FIELD: &str = "_vis_toolresult";
 const VIS_TOOL_CALL_RESULT_FIELD: &str = "_vis_toolcall_result";
 const VIS_PROJECT_DOCS_FIELD: &str = "_vis_projectdocs";
 const VIS_INTERNAL_CONTEXT_FIELD: &str = "_vis_internal_context";
+const VIS_AGENT_INTERNAL_CONTEXT_FIELD: &str = "_vis_agent_internal_context";
 const VIS_USER_PROJECT_DOCS_FIELD: &str = "_vis_user_projectdocs";
 const VIS_USER_SKILL_FIELD: &str = "_vis_user_skill";
 const VIS_USER_INTERNAL_CONTEXT_FIELD: &str = "_vis_user_internal_context";
@@ -53,6 +54,7 @@ pub struct IndexSchema {
     pub vis_tool_call_result: Field,
     pub vis_project_docs: Field,
     pub vis_internal_context: Field,
+    pub vis_agent_internal_context: Field,
     pub vis_user_project_docs: Field,
     pub vis_user_skill: Field,
     pub vis_user_internal_context: Field,
@@ -111,6 +113,8 @@ impl IndexSchema {
             builder.add_text_field(VIS_PROJECT_DOCS_FIELD, content_options.clone());
         let vis_internal_context =
             builder.add_text_field(VIS_INTERNAL_CONTEXT_FIELD, content_options.clone());
+        let vis_agent_internal_context =
+            builder.add_text_field(VIS_AGENT_INTERNAL_CONTEXT_FIELD, content_options.clone());
         let vis_user_project_docs =
             builder.add_text_field(VIS_USER_PROJECT_DOCS_FIELD, content_options.clone());
         let vis_user_skill = builder.add_text_field(VIS_USER_SKILL_FIELD, content_options.clone());
@@ -145,6 +149,7 @@ impl IndexSchema {
             vis_tool_call_result,
             vis_project_docs,
             vis_internal_context,
+            vis_agent_internal_context,
             vis_user_project_docs,
             vis_user_skill,
             vis_user_internal_context,
@@ -212,6 +217,9 @@ impl IndexSchema {
                 .context("missing visibility field")?,
             vis_internal_context: schema
                 .get_field(VIS_INTERNAL_CONTEXT_FIELD)
+                .context("missing visibility field")?,
+            vis_agent_internal_context: schema
+                .get_field(VIS_AGENT_INTERNAL_CONTEXT_FIELD)
                 .context("missing visibility field")?,
             vis_user_project_docs: schema
                 .get_field(VIS_USER_PROJECT_DOCS_FIELD)

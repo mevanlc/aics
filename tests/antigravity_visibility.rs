@@ -337,11 +337,11 @@ fn index_visibility_and_format_rebuild_preserve_search_semantics() -> Result<()>
 
     drop(engine);
     let mut old_state: Value = serde_json::from_str(&fs::read_to_string(&paths.state_file)?)?;
-    old_state["format_version"] = json!(18);
+    old_state["format_version"] = json!(19);
     fs::write(&paths.state_file, serde_json::to_string(&old_state)?)?;
     let rebuilt = manager.sync_with_roots(&roots, false)?;
     assert_eq!(rebuilt.updated, 1);
     let state: Value = serde_json::from_str(&fs::read_to_string(&paths.state_file)?)?;
-    assert_eq!(state["format_version"], 19);
+    assert_eq!(state["format_version"], 20);
     Ok(())
 }

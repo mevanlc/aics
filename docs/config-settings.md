@@ -67,6 +67,14 @@ context, such as environment blocks, keeps its existing visibility behavior.
 It also hides recognized Antigravity task polling reminders, server restart
 notices, and stop-hook feedback.
 
+Complete `<oai-mem-citation>` footers at the end of assistant messages also follow
+**Internal Context**. Only the footer is hidden; the reply prose, heading, and
+timestamp remain visible. Showing the footer requires both Internal Context and
+Agent Replies to be on. Citation-only messages disappear when their footer is
+hidden. Quoted/code examples, incomplete wrappers, and blocks followed by prose
+remain visible. Original session content is retained for full exports and
+troubleshooting.
+
 Antigravity generated records use the existing visibility toggles:
 
 | Toggle | Antigravity content |

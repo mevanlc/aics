@@ -1116,6 +1116,8 @@ impl ViewerState {
                             if matched.sources.iter().any(|source| {
                                 cache.projection.segments.iter().any(|segment| {
                                     segment.source == source.source
+                                        && segment.source_range.start < source.range.end
+                                        && segment.source_range.end > source.range.start
                                         && !segment.visibility.is_visible(display_options)
                                 })
                             }) {
@@ -2963,6 +2965,72 @@ mod tests {
         let state = ViewerState::new();
 
         assert!(state.active_match.is_none());
+    }
+
+    #[test]
+    fn memory_footer_visibility_preserves_reply_find_navigation_and_copy() {
+        crate::settings::isolate_config_root_for_tests();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sessions/codex/memory_citations.jsonl");
+        let parsed = crate::parse::parse_codex_session_file(path)
+            .unwrap()
+            .unwrap();
+        let area = Rect::new(0, 0, 120, 40);
+        let hidden = DisplayOptions::default();
+        for message_only in [false, true] {
+            let mut session = parsed.clone();
+            if message_only {
+                session.cells.clear();
+            }
+            let mut viewer = selection_viewer(&session, area);
+            viewer.find = Input::default().with_value("MemoryCitationNeedle".to_owned());
+            viewer.search = Input::default().with_value("all: RepeatedMemoryNeedle".to_owned());
+            refresh_viewer(&mut viewer, &session, area, hidden);
+            let cache = viewer.render_cache.as_ref().unwrap();
+            assert!(cache.find_ranges.is_empty());
+            assert_eq!(cache.query_ranges.len(), 1);
+            assert_eq!(cache.query_hidden, 1);
+            assert!(rendered_lines(&cache.text)
+                .join("\n")
+                .contains("ReplyNeedle"));
+            viewer.selected_blocks = cache.blocks.iter().map(|block| block.source.id).collect();
+            let (_, copied) = viewer.selected_markdown(&session, None, hidden);
+            assert!(copied.contains("ReplyNeedle"));
+            assert!(!copied.contains("MemoryCitationNeedle"));
+            let hidden_rows = collect_message_rows(
+                &session,
+                None,
+                &Theme::default(),
+                116,
+                MessageJumpScope::Any,
+                hidden,
+            );
+            refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
+            let cache = viewer.render_cache.as_ref().unwrap();
+            assert_eq!(cache.find_ranges.len(), 1);
+            assert_eq!(cache.query_ranges.len(), 2);
+            assert_eq!(cache.query_hidden, 0);
+            let shown_rows = collect_message_rows(
+                &session,
+                None,
+                &Theme::default(),
+                116,
+                MessageJumpScope::Any,
+                DisplayOptions::SHOW_ALL,
+            );
+            assert_eq!(shown_rows.len(), hidden_rows.len() + 1);
+            let (_, copied) = viewer.selected_markdown(&session, None, DisplayOptions::SHOW_ALL);
+            assert!(copied.contains("MemoryCitationNeedle"));
+            viewer.find = Input::default().with_value("ReplyNeedle".to_owned());
+            // This link destination shares the message ID with its hidden
+            // footer, but must be reported as source-only rather than hidden.
+            viewer.search = Input::default().with_value("all: BodySyntaxNeedle".to_owned());
+            refresh_viewer(&mut viewer, &session, area, hidden);
+            let cache = viewer.render_cache.as_ref().unwrap();
+            assert_eq!(cache.find_ranges.len(), 1);
+            assert_eq!(cache.query_hidden, 0);
+            assert_eq!(cache.query_source_only, 1);
+        }
     }
 
     #[test]

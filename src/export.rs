@@ -32,6 +32,7 @@ use crate::parse::{
     ExecStatus, MessageRole, PatchOp, PlanItemStatus, RuntimeMetrics, Session, SessionCell,
     SessionInfo, SessionMessage, ToolStatus,
 };
+use crate::search_projection::visible_message_content;
 use crate::settings::DisplayOptions;
 
 /// Cap on the title slug appended to a Markdown export filename. Long enough to
@@ -73,14 +74,7 @@ pub(crate) fn selected_blocks_to_markdown(
             }
             SessionBlockId::Message(index) => {
                 if let Some(message) = session.messages.get(index) {
-                    if !hides_message(
-                        display_options,
-                        message.role,
-                        &message.content,
-                        message.antigravity_kind,
-                    ) {
-                        push_message(&mut output, message);
-                    }
+                    push_message(&mut output, message, display_options);
                 }
             }
             SessionBlockId::Cell(index) | SessionBlockId::Metrics(index) => {
@@ -111,14 +105,14 @@ pub fn session_to_plain_text_with_options(
 ) -> String {
     let mut output = String::new();
     for message in &session.messages {
-        if hides_message(
-            display_options,
+        let Some(content) = visible_message_content(
             message.role,
             &message.content,
             message.antigravity_kind,
-        ) {
+            display_options,
+        ) else {
             continue;
-        }
+        };
         let role_display = match (&message.role, &message.tool_name) {
             (MessageRole::ToolCall, Some(name)) => format!("tool_call({name})"),
             (MessageRole::ToolResult, Some(name)) => format!("tool_result({name})"),
@@ -133,7 +127,7 @@ pub fn session_to_plain_text_with_options(
         } else {
             output.push_str(&format!("{role_display} {timestamp}\n"));
         }
-        output.push_str(&message.content);
+        output.push_str(content);
         output.push_str("\n\n");
     }
     output
@@ -160,15 +154,7 @@ pub fn session_to_markdown_with_options(
 
     if session.cells.is_empty() {
         for message in &session.messages {
-            if hides_message(
-                display_options,
-                message.role,
-                &message.content,
-                message.antigravity_kind,
-            ) {
-                continue;
-            }
-            push_message(&mut output, message);
+            push_message(&mut output, message, display_options);
         }
     } else {
         let mut context = CellContext::default();
@@ -203,18 +189,6 @@ pub fn write_session_markdown(
         "md",
         &session_to_markdown_with_options(session, display_options),
     )
-}
-
-/// Mirror the preview's per-message visibility rules so `--hide` means the same
-/// thing in an export as it does in the TUI.
-fn hides_message(
-    display_options: DisplayOptions,
-    role: MessageRole,
-    content: &str,
-    antigravity_kind: Option<crate::parse::AntigravityMessageKind>,
-) -> bool {
-    !crate::search_projection::message_visibility(role, content, antigravity_kind)
-        .is_visible(display_options)
 }
 
 /// Write `rendered` as a `.txt` file in the current directory.
@@ -417,7 +391,15 @@ fn push_document_header(output: &mut String, session: &Session) {
     output.push_str("---\n\n");
 }
 
-fn push_message(output: &mut String, message: &SessionMessage) {
+fn push_message(output: &mut String, message: &SessionMessage, display_options: DisplayOptions) {
+    let Some(content) = visible_message_content(
+        message.role,
+        &message.content,
+        message.antigravity_kind,
+        display_options,
+    ) else {
+        return;
+    };
     let label = match (message.role, message.tool_name.as_deref()) {
         (MessageRole::ToolCall, Some(name)) => format!("tool call: {name}"),
         (MessageRole::ToolResult, Some(name)) => format!("tool result: {name}"),
@@ -429,9 +411,9 @@ fn push_message(output: &mut String, message: &SessionMessage) {
         message.role,
         MessageRole::ToolCall | MessageRole::ToolResult
     ) {
-        push_block(output, "", "text", &message.content);
+        push_block(output, "", "text", content);
     } else {
-        push_body(output, &message.content);
+        push_body(output, content);
     }
 }
 
@@ -452,9 +434,11 @@ fn push_cell(
             timestamp,
             antigravity_kind,
         } => {
-            if hides_message(display_options, *role, content, *antigravity_kind) {
+            let Some(content) =
+                visible_message_content(*role, content, *antigravity_kind, display_options)
+            else {
                 return;
-            }
+            };
             push_heading(output, role.as_str(), *timestamp);
             push_body(output, content);
         }
@@ -993,6 +977,79 @@ mod tests {
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),
+        }
+    }
+
+    #[test]
+    fn selected_memory_footer_blocks_preserve_reply_and_omit_empty_headings() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sessions/codex/memory_citations.jsonl");
+        let parsed = crate::parse::parse_codex_session_file(path)
+            .unwrap()
+            .unwrap();
+        for fallback in [false, true] {
+            let mut session = parsed.clone();
+            let blocks = if fallback {
+                session.cells.clear();
+                session
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, message)| {
+                        if message.content.contains("MemoryCitationNeedle") {
+                            Some((
+                                super::SessionBlockId::Message(index),
+                                "MemoryCitationNeedle",
+                            ))
+                        } else if message.content.contains("CitationOnlyNeedle") {
+                            Some((super::SessionBlockId::Message(index), "CitationOnlyNeedle"))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                session
+                    .cells
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, cell)| {
+                        let SessionCell::Message { content, .. } = cell else {
+                            return None;
+                        };
+                        if content.contains("MemoryCitationNeedle") {
+                            Some((super::SessionBlockId::Cell(index), "MemoryCitationNeedle"))
+                        } else if content.contains("CitationOnlyNeedle") {
+                            Some((super::SessionBlockId::Cell(index), "CitationOnlyNeedle"))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(blocks.len(), 2);
+            for (block, needle) in blocks {
+                let hidden = super::selected_blocks_to_markdown(
+                    &session,
+                    None,
+                    [block],
+                    DisplayOptions::default(),
+                );
+                assert!(!hidden.contains(needle));
+                if needle == "CitationOnlyNeedle" {
+                    assert!(hidden.is_empty());
+                } else {
+                    assert!(hidden.contains("ReplyNeedle"));
+                    assert!(hidden.contains("2026-10-06"));
+                }
+                let shown = super::selected_blocks_to_markdown(
+                    &session,
+                    None,
+                    [block],
+                    DisplayOptions::SHOW_ALL,
+                );
+                assert!(shown.contains(needle));
+            }
         }
     }
 

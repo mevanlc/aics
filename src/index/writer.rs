@@ -880,7 +880,7 @@ fn working_dir_search_terms(cwd: &str) -> Vec<String> {
 
 /// Bump when indexed/stored fields or searchable-content semantics change so old
 /// state files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 19;
+const INDEX_FORMAT_VERSION: u32 = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {

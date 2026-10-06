@@ -885,6 +885,7 @@ fn search_query_help_text() -> &'static str {
 - Use dirs:PATH for directory-valued properties, files:PATH for file-valued properties, and paths:PATH for their union plus ambiguous file-or-directory properties. Path fields use a semantic allowlist, not filesystem existence or slash guessing.\n\
 - Use visible: to search content shown by the ^F Visibility toggles, hidden: for content they hide, or all: to ignore them. Modifiers override Search content temporarily; removing them restores the preference. Saving defaults saves the selector's value. These mutually exclusive modifiers can appear anywhere; explicit fields such as toolcall:TEXT always search their field. JSON/export default to All and ignore saved preferences.\n\
 - Antigravity directory rules follow AGENTS.md/CLAUDE.md; task outcomes and errors follow Tool Results; polling/restart/hook notices follow Internal Context; worker messages and checkpoints follow Agent Replies. Unknown messages remain visible.\n\
+- Internal Context hides complete trailing memory citation footers in assistant messages while preserving reply text. Turn it on to inspect citations; Agent Replies must also be on. Quoted/code examples and malformed or non-footer blocks remain visible.\n\
 \n\
 ## Query syntax\n\
 - Bare words are token searches. Tantivy's default tokenizer handles case and punctuation normalization.\n\

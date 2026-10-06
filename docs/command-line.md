@@ -220,8 +220,11 @@ patch blocks while leaving the invocations themselves in place.
 
 `internal-context` hides complete user-message `<codex_internal_context …>` and
 `<goal_context>` injections, plus recognized Antigravity polling reminders,
-restart notices, and stop-hook feedback. The TUI hides these by default;
-complete exports include them unless `--hide internal-context` is specified.
+restart notices, stop-hook feedback, and complete trailing `<oai-mem-citation>`
+footers in assistant messages. Hiding a citation footer preserves the reply
+text. Quoted/code examples, malformed wrappers, and citations followed by prose
+remain visible. The TUI hides this generated content by default; complete
+exports include it unless `--hide internal-context` is specified.
 
 For Antigravity, `project-docs-autodump` also hides injected directory rules,
 `tool-results` hides asynchronous task outcomes (including cancellations) and

@@ -233,6 +233,7 @@ pub fn render_session_document_with_options(
                 message,
                 theme,
                 highlight_query,
+                options.display_options,
             );
             origin_blocks.push((
                 start,
@@ -348,12 +349,13 @@ pub fn render_session_document_with_options(
 fn should_hide_message(message: &SessionMessage, options: SessionRenderOptions) -> bool {
     let mut display_options = options.display_options;
     display_options.hide_project_docs_autodump = options.hide_project_docs_autodump;
-    !crate::search_projection::message_visibility(
+    crate::search_projection::visible_message_content(
         message.role,
         &message.content,
         message.antigravity_kind,
+        display_options,
     )
-    .is_visible(display_options)
+    .is_none()
 }
 
 fn should_hide_cell(cell: &SessionCell, options: SessionRenderOptions) -> bool {
@@ -1058,7 +1060,16 @@ fn render_message_into(
     message: &crate::parse::SessionMessage,
     theme: &Theme,
     highlight_query: Option<&str>,
+    display_options: DisplayOptions,
 ) -> Vec<TextOrigin> {
+    let Some(content) = crate::search_projection::visible_message_content(
+        message.role,
+        &message.content,
+        message.antigravity_kind,
+        display_options,
+    ) else {
+        return Vec::new();
+    };
     let (label_color, _) = message_colors(agent, message.role, theme);
     let label = session_message_label(message);
     let header_line = lines.len();
@@ -1084,13 +1095,8 @@ fn render_message_into(
         ),
     ]));
 
-    let rendered = render_message_body_document(
-        agent,
-        message.role,
-        message.content.as_str(),
-        theme,
-        highlight_query,
-    );
+    let rendered =
+        render_message_body_document(agent, message.role, content, theme, highlight_query);
     let body_start = lines.len();
     for heading in rendered.sticky_markers {
         let mut header = base_header.clone();
@@ -1157,6 +1163,7 @@ fn render_cell_into(
                 &synthetic,
                 theme,
                 highlight_query,
+                display_options,
             );
             return bind_origins(source, "content", origins);
         }
@@ -3545,6 +3552,7 @@ mod tests {
             (Agent::Claude, "claude/summary_session.jsonl"),
             (Agent::Codex, "codex/minimal.jsonl"),
             (Agent::Codex, "codex/internal_context.jsonl"),
+            (Agent::Codex, "codex/memory_citations.jsonl"),
             (Agent::Codex, "codex/latest_format.jsonl"),
             (Agent::Codex, "codex/old_format.jsonl"),
             (Agent::Codex, "codex/new_format.jsonl"),
@@ -3630,23 +3638,34 @@ mod tests {
                     path.display()
                 );
                 for origin in &document.map.origins {
-                    if let Some(segment) = projection
+                    let segments = projection
                         .segments
                         .iter()
-                        .find(|segment| segment.source == origin.source.source)
+                        .filter(|segment| segment.source == origin.source.source)
+                        .collect::<Vec<_>>();
+                    if let Some(end) = segments
+                        .iter()
+                        .map(|segment| segment.source_range.end)
+                        .max()
                     {
                         assert!(
-                            segment.visibility.is_visible(options),
-                            "hidden source leaked at {}: {:?}",
-                            path.display(),
-                            origin.source
-                        );
-                        assert!(
-                            origin.source.range.end <= segment.text.len(),
+                            origin.source.range.end <= end,
                             "source bounds at {}: {:?}",
                             path.display(),
                             origin.source
                         );
+                        for segment in segments {
+                            if segment.source_range.start < origin.source.range.end
+                                && segment.source_range.end > origin.source.range.start
+                            {
+                                assert!(
+                                    segment.visibility.is_visible(options),
+                                    "hidden source leaked at {}: {:?}",
+                                    path.display(),
+                                    origin.source
+                                );
+                            }
+                        }
                     }
                 }
                 let mut matches = 0;
@@ -3686,6 +3705,59 @@ mod tests {
                     );
                 }
                 println!("provenance sample agent={agent:?} source_bytes={} cells={} readable_bytes={} origins={} queries={} occurrences={} displayed={} options={options:?}", std::fs::metadata(&path).unwrap().len(), session.cells.len(), document.map.plain.len(), document.map.origins.len(), query_plans.len(), matches, displayed);
+            }
+        }
+    }
+
+    #[test]
+    fn memory_footer_rendering_keeps_original_query_offsets() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sessions/codex/memory_citations.jsonl");
+        let parsed = crate::parse::parse_codex_session_file(path)
+            .unwrap()
+            .unwrap();
+        for fallback in [false, true] {
+            let mut session = parsed.clone();
+            if fallback {
+                session.cells.clear();
+            }
+            let projection = crate::search_projection::SearchProjection::from_session(&session);
+            for options in [DisplayOptions::default(), DisplayOptions::SHOW_ALL] {
+                let document = super::render_session_document_with_options(
+                    &session,
+                    &Theme::default(),
+                    None,
+                    SessionRenderOptions::new(options),
+                );
+                for (query, count) in [
+                    ("all: ReplyNeedle", 1),
+                    (
+                        "all: MemoryCitationNeedle",
+                        usize::from(!options.hide_internal_context),
+                    ),
+                    (
+                        "all: RepeatedMemoryNeedle",
+                        if options.hide_internal_context { 1 } else { 2 },
+                    ),
+                    (
+                        "visible: agent:MemoryCitationNeedle",
+                        usize::from(!options.hide_internal_context),
+                    ),
+                ] {
+                    let matched = crate::search_query::QueryPlan::compile(
+                        query,
+                        crate::search_query::VisibilitySearch::Visible,
+                        options,
+                    )
+                    .unwrap()
+                    .matches(&projection);
+                    let displayed = document.map.project_matches(&matched.matches);
+                    assert_eq!(
+                        displayed.iter().filter(|ranges| !ranges.is_empty()).count(),
+                        count,
+                        "{query}, fallback={fallback}, options={options:?}"
+                    );
+                }
             }
         }
     }

@@ -926,7 +926,7 @@ impl DisplayField {
             Self::AgentReplies => "Hide agent messages and reasoning, including Antigravity worker messages and checkpoints.",
             Self::UserMessages => "Hide user messages from previews and viewers.",
             Self::InternalContext => {
-                "Hide generated internal/goal context and Antigravity polling, restart, and hook notices."
+                "Hide memory citation footers, internal/goal context, and Antigravity polling, restart, and hook notices. Reply text stays visible."
             }
         }
     }

@@ -14,6 +14,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Native session names centered in the preview border, or the session-list border when preview is hidden
 - Filter modal: search content (Visible / All / Hidden), scope, agent, date range, minimum length, session kind (original / trimmed / rollover / sub-agent), live, superseded, and trashed sessions
 - Existing visibility toggles also cover Antigravity task outcomes, orchestration notices, directory rules, worker messages, and checkpoints
+- Internal Context hides appended memory citation footers while preserving the reply text
 - Sort by time or text relevance
 - Markdown rendering with syntax highlighting and search-term highlighting in the viewer
 - Separate viewer Search and Find boxes, with substring/regex Find over readable text and individual match navigation

@@ -96,8 +96,8 @@ event outside the aborted turn or a changed retry line still prevents
 supersession.
 
 Use `--rebuild-index` to discard and rebuild the current profile's index before
-searching. Use `--delete-index` to delete it and exit. Index format 18 adds source
-coordinates and user-command visibility fields; older profiles rebuild
+searching. Use `--delete-index` to delete it and exit. Index format 20 adds memory
+citation visibility within assistant messages; older profiles rebuild
 automatically. These coordinates stay inside the index and are excluded from
 session JSON and exports.
 
@@ -187,6 +187,15 @@ Internal/goal wrapper messages count as hidden when either **Internal Context**
 or **User Messages** hides them. Internal Context is hidden by default. Use
 `hidden: "Continue working toward the active thread goal"` to find those messages
 while they are hidden, or `all:` to include them alongside visible content.
+
+Complete `<oai-mem-citation>` footers at the end of assistant messages follow
+**Internal Context**, independently of the preceding reply text. With Internal
+Context off and Agent Replies on, Visible searches the reply prose while Hidden
+searches the citation footer. Showing citations requires both toggles to be on.
+All includes both; explicit `agent:` searches retain the complete assistant text
+regardless of visibility. Viewer Find searches only the text currently shown.
+Quoted/code examples, malformed wrappers, and blocks followed by ordinary prose
+remain visible. Search highlights retain their original source offsets.
 
 Antigravity directory rules follow **AGENTS.md/CLAUDE.md**, task outcomes and
 execution errors follow **Tool Results**, polling/restart/hook notices follow

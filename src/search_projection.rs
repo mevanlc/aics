@@ -18,6 +18,9 @@ use crate::search_match::{SourceBlock, SourceId, SourceMatch, SourceRange};
 use crate::search_query::VisibilitySearch;
 use crate::settings::DisplayOptions;
 
+mod message_content;
+pub use message_content::{message_content_spans, visible_message_content, MessageContentSpan};
+
 const USER: u16 = 1;
 const AGENT: u16 = 2;
 const TOOL_CALL: u16 = 4;
@@ -56,6 +59,7 @@ impl VisibilityRequirement {
             value if value == TOOL_CALL | TOOL_RESULT => "_vis_toolcall_result",
             PROJECT_DOCS => "_vis_projectdocs",
             INTERNAL_CONTEXT => "_vis_internal_context",
+            value if value == AGENT | INTERNAL_CONTEXT => "_vis_agent_internal_context",
             value if value == USER | PROJECT_DOCS => "_vis_user_projectdocs",
             value if value == USER | SKILL => "_vis_user_skill",
             value if value == USER | INTERNAL_CONTEXT => "_vis_user_internal_context",
@@ -114,7 +118,7 @@ pub fn cell_visible(cell: &SessionCell, options: &DisplayOptions) -> bool {
             content,
             antigravity_kind,
             ..
-        } => message_visibility(*role, content, *antigravity_kind).is_visible(*options),
+        } => visible_message_content(*role, content, *antigravity_kind, *options).is_some(),
         SessionCell::Reasoning { .. } => !options.hide_agent_replies,
         SessionCell::Exec { is_user: true, .. } => !options.hide_user_tool_calls,
         SessionCell::ToolCall { .. }
@@ -142,6 +146,7 @@ pub fn default_search_field_names(
         TOOL_CALL | TOOL_RESULT,
         PROJECT_DOCS,
         INTERNAL_CONTEXT,
+        AGENT | INTERNAL_CONTEXT,
         USER | PROJECT_DOCS,
         USER | SKILL,
         USER | INTERNAL_CONTEXT,
@@ -158,6 +163,8 @@ pub fn default_search_field_names(
 #[derive(Debug, Clone)]
 pub struct SearchSegment {
     pub source: SourceId,
+    /// Byte interval within the original source part, before visibility filtering.
+    pub source_range: Range<usize>,
     pub text: String,
     pub visibility: VisibilityRequirement,
 }
@@ -383,11 +390,11 @@ impl SearchProjection {
                 {
                     continue;
                 }
-                result.segment(
+                result.message(
                     SourceBlock::Message(index),
-                    "content",
+                    message.role,
                     &message.content,
-                    message_visibility(message.role, &message.content, message.antigravity_kind),
+                    message.antigravity_kind,
                 );
                 if let Some(source) = session.search_fields.tool_call_sources.get(&index) {
                     result.segment(
@@ -513,9 +520,41 @@ impl SearchProjection {
         }
         self.segments.push(SearchSegment {
             source,
+            source_range: 0..text.len(),
             text: text.to_owned(),
             visibility,
         });
+    }
+
+    fn message(
+        &mut self,
+        block: SourceBlock,
+        role: MessageRole,
+        content: &str,
+        antigravity_kind: Option<AntigravityMessageKind>,
+    ) {
+        // Keep All's full source text and offsets intact; only visibility fields
+        // are split when a message contains a generated citation footer.
+        let full = trimmed_source_text(block.clone(), "content", content);
+        if full.text.is_empty() {
+            return;
+        }
+        self.append("content", &full);
+        for span in message_content_spans(role, content, antigravity_kind) {
+            let text = &content[span.range.clone()];
+            if text.trim().is_empty() {
+                continue;
+            }
+            let offset = span.range.start + text.len() - text.trim_start().len();
+            let component = source_text(block.clone(), "content", text.trim(), offset);
+            self.append(span.visibility.field(), &component);
+            self.segments.push(SearchSegment {
+                source: SourceId::new(block.clone(), "content"),
+                source_range: span.range,
+                text: text.to_owned(),
+                visibility: span.visibility,
+            });
+        }
     }
 
     fn append(&mut self, field: &str, component: &ProjectedText) {
@@ -559,11 +598,7 @@ impl SearchProjection {
                 antigravity_kind,
                 ..
             } => {
-                add(
-                    "content",
-                    content,
-                    message_visibility(*role, content, *antigravity_kind).0,
-                );
+                self.message(block, *role, content, *antigravity_kind);
             }
             SessionCell::Reasoning { header, body, .. } => {
                 if let Some(header) = header {
@@ -788,7 +823,8 @@ impl SearchProjection {
                 .or_default()
                 .push(SourceRange {
                     source: segment.source.clone(),
-                    range: start..start + normalized.len(),
+                    range: segment.source_range.start + start
+                        ..segment.source_range.start + start + normalized.len(),
                 });
         }
         sources
