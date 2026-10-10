@@ -213,6 +213,23 @@ impl LiveSessionTracker {
                     "cannot verify lock for invalid session ID".to_owned(),
                 ));
             }
+            // Windows can report a missing child when its parent is a file.
+            // Verify the marker root before treating an absent lock as idle.
+            match fs::metadata(root) {
+                Ok(metadata) if !metadata.is_dir() => {
+                    return Err(ProtectionReason::Indeterminate(format!(
+                        "cannot inspect session locks at {}: not a directory",
+                        root.display()
+                    )))
+                }
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    return Err(ProtectionReason::Indeterminate(format!(
+                        "cannot inspect session locks at {}: {error}",
+                        root.display()
+                    )))
+                }
+                _ => {}
+            }
             if agent == Agent::Codex {
                 let coordination = root.join(".coordination.lock");
                 match lock_existing(&coordination)? {
