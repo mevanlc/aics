@@ -29,9 +29,12 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 
 ## Install
 
-Pre-built binaries for Linux, macOS (Intel + Apple Silicon), and Windows are published on the [releases page](https://github.com/mevanlc/aics/releases).
+Download binaries from the [releases page](https://github.com/mevanlc/aics/releases).
+New releases cover Linux (static musl), macOS, Windows, and FreeBSD (x64/ARM64),
+plus Android ARM64 for Termux. FreeBSD downloads target 15.1 or newer.
 
-From source: `cargo install --path .`
+From a checkout: `cargo install --path . --locked`.
+After the first crates.io publication: `cargo install aics --locked`.
 
 ## Screenshots
 
@@ -140,6 +143,18 @@ more diagnostics. Interactive sessions write per-process rolling files under
 the AICS configuration directory, while command and JSON modes log to stderr.
 
 [Learn more about log files and log4rs configuration.](docs/logging.md)
+
+## Development and releases
+
+PRs and pushes to `main` run quality checks, build all nine targets, and verify
+installation from the crate package. Desktop/server builds execute tests and
+smoke-test the extracted download, including an isolated fixture search.
+Android builds receive ELF and dependency checks.
+
+Tags supply release versions; committed versions remain `0.0.0`. Releases include
+the exact published crate, checksums, a source manifest, and immutable GitHub
+downloads. See [the release guide](devdocs/RELEASING.md) for local checks,
+credentials, trusted publishing, and recovery.
 
 ## License
 

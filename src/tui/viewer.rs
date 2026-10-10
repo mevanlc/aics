@@ -1670,7 +1670,7 @@ pub(crate) fn message_row_for_scroll(
 mod tests {
     use std::path::PathBuf;
 
-    use chrono::Utc;
+    use chrono::{Local, TimeZone, Utc};
     use ratatui::crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -3258,7 +3258,11 @@ mod tests {
 
     #[test]
     fn viewer_title_matches_card_style_with_scroll_suffix() {
-        let session = sample_session();
+        let mut session = sample_session();
+        session.modified_ts = Local
+            .with_ymd_and_hms(2000, 1, 2, 12, 0, 0)
+            .unwrap()
+            .timestamp() as u64;
         let title = viewer_title(&session, false, &Theme::default(), 9);
         let rendered = title
             .spans
@@ -3268,13 +3272,17 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "{C} · /tmp/demo · 1969-12-31 · 6 lines · 9% scrolled"
+            "{C} · /tmp/demo · 2000-01-02 · 6 lines · 9% scrolled"
         );
     }
 
     #[test]
     fn viewer_title_prefixes_trashed_sessions() {
-        let session = sample_session();
+        let mut session = sample_session();
+        session.modified_ts = Local
+            .with_ymd_and_hms(2000, 1, 2, 12, 0, 0)
+            .unwrap()
+            .timestamp() as u64;
         let title = viewer_title(&session, true, &Theme::default(), 9);
         let rendered = title
             .spans
@@ -3284,7 +3292,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "{C} · trashed · /tmp/demo · 1969-12-31 · 6 lines · 9% scrolled"
+            "{C} · trashed · /tmp/demo · 2000-01-02 · 6 lines · 9% scrolled"
         );
     }
 

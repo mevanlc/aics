@@ -1,0 +1,11 @@
+[
+  {"target": "x86_64-unknown-linux-musl", "os": "ubuntu-24.04", "kind": "linux"},
+  {"target": "aarch64-unknown-linux-musl", "os": "ubuntu-24.04-arm", "kind": "linux"},
+  {"target": "x86_64-apple-darwin", "os": "macos-26-intel", "kind": "macos"},
+  {"target": "aarch64-apple-darwin", "os": "macos-26", "kind": "macos"},
+  {"target": "x86_64-pc-windows-msvc", "os": "windows-2025", "kind": "windows"},
+  {"target": "aarch64-pc-windows-msvc", "os": "windows-11-arm", "kind": "windows"},
+  {"target": "x86_64-unknown-freebsd", "os": "ubuntu-24.04", "kind": "freebsd", "arch": "x86_64", "release": "15.1"},
+  {"target": "aarch64-unknown-freebsd", "os": "ubuntu-24.04", "kind": "freebsd", "arch": "aarch64", "release": "15.1"},
+  {"target": "aarch64-linux-android", "os": "ubuntu-24.04", "kind": "android"}
+]

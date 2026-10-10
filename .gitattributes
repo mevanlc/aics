@@ -1,0 +1,2 @@
+# Keep source, documentation, and release inputs identical on every platform.
+* text=auto eol=lf
