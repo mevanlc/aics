@@ -6,6 +6,8 @@
 """Offline release tests: no credentials, network requests, or publication."""
 
 import contextlib
+import io
+import json
 import os
 import tarfile
 import tempfile
@@ -235,6 +237,43 @@ class ProjectTest(unittest.TestCase):
         Path("dist", filename).write_bytes(b"changed")
         with self.assertRaisesRegex(ValueError, "Checksum mismatch"):
             release.verify_bundle()
+
+    def test_disabled_targets_do_not_block_ci_or_release_verification(self):
+        entries = [
+            {"target": "x86_64-unknown-linux-musl"},
+            {"target": "aarch64-linux-android", "enabled": True},
+            {"target": "aarch64-unknown-freebsd", "enabled": False},
+        ]
+        targets_file = self.root / "release-targets.json"
+        targets_file.write_text(json.dumps(entries))
+        with mock.patch.object(release, "TARGETS_FILE", targets_file):
+            output = io.StringIO()
+            with (
+                mock.patch("sys.argv", ["release.py", "matrix"]),
+                contextlib.redirect_stdout(output),
+            ):
+                release.main()
+            self.assertEqual(json.loads(output.getvalue())["include"], entries[:2])
+            self.assertEqual(release.targets(include_disabled=True), entries)
+
+            release.stamp("0.1.0")
+            Path("dist").mkdir()
+            for filename in (
+                "widget-v0.1.0-x86_64-unknown-linux-musl.tar.gz",
+                "widget-v0.1.0-aarch64-linux-android.tar.gz",
+                "widget-0.1.0.crate",
+            ):
+                Path("dist", filename).write_bytes(filename.encode())
+            manifest = release.bundle()
+            self.assertEqual(
+                manifest["targets"], [entry["target"] for entry in entries[:2]]
+            )
+            self.assertEqual(release.verify_bundle(), manifest)
+
+            entries[2]["enabled"] = True
+            targets_file.write_text(json.dumps(entries))
+            with self.assertRaisesRegex(ValueError, "Wrong target matrix"):
+                release.verify_bundle()
 
     def test_incomplete_artifacts_cannot_be_bundled(self):
         release.stamp("0.1.0")

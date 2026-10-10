@@ -70,8 +70,13 @@ def project(root=Path(".")):
     return package, bins
 
 
-def targets():
-    return json.loads(TARGETS_FILE.read_text())
+def targets(include_disabled=False):
+    """Use enabled targets for CI and release completeness checks."""
+    return [
+        entry
+        for entry in json.loads(TARGETS_FILE.read_text())
+        if include_disabled or entry.get("enabled", True)
+    ]
 
 
 def toolchain():
@@ -156,7 +161,8 @@ def archive_name(package, release_version, target):
 def package_binary(target, destination=Path("dist")):
     package, binaries = project()
     require(
-        target in {entry["target"] for entry in targets()}, f"Unknown target: {target}"
+        target in {entry["target"] for entry in targets(include_disabled=True)},
+        f"Unknown target: {target}",
     )
     release_version = version(package["version"])
     executables = {

@@ -30,8 +30,8 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 ## Install
 
 Download binaries from the [releases page](https://github.com/mevanlc/aics/releases).
-New releases cover Linux (static musl), macOS, Windows, and FreeBSD (x64/ARM64),
-plus Android ARM64 for Termux. FreeBSD downloads target 15.1 or newer.
+New releases cover Linux (static musl), macOS, and Windows (x64/ARM64),
+plus Android ARM64 for Termux. FreeBSD builds are currently disabled.
 
 From a checkout: `cargo install --path . --locked`.
 After the first crates.io publication: `cargo install aics --locked`.
@@ -146,8 +146,8 @@ the AICS configuration directory, while command and JSON modes log to stderr.
 
 ## Development and releases
 
-PRs and pushes to `main` run quality checks, build all nine targets, and verify
-installation from the crate package. Desktop/server builds execute tests and
+PRs and pushes to `main` run quality checks, build all seven enabled targets, and
+verify installation from the crate package. Desktop/server builds execute tests and
 smoke-test the extracted download, including an isolated fixture search.
 Android builds receive ELF and dependency checks.
 

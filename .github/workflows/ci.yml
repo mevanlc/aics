@@ -101,6 +101,7 @@ jobs:
     needs: [prepare, quality]
     strategy:
       fail-fast: false
+      # Disabled release-targets.json entries never schedule jobs.
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.kind == 'freebsd' && 120 || 30 }}

@@ -1,7 +1,7 @@
 # Releases
 
 The Git tag supplies the release version; committed package versions stay at
-`0.0.0`. One commit produces nine binary downloads and the `aics` crate, using
+`0.0.0`. One commit produces seven binary downloads and the `aics` crate, using
 the same release process as [tuisv](https://github.com/mevanlc/tuisv) and
 [renrs](https://github.com/mevanlc/renrs).
 
@@ -59,7 +59,7 @@ credentials. A matching crate already in the registry is not uploaded again.
 
 ## Validation without publishing
 
-Pull requests and pushes to `main` run quality checks, all nine target builds,
+Pull requests and pushes to `main` run quality checks, all seven enabled target builds,
 and crate packaging/install checks. The Release workflow's manual `build` mode
 runs these checks with a stamped version and saves Actions artifacts:
 
@@ -95,16 +95,21 @@ lockfile entry, checking that dependency resolution stays unchanged.
 | Linux, static musl | x64, ARM64 | Native tests, static-link check, download smoke test |
 | macOS 11+ | x64, ARM64 | Native tests and download smoke test |
 | Windows | x64, ARM64 | Native tests and download smoke test |
-| FreeBSD 15.1+ | x64, ARM64 | Tests, build, and download smoke test inside FreeBSD VMs |
+| FreeBSD 15.1+ (disabled) | x64, ARM64 | Retained VM setup; no builds, tests, or required release assets |
 | Android / Termux | ARM64, API 24+ | NDK build; ELF architecture, interpreter, and library checks |
 
 Every desktop/server download runs `--help`, `--version`, and `--manpage`, then
 indexes and searches a bundled Claude fixture with isolated settings and session
 roots. Android execution is not covered by hosted CI.
 
-FreeBSD x64 uses nextest. FreeBSD ARM64 uses `cargo test` because nextest does not
-publish a binary for that target. Rustup also has no FreeBSD ARM64 installer, so
-that VM installs the pinned official standalone Rust distribution. Android uses
+FreeBSD is parked: both entries in `scripts/release-targets.json` have
+`"enabled": false`. Disabled targets are omitted from the CI matrix and release
+manifest, and their artifacts are not required by release completeness checks.
+The VM steps remain in place. Remove `"enabled": false` to re-enable either target.
+
+When enabled, FreeBSD x64 uses nextest. FreeBSD ARM64 uses `cargo test` because
+nextest does not publish a binary for that target. Rustup also has no FreeBSD ARM64
+installer, so that VM installs the pinned official standalone Rust distribution. Android uses
 NDK 27.3.13750724; toolchain versions and action revisions are pinned in the
 workflows and `rust-toolchain.toml`.
 
@@ -123,9 +128,9 @@ by CI.
 
 Downloads use `aics-vVERSION-TARGET.tar.gz`, or `.zip` for Windows. Each contains
 a matching top-level directory with `aics`, README, MIT license, command
-documentation, and example configuration. Each release has 12 assets:
+documentation, and example configuration. Each release has 10 assets:
 
-- Nine binary archives.
+- Seven binary archives.
 - `aics-VERSION.crate`: the exact crate published to crates.io.
 - `release-manifest.json`: source commit, Rust toolchain, targets, and hashes.
 - `SHA256SUMS`: hashes of the archives, crate, and manifest.
@@ -165,5 +170,6 @@ images.
 Update Rust in `rust-toolchain.toml`; both workflows read that pin. Update uv,
 Python, nextest, actionlint, Android NDK, and VM pins deliberately, then run the
 complete manual build. Dependabot proposes pinned action updates monthly.
-`scripts/release-targets.json` defines both the build matrix and expected asset
-set. Keep compile-time files and fixtures in the Cargo package's `include` list.
+Enabled entries in `scripts/release-targets.json` define both the build matrix and
+expected asset set. Keep compile-time files and fixtures in the Cargo package's
+`include` list.
