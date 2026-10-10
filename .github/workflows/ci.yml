@@ -158,7 +158,7 @@ jobs:
         if: matrix.kind != 'android' && matrix.kind != 'freebsd'
         env:
           TARGET: ${{ matrix.target }}
-        run: cargo nextest run --locked --all-targets --all-features --target "$TARGET"
+        run: cargo nextest run --locked --all-targets --all-features --no-fail-fast --target "$TARGET"
       - name: Build release binaries
         if: matrix.kind != 'freebsd'
         env:
@@ -232,7 +232,7 @@ jobs:
             export AICS_DATA_ROOT="$PWD/target/ci-state/data"
             cargo clippy --locked --all-targets --all-features --target '${{ matrix.target }}' -- -D warnings
             if [ '${{ matrix.arch }}' = x86_64 ]; then
-              cargo nextest run --locked --all-targets --all-features --target '${{ matrix.target }}'
+              cargo nextest run --locked --all-targets --all-features --no-fail-fast --target '${{ matrix.target }}'
             else
               # Nextest does not publish a FreeBSD ARM64 binary.
               cargo test --locked --all-targets --all-features --target '${{ matrix.target }}'

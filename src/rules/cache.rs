@@ -628,9 +628,8 @@ mod tests {
     #[test]
     fn rules_runner_defers_filtered_session_until_filter_includes_it() -> Result<()> {
         let temp = TempDir::new()?;
-        let session = temp
-            .path()
-            .join(".claude/projects/-tmp-project/sidechain.jsonl");
+        let claude_projects = temp.path().join(".claude").join("projects");
+        let session = claude_projects.join("-tmp-project").join("sidechain.jsonl");
         fs::create_dir_all(session.parent().unwrap())?;
         fs::write(
             &session,
@@ -644,7 +643,7 @@ mod tests {
         let cache_path = temp.path().join("rules-cache.json");
         let roots = SessionRoots {
             live_sessions: Default::default(),
-            claude_projects: temp.path().join(".claude/projects"),
+            claude_projects,
             codex_sessions: temp.path().join(".codex/sessions"),
             antigravity_home: temp.path().join(".gemini/antigravity-cli"),
             trash: None,
@@ -685,9 +684,8 @@ mod tests {
     #[test]
     fn rules_runner_trusts_a_cached_determination() -> Result<()> {
         let temp = TempDir::new()?;
-        let session = temp
-            .path()
-            .join(".claude/projects/-tmp-project/session.jsonl");
+        let claude_projects = temp.path().join(".claude").join("projects");
+        let session = claude_projects.join("-tmp-project").join("session.jsonl");
         fs::create_dir_all(session.parent().unwrap())?;
         fs::write(
             &session,
@@ -703,7 +701,7 @@ mod tests {
         let cache_path = temp.path().join("rules-cache.json");
         let roots = SessionRoots {
             live_sessions: Default::default(),
-            claude_projects: temp.path().join(".claude/projects"),
+            claude_projects,
             codex_sessions: temp.path().join(".codex/sessions"),
             antigravity_home: temp.path().join(".gemini/antigravity-cli"),
             trash: None,
