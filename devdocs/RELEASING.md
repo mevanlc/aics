@@ -108,6 +108,10 @@ that VM installs the pinned official standalone Rust distribution. Android uses
 NDK 27.3.13750724; toolchain versions and action revisions are pinned in the
 workflows and `rust-toolchain.toml`.
 
+FreeBSD jobs cache the prepared VM and Cargo dependencies. Their test builds omit
+debug information to reduce compilation time and memory use under emulation;
+release builds retain Cargo's normal release settings.
+
 Crate validation compiles the packaged source, checks publishing with a dry run,
 installs from the unpacked crate, and runs the same isolated search. The package
 includes compile-time documentation and test fixtures. Before authenticating,

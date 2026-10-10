@@ -114,7 +114,6 @@ jobs:
       - name: Install Python
         run: uv python install "$UV_PYTHON"
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
-        if: matrix.kind != 'freebsd'
         with:
           toolchain: ${{ needs.prepare.outputs.toolchain }}
           targets: ${{ matrix.target }}
@@ -143,7 +142,6 @@ jobs:
             echo "AR_aarch64_linux_android=$NDK_BIN/llvm-ar"
           } >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        if: matrix.kind != 'freebsd'
         with:
           key: ${{ matrix.target }}
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
@@ -201,9 +199,10 @@ jobs:
         with:
           release: ${{ matrix.release }}
           arch: ${{ matrix.arch }}
-          mem: 8192
+          mem: 12288
           sync: rsync
           copyback: true
+          cache-after-prepare: true
           prepare: |
             set -eu
             pkg install -y python314
@@ -226,7 +225,9 @@ jobs:
           run: |
             set -eu
             export PATH="$HOME/.cargo/bin:$PATH"
-            export CARGO_BUILD_JOBS=2
+            export CARGO_BUILD_JOBS=4
+            export CARGO_PROFILE_DEV_DEBUG=0
+            export CARGO_PROFILE_TEST_DEBUG=0
             export AICS_CONFIG_ROOT="$PWD/target/ci-state/config"
             export AICS_CACHE_ROOT="$PWD/target/ci-state/cache"
             export AICS_DATA_ROOT="$PWD/target/ci-state/data"
