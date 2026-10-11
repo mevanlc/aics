@@ -79,34 +79,26 @@ fn rebuild_reindexes_sessions_even_when_fingerprints_match() -> Result<()> {
     let cache_root = temp.path().join("cache");
     let manager = IndexManager::with_paths(IndexPaths::from_root(&cache_root));
 
-    manager.sync_with_roots(&roots, true)?;
-    let first_count = manager
-        .open_search_engine()?
-        .search(&SearchRequest {
-            visibility_search: aics::search_query::VisibilitySearch::All,
-            query: String::new(),
-            scope: Scope::Global,
-            limit: 20,
-            sort: SortMode::Relevance,
-            filters: SearchFilters::default(),
-        })?
-        .len();
-
-    manager.sync_with_roots(&roots, true)?;
-    let second_count = manager
-        .open_search_engine()?
-        .search(&SearchRequest {
-            visibility_search: aics::search_query::VisibilitySearch::All,
-            query: String::new(),
-            scope: Scope::Global,
-            limit: 20,
-            sort: SortMode::Relevance,
-            filters: SearchFilters::default(),
-        })?
-        .len();
-
-    assert_eq!(first_count, second_count);
-    assert!(second_count >= 2);
+    let request = SearchRequest {
+        visibility_search: aics::search_query::VisibilitySearch::All,
+        query: String::new(),
+        scope: Scope::Global,
+        limit: 20,
+        sort: SortMode::Relevance,
+        filters: SearchFilters::default(),
+    };
+    let mut previous_count = None;
+    // Repeatedly dispose of readers and rebuild immediately to exercise
+    // background operations that could otherwise race with index removal.
+    for _ in 0..10 {
+        manager.sync_with_roots(&roots, true)?;
+        let count = manager.open_search_engine()?.search(&request)?.len();
+        assert!(count >= 2);
+        if let Some(previous_count) = previous_count {
+            assert_eq!(count, previous_count);
+        }
+        previous_count = Some(count);
+    }
     Ok(())
 }
 

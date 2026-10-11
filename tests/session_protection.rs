@@ -284,7 +284,10 @@ fn invalid_marker_directories_conservatively_block_only_their_provider() -> Resu
         let bytes = fs::read(&proposal.path)?;
         let (applied, skipped) =
             apply_rule_proposals(&fixtures.roots, std::slice::from_ref(&proposal));
-        assert!(applied.is_empty());
+        assert!(
+            applied.is_empty(),
+            "unexpected action for {agent:?}: {applied:?}"
+        );
         assert_eq!(skipped.len(), 1);
         assert_eq!(fs::read(&proposal.path)?, bytes);
     }

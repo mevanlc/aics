@@ -1,0 +1,301 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  UV_PYTHON: 3.14.8
+  MACOSX_DEPLOYMENT_TARGET: '11.0'
+  AICS_CONFIG_ROOT: ${{ github.workspace }}/target/ci-state/config
+  AICS_CACHE_ROOT: ${{ github.workspace }}/target/ci-state/cache
+  AICS_DATA_ROOT: ${{ github.workspace }}/target/ci-state/data
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.prepare.outputs.matrix }}
+      version: ${{ steps.prepare.outputs.version }}
+      toolchain: ${{ steps.prepare.outputs.toolchain }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: 0.12.23
+      - name: Install Python
+        run: uv python install "$UV_PYTHON"
+      - id: prepare
+        env:
+          RELEASE_VERSION: ${{ inputs.version || '0.0.0' }}
+        run: |
+          version=$(uv run scripts/release.py version "$RELEASE_VERSION")
+          matrix=$(uv run scripts/release.py matrix)
+          toolchain=$(uv run scripts/release.py toolchain)
+          {
+            echo "version=$version"
+            echo "matrix=$matrix"
+            echo "toolchain=$toolchain"
+          } >> "$GITHUB_OUTPUT"
+
+  quality:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: 0.12.23
+      - name: Install Python
+        run: uv python install "$UV_PYTHON"
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: ${{ needs.prepare.outputs.toolchain }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: quality
+      - name: Install actionlint 1.7.12
+        run: |
+          curl --fail --location --retry 3 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$RUNNER_TEMP/actionlint.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          install "$RUNNER_TEMP/actionlint" "$HOME/.cargo/bin/actionlint"
+      - name: Release helper tests and workflow lint
+        run: |
+          uv run scripts/test_release.py
+          actionlint
+      - name: Stamp version
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: uv run scripts/release.py stamp "$RELEASE_VERSION"
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  build:
+    needs: [prepare, quality]
+    strategy:
+      fail-fast: false
+      # Disabled release-targets.json entries never schedule jobs.
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.kind == 'freebsd' && 120 || 30 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: 0.12.23
+      - name: Install Python
+        run: uv python install "$UV_PYTHON"
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: ${{ needs.prepare.outputs.toolchain }}
+          targets: ${{ matrix.target }}
+      - name: Install musl tools
+        if: matrix.kind == 'linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+          target_key="${TARGET^^}"
+          target_key="${target_key//-/_}"
+          echo "CARGO_TARGET_${target_key}_LINKER=musl-gcc" >> "$GITHUB_ENV"
+      - name: Configure Android NDK
+        if: matrix.kind == 'android'
+        run: |
+          NDK_VERSION=27.3.13750724
+          NDK_BIN="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          if [ ! -x "$NDK_BIN/aarch64-linux-android24-clang" ]; then
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION"
+          fi
+          test -x "$NDK_BIN/aarch64-linux-android24-clang"
+          {
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android24-clang"
+            echo "CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$NDK_BIN/llvm-ar"
+          } >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        if: matrix.kind != 'android' && matrix.kind != 'freebsd'
+        with:
+          tool: cargo-nextest@0.9.132
+      - name: Stamp version
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: uv run scripts/release.py stamp "$RELEASE_VERSION"
+      - name: Test on the target architecture
+        if: matrix.kind != 'android' && matrix.kind != 'freebsd'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo nextest run --locked --all-targets --all-features --no-fail-fast --target "$TARGET"
+      - name: Build release binaries
+        if: matrix.kind != 'freebsd'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --bins --release --locked --target "$TARGET"
+      - name: Verify Linux static linking
+        if: matrix.kind == 'linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          for name in aics; do
+            binary="target/$TARGET/release/$name"
+            file "$binary"
+            if readelf --program-headers "$binary" | grep -q INTERP; then
+              echo "::error::$name has a dynamic interpreter"
+              exit 1
+            fi
+            if readelf --dynamic "$binary" | grep -q NEEDED; then
+              echo "::error::$name has shared-library dependencies"
+              exit 1
+            fi
+          done
+      - name: Verify Android ELF and dependencies
+        if: matrix.kind == 'android'
+        run: |
+          for name in aics; do
+            binary="target/aarch64-linux-android/release/$name"
+            readelf --file-header "$binary" | grep -E 'Machine:.*AArch64'
+            readelf --program-headers "$binary" | grep '/system/bin/linker64'
+            readelf --dynamic "$binary"
+            unexpected=$(readelf --dynamic "$binary" | awk '/NEEDED/ {print $NF}' | grep -Ev '^\[lib(c|dl|m|log|android)\.so\]$' || true)
+            if [ -n "$unexpected" ]; then
+              echo "::error::$name has unexpected Android libraries: $unexpected"
+              exit 1
+            fi
+          done
+      - name: Build and test FreeBSD ${{ matrix.release }} ${{ matrix.arch }} in a VM
+        if: matrix.kind == 'freebsd'
+        uses: vmactions/freebsd-vm@f0552d3b69211736abd97f02ff3d4674c56b73b1 # v1.5.5
+        with:
+          release: ${{ matrix.release }}
+          arch: ${{ matrix.arch }}
+          mem: 12288
+          sync: rsync
+          copyback: true
+          cache-after-prepare: true
+          prepare: |
+            set -eu
+            pkg install -y python314
+            if [ '${{ matrix.arch }}' = x86_64 ]; then
+              fetch -o /tmp/rustup-init 'https://static.rust-lang.org/rustup/dist/${{ matrix.target }}/rustup-init'
+              chmod +x /tmp/rustup-init
+              /tmp/rustup-init -y --profile minimal --default-toolchain '${{ needs.prepare.outputs.toolchain }}' --component clippy --no-modify-path
+              fetch -o /tmp/nextest.tar.gz https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.132/cargo-nextest-0.9.132-x86_64-unknown-freebsd.tar.gz
+              test "$(sha256 -q /tmp/nextest.tar.gz)" = 64c776fe02a2de1f4eadc0bfc3817568f77521acd4de3c270699629d828d5daa
+              tar -xzf /tmp/nextest.tar.gz -C "$HOME/.cargo/bin" cargo-nextest
+            else
+              # Rustup does not publish a FreeBSD ARM64 installer.
+              archive='rust-${{ needs.prepare.outputs.toolchain }}-${{ matrix.target }}'
+              fetch -o /tmp/rust.tar.xz "https://static.rust-lang.org/dist/$archive.tar.xz"
+              fetch -o /tmp/rust.sha256 "https://static.rust-lang.org/dist/$archive.tar.xz.sha256"
+              test "$(sha256 -q /tmp/rust.tar.xz)" = "$(awk '{print $1}' /tmp/rust.sha256)"
+              tar -xJf /tmp/rust.tar.xz -C /tmp
+              sh "/tmp/$archive/install.sh" --prefix="$HOME/.cargo" --components=rustc,cargo,rust-std-aarch64-unknown-freebsd,clippy-preview --disable-ldconfig
+            fi
+          run: |
+            set -eu
+            export PATH="$HOME/.cargo/bin:$PATH"
+            export CARGO_BUILD_JOBS=4
+            export CARGO_PROFILE_DEV_DEBUG=0
+            export CARGO_PROFILE_TEST_DEBUG=0
+            export AICS_CONFIG_ROOT="$PWD/target/ci-state/config"
+            export AICS_CACHE_ROOT="$PWD/target/ci-state/cache"
+            export AICS_DATA_ROOT="$PWD/target/ci-state/data"
+            cargo clippy --locked --all-targets --all-features --target '${{ matrix.target }}' -- -D warnings
+            if [ '${{ matrix.arch }}' = x86_64 ]; then
+              cargo nextest run --locked --all-targets --all-features --no-fail-fast --target '${{ matrix.target }}'
+            else
+              # Nextest does not publish a FreeBSD ARM64 binary.
+              cargo test --locked --all-targets --all-features --target '${{ matrix.target }}'
+            fi
+            cargo build --bins --release --locked --target '${{ matrix.target }}'
+      - name: Package binaries
+        env:
+          TARGET: ${{ matrix.target }}
+        run: uv run scripts/release.py archive "$TARGET"
+      - name: Smoke-test the extracted download
+        if: matrix.kind != 'android' && matrix.kind != 'freebsd'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: uv run scripts/release.py smoke "$TARGET"
+      - name: Smoke-test the extracted FreeBSD download in the VM
+        if: matrix.kind == 'freebsd'
+        shell: freebsd {0}
+        run: python3.14 scripts/release.py smoke '${{ matrix.target }}'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: build-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  crate:
+    needs: [prepare, quality]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: 0.12.23
+      - name: Install Python
+        run: uv python install "$UV_PYTHON"
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: ${{ needs.prepare.outputs.toolchain }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: crate
+      - name: Stamp version
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: uv run scripts/release.py stamp "$RELEASE_VERSION"
+      - name: Verify publishing and installation from the packaged source
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cargo package --locked --allow-dirty
+          cargo publish --dry-run --locked --allow-dirty --no-verify
+          cargo install --locked --path "target/package/aics-$RELEASE_VERSION" --root "$RUNNER_TEMP/crate-install"
+          uv run scripts/release.py verify-binaries "$RUNNER_TEMP/crate-install/bin"
+          uv run scripts/release.py smoke-search "$RUNNER_TEMP/crate-install/bin/aics"
+          uv run scripts/release.py copy-crate
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: build-crate
+          path: dist/*.crate
+          if-no-files-found: error
+          retention-days: 30

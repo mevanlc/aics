@@ -15,7 +15,9 @@ const SESSION_ID: &str = "aaaa1111-bbbb-2222-cccc-333344445555";
 
 #[test]
 fn scans_and_parses_antigravity_bundle_with_metadata_and_full_merge() -> Result<()> {
-    let root = fixture_path("tests/fixtures/sessions/antigravity");
+    let temp = TempDir::new()?;
+    let root = temp.path().join("antigravity-home");
+    let workspace = copy_fixture_with_workspace(&root, temp.path())?;
     let roots = roots_for(root.clone());
 
     let files = scan_session_files(&roots)?;
@@ -28,14 +30,14 @@ fn scans_and_parses_antigravity_bundle_with_metadata_and_full_merge() -> Result<
         file.antigravity_metadata
             .as_ref()
             .and_then(|metadata| metadata.cwd.as_deref()),
-        Some("/tmp/agy workspace")
+        Some(workspace.as_str())
     );
 
     let session = parse_scanned_session_file(file)?.expect("expected Antigravity session");
     assert_eq!(session.session_id, SESSION_ID);
     assert_eq!(session.agent, Agent::Antigravity);
-    assert_eq!(session.cwd.as_deref(), Some("/tmp/agy workspace"));
-    assert_eq!(session.project, "/tmp/agy workspace");
+    assert_eq!(session.cwd.as_deref(), Some(workspace.as_str()));
+    assert_eq!(session.project, workspace);
     assert_eq!(
         session.custom_title.as_deref(),
         Some("Antigravity fixture title")
@@ -172,10 +174,7 @@ fn antigravity_index_searches_full_content_and_reindexes_bundle_changes() -> Res
 fn trashed_antigravity_bundle_remains_searchable_with_original_metadata() -> Result<()> {
     let temp = TempDir::new()?;
     let antigravity_home = temp.path().join("antigravity-home");
-    copy_tree(
-        &fixture_path("tests/fixtures/sessions/antigravity"),
-        &antigravity_home,
-    )?;
+    let workspace = copy_fixture_with_workspace(&antigravity_home, temp.path())?;
     let conversations = antigravity_home.join("conversations");
     fs::create_dir_all(&conversations)?;
     fs::write(conversations.join(format!("{SESSION_ID}.db")), "database")?;
@@ -186,13 +185,14 @@ fn trashed_antigravity_bundle_remains_searchable_with_original_metadata() -> Res
         .join(".system_generated/logs/transcript.jsonl");
     let expected_original = transcript.canonicalize()?;
 
-    TrashStore::new(trash_paths.clone()).trash_session(
+    let entry = TrashStore::new(trash_paths.clone()).trash_session(
         &transcript,
         Agent::Antigravity,
         &TrashReason::KeyBinding {
             key: "F8".to_owned(),
         },
     )?;
+    let archived_brain = trash_paths.trash_dir.join(&entry.nm).join("brain");
     let mut roots = roots_for(antigravity_home);
     roots.trash = Some(trash_paths);
     let files = scan_session_files(&roots)?;
@@ -203,17 +203,14 @@ fn trashed_antigravity_bundle_remains_searchable_with_original_metadata() -> Res
         files[0].original_path.as_deref(),
         Some(expected_original.as_path())
     );
-    assert!(files[0]
-        .path
-        .to_string_lossy()
-        .contains(".antigravity/brain/"));
+    assert!(files[0].path.starts_with(&archived_brain));
     let session = parse_scanned_session_file(&files[0])?.expect("trashed session should parse");
     assert_eq!(session.session_id, SESSION_ID);
     assert_eq!(
         session.custom_title.as_deref(),
         Some("Antigravity fixture title")
     );
-    assert_eq!(session.cwd.as_deref(), Some("/tmp/agy workspace"));
+    assert_eq!(session.cwd.as_deref(), Some(workspace.as_str()));
     Ok(())
 }
 
@@ -275,6 +272,21 @@ fn search(
             ..SearchFilters::default()
         },
     })
+}
+
+fn copy_fixture_with_workspace(destination: &Path, root: &Path) -> Result<String> {
+    copy_tree(
+        &fixture_path("tests/fixtures/sessions/antigravity"),
+        destination,
+    )?;
+    let workspace = root.join("agy workspace");
+    let uri = url::Url::from_file_path(&workspace).expect("absolute fixture workspace");
+    let metadata_path = destination.join("cache").join("conversation_metadata.json");
+    let mut metadata: serde_json::Value = serde_json::from_slice(&fs::read(&metadata_path)?)?;
+    metadata["conversations"][SESSION_ID]["summary"]["WorkspaceURIs"] =
+        serde_json::json!([uri.as_str()]);
+    fs::write(metadata_path, serde_json::to_vec(&metadata)?)?;
+    Ok(workspace.to_string_lossy().into_owned())
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<()> {

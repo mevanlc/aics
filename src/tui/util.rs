@@ -816,12 +816,14 @@ mod tests {
 
     #[test]
     fn abbreviates_paths_under_home_dir() {
-        let abbreviated = abbreviate_home_path_with(
-            "/data/data/com.termux/files/home/p/my/aics",
-            Some(Path::new("/data/data/com.termux/files/home/p")),
-        );
+        let home = std::env::temp_dir().join("example-home");
+        let path = home.join("my").join("aics");
+        let abbreviated = abbreviate_home_path_with(&path.to_string_lossy(), Some(&home));
 
-        assert_eq!(abbreviated, "~/my/aics");
+        assert_eq!(
+            abbreviated,
+            ["~", "my", "aics"].join(std::path::MAIN_SEPARATOR_STR)
+        );
     }
 
     #[test]
@@ -835,6 +837,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn abbreviates_termux_package_alias_paths_under_home_dir() {
         let abbreviated = abbreviate_home_path_with(
             "/data/data/com/termux/files/home/p/my/aics",

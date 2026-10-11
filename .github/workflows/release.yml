@@ -2,186 +2,202 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
+    tags: ['v*']
   workflow_dispatch:
     inputs:
+      mode:
+        description: Non-publishing operation
+        type: choice
+        options: [build, verify-oidc]
+        default: build
       version:
-        description: Release version to stamp into Cargo.toml for this run (for example 1.2.3)
-        required: true
+        description: Version to test in build mode (without v)
         type: string
+        default: 0.6.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
 
 env:
+  UV_PYTHON: 3.14.8
   CARGO_TERM_COLOR: always
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
+  version:
+    if: github.event_name == 'push' || inputs.mode == 'build'
+    runs-on: ubuntu-24.04
     outputs:
-      release_version: ${{ steps.resolve-version.outputs.release_version }}
+      version: ${{ steps.version.outputs.version }}
+      toolchain: ${{ steps.version.outputs.toolchain }}
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Validate manifest placeholder
-        run: |
-          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          if [ "$CARGO_VERSION" != "0.0.0" ]; then
-            echo "::error::Expected Cargo.toml to remain at placeholder version 0.0.0, found $CARGO_VERSION"
-            exit 1
-          fi
-          echo "Manifest placeholder validated: $CARGO_VERSION"
-
-      - name: Resolve release version
-        id: resolve-version
-        shell: bash
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: 0.12.23
+      - name: Install Python
+        run: uv python install "$UV_PYTHON"
+      - id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-            RAW_VERSION="$GITHUB_REF_NAME"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            version=$(uv run scripts/release.py tag "$GITHUB_REF_NAME")
           else
-            RAW_VERSION="$INPUT_VERSION"
+            version=$(uv run scripts/release.py version "$INPUT_VERSION")
           fi
-
-          RELEASE_VERSION="${RAW_VERSION#v}"
-          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Release version must match X.Y.Z; got '$RAW_VERSION'"
-            exit 1
-          fi
-
+          toolchain=$(uv run scripts/release.py toolchain)
           {
-            echo "release_version=$RELEASE_VERSION"
+            echo "version=$version"
+            echo "toolchain=$toolchain"
           } >> "$GITHUB_OUTPUT"
 
-          echo "Resolved release version: $RELEASE_VERSION"
-
   build:
-    needs: validate
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            cross: false
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            cross: true
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            cross: false
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            cross: false
-          - target: aarch64-linux-android
-            os: ubuntu-latest
-            cross: true
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            cross: false
-          - target: aarch64-pc-windows-msvc
-            os: windows-latest
-            cross: false
+    needs: version
+    uses: ./.github/workflows/ci.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
 
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Stamp Cargo package version
-        shell: bash
-        env:
-          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import os
-          import re
-
-          release_version = os.environ["RELEASE_VERSION"]
-          cargo_toml = Path("Cargo.toml")
-          original = cargo_toml.read_text()
-          updated, count = re.subn(
-              r'(?m)^version\s*=\s*"0\.0\.0"$',
-              f'version = "{release_version}"',
-              original,
-              count=1,
-          )
-          if count != 1:
-              raise SystemExit(
-                  "Expected exactly one placeholder version entry in Cargo.toml"
-              )
-          cargo_toml.write_text(updated)
-
-          cargo_lock = Path("Cargo.lock")
-          original = cargo_lock.read_text()
-          updated, count = re.subn(
-              r'(?ms)(\[\[package\]\]\nname = "aics"\nversion = ")0\.0\.0(")',
-              rf"\g<1>{release_version}\2",
-              original,
-              count=1,
-          )
-          if count != 1:
-              raise SystemExit(
-                  "Expected exactly one placeholder version entry for aics in Cargo.lock"
-              )
-          cargo_lock.write_text(updated)
-          PY
-          grep '^version' Cargo.toml
-          grep -A2 '^name = "aics"$' Cargo.lock
-
-      - name: Install Rust
-        run: |
-          rustup update stable
-          rustup default stable
-          rustup target add ${{ matrix.target }}
-
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build
-        run: |
-          ${{ matrix.cross && 'cross' || 'cargo' }} build --release --locked --target ${{ matrix.target }}
-
-      - name: Package (unix)
-        if: runner.os != 'Windows'
-        run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../aics-${{ matrix.target }}.tar.gz aics
-          cd ../../..
-
-      - name: Package (windows)
-        if: runner.os == 'Windows'
-        run: |
-          cd target/${{ matrix.target }}/release
-          7z a ../../../aics-${{ matrix.target }}.zip aics.exe
-          cd ../../..
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: aics-${{ matrix.target }}
-          path: aics-${{ matrix.target }}.*
-
-  release:
-    needs: build
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+  stage:
+    needs: [version, build]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          path: artifacts
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: 0.12.23
+      - name: Install Python
+        run: uv python install "$UV_PYTHON"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: build-*
           merge-multiple: true
-
-      - name: Create draft release
+          path: dist
+      - name: Assemble complete release bundle
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          uv run scripts/release.py stamp "$RELEASE_VERSION"
+          uv run scripts/release.py bundle
+          uv run scripts/release.py verify
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-bundle
+          path: dist/*
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Stage or reconcile GitHub draft
         env:
           GH_TOKEN: ${{ github.token }}
+        run: uv run scripts/release.py stage
+
+  publish:
+    needs: [version, stage]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: crates-io
+    permissions:
+      # GitHub only exposes draft releases to identities with push access.
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: 0.12.23
+      - name: Install Python
+        run: uv python install "$UV_PYTHON"
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: ${{ needs.version.outputs.toolchain }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-bundle
+          path: dist
+      - name: Reproduce the verified crate before authenticating
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --generate-notes \
-            --title "$GITHUB_REF_NAME" \
-            artifacts/*
+          uv run scripts/release.py stamp "$RELEASE_VERSION"
+          uv run scripts/release.py check-package
+      - name: Check for an already published matching crate
+        id: registry
+        run: |
+          published=$(uv run scripts/release.py crate-published)
+          echo "published=$published" >> "$GITHUB_OUTPUT"
+      - name: Select authentication
+        id: credentials
+        env:
+          BOOTSTRAP_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -n "$BOOTSTRAP_TOKEN" ]; then
+            echo "bootstrap=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "bootstrap=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Authenticate through trusted publishing
+        if: steps.registry.outputs.published != 'true' && steps.credentials.outputs.bootstrap != 'true'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      - name: Publish or reconcile crate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.credentials.outputs.bootstrap == 'true' && secrets.CARGO_REGISTRY_TOKEN || steps.auth.outputs.token }}
+        run: uv run scripts/release.py publish-crate
+
+  finalize:
+    needs: [version, publish]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: 0.12.23
+      - name: Install Python
+        run: uv python install "$UV_PYTHON"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-bundle
+          path: dist
+      - name: Publish the complete immutable release
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          uv run scripts/release.py stamp "$RELEASE_VERSION"
+          uv run scripts/release.py finalize
+
+  verify-oidc:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'verify-oidc' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: crates-io
+    permissions:
+      id-token: write
+    steps:
+      - name: Verify token exchange (automatically revoked at job completion)
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5

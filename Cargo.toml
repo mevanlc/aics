@@ -2,6 +2,29 @@
 name = "aics"
 version = "0.0.0"
 edition = "2021"
+rust-version = "1.98"
+description = "Search local Claude Code, Codex CLI, and Antigravity chat session histories"
+license = "MIT"
+repository = "https://github.com/mevanlc/aics"
+readme = "README.md"
+keywords = ["cli", "tui", "search", "claude", "codex"]
+categories = ["command-line-utilities", "text-processing"]
+include = [
+    "/src/**",
+    "/tests/**",
+    "/benches/**",
+    "/docs/**",
+    "/examples/**",
+    "/devdocs/RELEASING.md",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+]
+
+[[bin]]
+name = "aics"
+path = "src/main.rs"
 
 [features]
 default = ["arboard"]

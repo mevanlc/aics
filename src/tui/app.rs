@@ -4907,11 +4907,12 @@ mod tests {
 
     use super::{
         build_fork_command, build_fork_in_cwd_command, build_resume_command,
-        build_resume_in_cwd_command_with_cwd_tools, claude_cwd_failed_dialog,
-        codex_cwd_failed_dialog, finalize_run_result, run_claude_cwd_tool, run_codex_cwd_tool,
-        ActionMenuState, App, AppExit, RulesPreviewState, SearchResponse, SearchWorker,
-        CLAUDE_CWD_INSTALL_MESSAGE, CODEX_CWD_INSTALL_MESSAGE, PAGE_STEP,
+        build_resume_in_cwd_command_with_cwd_tools, finalize_run_result, run_claude_cwd_tool,
+        run_codex_cwd_tool, ActionMenuState, App, AppExit, RulesPreviewState, SearchResponse,
+        SearchWorker, CLAUDE_CWD_INSTALL_MESSAGE, CODEX_CWD_INSTALL_MESSAGE, PAGE_STEP,
     };
+    #[cfg(unix)]
+    use super::{claude_cwd_failed_dialog, codex_cwd_failed_dialog};
     use crate::scan::{AgentHomes, SessionRoots};
     use crate::summary::{
         AicsSummaryPreview, ClaudeAutosummaryPreview, CodexAutosummaryPreview, Fingerprint,

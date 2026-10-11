@@ -226,7 +226,9 @@ impl SearchEngine {
         IndexSchema::register_tokenizers(&index);
         let reader = index
             .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            // Every query reloads explicitly. Background callbacks can outlive
+            // the reader and recreate lock files during an index rebuild.
+            .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .context("failed to build tantivy reader")?;
         let fields = IndexSchema::from_schema(&index.schema())?;

@@ -3,3 +3,6 @@
 *.bkp
 *.dtmp
 .claude
+/dist
+__pycache__/
+.ruff_cache/
