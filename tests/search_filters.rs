@@ -468,6 +468,21 @@ fn superseded_filter_excludes_families_with_reference_backed_codex_history() -> 
     assert_eq!(search(SupersededFilter::No)?.len(), 2);
     assert!(search(SupersededFilter::Yes)?.is_empty());
     assert!(manager.supersession_map()?.is_empty());
+    // A replacement's immutable ID differs from its logical thread ID. A tip
+    // without fork metadata must still protect the referenced copied family.
+    fs::rename(
+        sessions.join("copied-child.jsonl"),
+        sessions.join("copied-child_replacement.jsonl"),
+    )?;
+    fs::write(
+        sessions.join("referenced-tip.jsonl"),
+        serde_json::to_string(&serde_json::json!({
+            "type": "session_meta", "payload": { "id": "referenced-tip", "history_base": {"thread_id": "replacement"} }
+        }))?,
+    )?;
+    manager.sync_with_roots(&roots, false)?;
+    assert_eq!(search(SupersededFilter::No)?.len(), 2);
+    assert!(manager.supersession_map()?.is_empty());
     Ok(())
 }
 

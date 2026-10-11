@@ -313,7 +313,7 @@ fn proposals_recheck_activity_and_preserve_files_and_trash_metadata() -> Result<
     assert_eq!(skipped.len(), 3);
     assert!(skipped
         .iter()
-        .all(|skip| skip.skip_reason == "session is live or locked"));
+        .all(|skip| skip.skip_reason.contains("live or locked")));
     for (path, bytes) in [&fixtures.claude, &fixtures.codex, &fixtures.antigravity]
         .into_iter()
         .zip(original_bytes)
@@ -450,6 +450,9 @@ fn active_session_prevents_restoring_its_trashed_copy_for_each_provider() -> Res
         let codex = HeldLock::new(&fixtures.codex_lock());
         let antigravity = HeldLock::new(&fixtures.antigravity_lock());
         let proposal = RuleProposal {
+            reviewed_group: None,
+            dependency_policy: aics::lifecycle::DependencyPolicy::Skip,
+            included_by: None,
             rule: "restore".to_owned(),
             session_id: ID.to_owned(),
             path: trash_path.clone(),

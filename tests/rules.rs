@@ -552,7 +552,11 @@ fn apply_rules_restores_matching_trashed_session() -> Result<()> {
         .output()?;
 
     assert!(output.status.success(), "{output:#?}");
-    assert!(original.exists());
+    assert!(
+        original.exists(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(!trashed.exists());
     assert_eq!(fs::read_to_string(data_root.join("trash.jsonl"))?, "");
 
@@ -603,7 +607,10 @@ fn apply_rules_skips_untrash_for_normal_session() -> Result<()> {
     let value: serde_json::Value = serde_json::from_str(stdout.trim())?;
     assert_eq!(value["action"], "untrash");
     assert_eq!(value["reason"], "restore");
-    assert_eq!(value["skip_reason"], "session is already untrashed");
+    assert!(value["skip_reason"]
+        .as_str()
+        .unwrap()
+        .contains("not eligible for Restore"));
     Ok(())
 }
 
@@ -627,6 +634,9 @@ fn rule_proposals_trash_and_untrash_antigravity_bundles() -> Result<()> {
         trash: Some(trash_paths.clone()),
     };
     let trash_proposal = RuleProposal {
+        reviewed_group: None,
+        dependency_policy: aics::lifecycle::DependencyPolicy::Skip,
+        included_by: None,
         rule: "trash antigravity".to_owned(),
         session_id: "conversation-123".to_owned(),
         path: transcript.clone(),
@@ -659,6 +669,9 @@ fn rule_proposals_trash_and_untrash_antigravity_bundles() -> Result<()> {
         .trash_path(&trash_paths)
         .join("brain/conversation-123/.system_generated/logs/transcript.jsonl");
     let untrash_proposal = RuleProposal {
+        reviewed_group: None,
+        dependency_policy: aics::lifecycle::DependencyPolicy::Skip,
+        included_by: None,
         rule: "untrash antigravity".to_owned(),
         session_id: "conversation-123".to_owned(),
         path: trashed_transcript,
@@ -734,6 +747,9 @@ fn applying_antigravity_lifecycle_action_rejects_invalid_bundle_path() -> Result
         trash: Some(TrashPaths::from_data_root(temp.path().join("data"))),
     };
     let proposal = RuleProposal {
+        reviewed_group: None,
+        dependency_policy: aics::lifecycle::DependencyPolicy::Skip,
+        included_by: None,
         rule: "cleanup".to_owned(),
         session_id: "agy-session".to_owned(),
         path: transcript.clone(),
@@ -747,10 +763,9 @@ fn applying_antigravity_lifecycle_action_rejects_invalid_bundle_path() -> Result
 
     assert!(applied.is_empty());
     assert_eq!(skipped.len(), 1);
-    assert_eq!(
-        skipped[0].skip_reason,
-        "transcript.jsonl is not under a logs directory"
-    );
+    assert!(skipped[0]
+        .skip_reason
+        .contains("cannot resolve selected session"));
     assert!(transcript.exists());
     Ok(())
 }

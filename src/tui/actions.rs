@@ -11,12 +11,17 @@ use crate::tui::theme::Theme;
 use crate::tui::util::block_title;
 use crate::tui::{keymap_hint, layout};
 
-const REGULAR_ACTIONS: [ActionItem; 14] = [
+const REGULAR_ACTIONS: [ActionItem; 15] = [
     ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
     ActionItem::new(SessionAction::ResumeInCwd, 'R', "Resume in CLI in CWD"),
     ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
     ActionItem::new(SessionAction::ForkInCwd, 'F', "Fork in CLI in CWD"),
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
+    ActionItem::new(
+        SessionAction::ReviewDependencies,
+        'g',
+        "Review related sessions",
+    ),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
     ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
     ActionItem::new(
@@ -40,12 +45,17 @@ const REGULAR_ACTIONS: [ActionItem; 14] = [
     ),
 ];
 
-const TRASHED_ACTIONS: [ActionItem; 15] = [
+const TRASHED_ACTIONS: [ActionItem; 16] = [
     ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
     ActionItem::new(SessionAction::ResumeInCwd, 'R', "Resume in CLI in CWD"),
     ActionItem::new(SessionAction::Fork, 'f', "Fork in CLI"),
     ActionItem::new(SessionAction::ForkInCwd, 'F', "Fork in CLI in CWD"),
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
+    ActionItem::new(
+        SessionAction::ReviewDependencies,
+        'g',
+        "Review related sessions",
+    ),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
     ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
     ActionItem::new(
@@ -70,9 +80,14 @@ const TRASHED_ACTIONS: [ActionItem; 15] = [
     ),
 ];
 
-const ANTIGRAVITY_ACTIONS: [ActionItem; 11] = [
+const ANTIGRAVITY_ACTIONS: [ActionItem; 12] = [
     ActionItem::new(SessionAction::Resume, 'r', "Resume in CLI"),
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
+    ActionItem::new(
+        SessionAction::ReviewDependencies,
+        'g',
+        "Review related sessions",
+    ),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
     ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
     ActionItem::new(
@@ -96,8 +111,13 @@ const ANTIGRAVITY_ACTIONS: [ActionItem; 11] = [
     ),
 ];
 
-const ANTIGRAVITY_ACTIONS_WITHOUT_RESUME: [ActionItem; 10] = [
+const ANTIGRAVITY_ACTIONS_WITHOUT_RESUME: [ActionItem; 11] = [
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
+    ActionItem::new(
+        SessionAction::ReviewDependencies,
+        'g',
+        "Review related sessions",
+    ),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
     ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
     ActionItem::new(
@@ -121,8 +141,13 @@ const ANTIGRAVITY_ACTIONS_WITHOUT_RESUME: [ActionItem; 10] = [
     ),
 ];
 
-const TRASHED_ANTIGRAVITY_ACTIONS: [ActionItem; 11] = [
+const TRASHED_ANTIGRAVITY_ACTIONS: [ActionItem; 12] = [
     ActionItem::new(SessionAction::View, 'v', "View full conversation"),
+    ActionItem::new(
+        SessionAction::ReviewDependencies,
+        'g',
+        "Review related sessions",
+    ),
     ActionItem::new(SessionAction::Summarize, 's', "Summarize session (AI)"),
     ActionItem::new(SessionAction::Export, 'e', "Export as .txt"),
     ActionItem::new(
@@ -192,6 +217,7 @@ pub fn action_at(index: usize, trashed: bool) -> Option<SessionAction> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionAction {
     View,
+    ReviewDependencies,
     Summarize,
     Export,
     ExportFiltered,
@@ -444,6 +470,7 @@ mod tests {
                 ('f', "Fork in CLI"),
                 ('F', "Fork in CLI in CWD"),
                 ('v', "View full conversation"),
+                ('g', "Review related sessions"),
                 ('s', "Summarize session (AI)"),
                 ('e', "Export as .txt"),
                 ('E', "Export as filtered .txt"),
@@ -469,6 +496,7 @@ mod tests {
             vec![
                 SessionAction::Resume,
                 SessionAction::View,
+                SessionAction::ReviewDependencies,
                 SessionAction::Summarize,
                 SessionAction::Export,
                 SessionAction::ExportFiltered,

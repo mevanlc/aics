@@ -23,6 +23,7 @@ In the tables below, `^` means Ctrl.
 | `Shift+↑` / `Shift+↓` | Jump to the previous or next message/event in the preview |
 | `^Shift+↑` / `^Shift+↓` | Jump to the previous or next user message in the preview |
 | `^Y` | Cycle the session-card snippet between session text and available summaries |
+| `Enter` → `g` | Review related sessions and their dependency group |
 | `^T` or `Enter` → `d` | Move the selected session to AICS trash, including the complete local Antigravity bundle; in rules preview, ^T processes marked proposals |
 | `Shift+←` / `Shift+→` | Resize the list/preview split |
 | `^L` | Open contextual help |
@@ -43,6 +44,16 @@ In `^F`, **Search content** (`v`) cycles Visible / All / Hidden with Space or a
 repeated mnemonic. Visible is the interactive default and follows the Visibility
 toggles. `all:`, `visible:`, and `hidden:` in the query temporarily override this
 selection. `^R` resets it to Visible; Escape cancels modal edits.
+
+## Related sessions
+
+**Enter → g** opens the selected session's related chain without changing the main
+query or filters. `↑` / `↓` selects a member; `Enter` views it, and `Esc` returns.
+`/` filters the chain by path or ID. `Space` toggles an optional member; required
+members cannot be unchecked while their originating selection remains checked.
+`t`, `u`, and `D` select trash, restore, or permanent deletion. `c` reviews the
+operation; `y` confirms the complete safe group, `r` returns to chain review,
+and `Esc` cancels. Group expansion also opens this confirmation automatically.
 
 ## Search history
 

@@ -295,9 +295,7 @@ fn scan_directory<P: ScanProgressObserver>(
             continue;
         }
 
-        if !file_type.is_file()
-            || path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
-        {
+        if !file_type.is_file() || !is_session_filename(&path, agent) {
             continue;
         }
 
@@ -672,7 +670,7 @@ fn scan_trash_root<P: ScanProgressObserver>(
         }
 
         let path = entry.trash_path(store.paths());
-        if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+        if !is_session_filename(&path, agent) {
             continue;
         }
         let metadata = match fs::metadata(&path) {
@@ -703,4 +701,12 @@ fn scan_trash_root<P: ScanProgressObserver>(
     }
 
     Ok(())
+}
+
+fn is_session_filename(path: &Path, agent: Agent) -> bool {
+    path.extension().is_some_and(|e| e == "jsonl")
+        || (agent == Agent::Codex
+            && path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().ends_with(".jsonl.zst")))
 }

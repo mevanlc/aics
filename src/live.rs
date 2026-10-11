@@ -188,10 +188,38 @@ impl LiveSessionTracker {
     }
 
     /// Recheck immediately before mutation, retaining existing OS locks until it finishes.
+    #[cfg(test)]
     pub(crate) fn acquire_action_guard(
         &self,
         agent: Agent,
         session_id: &str,
+    ) -> Result<LiveSessionGuard, ProtectionReason> {
+        self.acquire_action_guard_inner(agent, session_id, true)
+    }
+
+    pub(crate) fn acquire_group_guard(
+        &self,
+        agent: Agent,
+        ids: &[String],
+    ) -> Result<LiveSessionGuard, ProtectionReason> {
+        let mut ids = ids.to_vec();
+        ids.sort();
+        ids.dedup();
+        let mut locks = Vec::new();
+        for (index, id) in ids.iter().enumerate() {
+            locks.extend(
+                self.acquire_action_guard_inner(agent, id, index == 0)?
+                    ._locks,
+            );
+        }
+        Ok(LiveSessionGuard { _locks: locks })
+    }
+
+    fn acquire_action_guard_inner(
+        &self,
+        agent: Agent,
+        session_id: &str,
+        coordinate: bool,
     ) -> Result<LiveSessionGuard, ProtectionReason> {
         if agent == Agent::Claude {
             let mut snapshot = LiveSessionSnapshot::default();
@@ -230,7 +258,7 @@ impl LiveSessionTracker {
                 }
                 _ => {}
             }
-            if agent == Agent::Codex {
+            if agent == Agent::Codex && coordinate {
                 let coordination = root.join(".coordination.lock");
                 match lock_existing(&coordination)? {
                     Some(file) => locks.push(file),

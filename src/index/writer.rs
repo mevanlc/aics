@@ -880,7 +880,7 @@ fn working_dir_search_terms(cwd: &str) -> Vec<String> {
 
 /// Bump when indexed/stored fields or searchable-content semantics change so old
 /// state files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 21;
+const INDEX_FORMAT_VERSION: u32 = 22;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {
@@ -958,11 +958,23 @@ fn apply_supersession(state: &mut IndexState) {
     // Declared parent IDs bound all semantic comparisons to actual fork families.
     let keys = state.files.keys().cloned().collect::<Vec<_>>();
     let mut indexes_by_session = HashMap::<(Agent, String), Vec<usize>>::new();
+    let mut dependency_indexes_by_rollout = HashMap::<(Agent, String), Vec<usize>>::new();
     let mut dependency_indexes_by_session = HashMap::<(Agent, String), Vec<usize>>::new();
     for (index, key) in keys.iter().enumerate() {
         let Some(file) = state.files.get(key) else {
             continue;
         };
+        if let Some(id) = file
+            .lineage
+            .rollout_id
+            .as_ref()
+            .or(file.session_id.as_ref())
+        {
+            dependency_indexes_by_rollout
+                .entry((file.agent, id.clone()))
+                .or_default()
+                .push(index);
+        }
         if let Some(session_id) = file.session_id.as_ref() {
             dependency_indexes_by_session
                 .entry((file.agent, session_id.clone()))
@@ -986,19 +998,23 @@ fn apply_supersession(state: &mut IndexState) {
         let Some(child) = state.files.get(child_key) else {
             continue;
         };
-        if child.lineage.history_base_session_id.is_some() {
+        if child.lineage.history_base_rollout_id.is_some() {
             reference_backed_indexes.push(child_index);
         }
-        for parent_id in [
-            child.lineage.forked_from_session_id.as_ref(),
-            child.lineage.history_base_session_id.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let Some(parent_indexes) =
-                dependency_indexes_by_session.get(&(child.agent, parent_id.clone()))
-            else {
+        for (parent_id, lookup) in [
+            (
+                child.lineage.forked_from_session_id.as_ref(),
+                &dependency_indexes_by_session,
+            ),
+            (
+                child.lineage.history_base_rollout_id.as_ref(),
+                &dependency_indexes_by_rollout,
+            ),
+        ] {
+            let Some(parent_id) = parent_id else {
+                continue;
+            };
+            let Some(parent_indexes) = lookup.get(&(child.agent, parent_id.clone())) else {
                 continue;
             };
             for &parent_index in parent_indexes {

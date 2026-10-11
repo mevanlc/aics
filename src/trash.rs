@@ -57,6 +57,11 @@ pub struct TrashEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum TrashReason {
+    DependencyGroup {
+        triggers: Vec<TrashReason>,
+        selected_paths: Vec<String>,
+        relation: String,
+    },
     KeyBinding {
         key: String,
     },
@@ -111,6 +116,15 @@ impl TrashStore {
     }
 
     pub fn sync(&self) -> Result<Vec<TrashEntry>> {
+        fs::create_dir_all(&self.paths.data_root)?;
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.paths.data_root.join("lifecycle.lock"))?;
+        lock.try_lock()
+            .context("another AICS lifecycle operation is running")?;
         fs::create_dir_all(&self.paths.trash_dir)
             .with_context(|| format!("failed to create {}", self.paths.trash_dir.display()))?;
         if let Some(parent) = self.paths.metadata_file.parent() {

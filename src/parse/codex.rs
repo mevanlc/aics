@@ -27,9 +27,7 @@ pub(crate) fn parse_codex_session_meta_lineage_file(
     path: impl AsRef<Path>,
 ) -> Result<(Option<String>, SessionLineage)> {
     let path = path.as_ref();
-    let file = File::open(path)
-        .with_context(|| format!("failed to open Codex session {}", path.display()))?;
-    let reader = BufReader::new(file);
+    let reader = crate::lifecycle::open_rollout(path)?;
 
     for line in reader.lines() {
         let Ok(line) = line else {
@@ -45,8 +43,10 @@ pub(crate) fn parse_codex_session_meta_lineage_file(
         return Ok((
             string_field(payload, "id"),
             SessionLineage {
+                rollout_id: string_field(payload, "id")
+                    .map(|id| crate::lifecycle::rollout_id(path, &id)),
                 forked_from_session_id: string_field(payload, "forked_from_id"),
-                history_base_session_id: payload
+                history_base_rollout_id: payload
                     .get("history_base")
                     .and_then(|history_base| string_field(history_base, "thread_id")),
                 ..SessionLineage::default()
@@ -59,9 +59,7 @@ pub(crate) fn parse_codex_session_meta_lineage_file(
 
 pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session>> {
     let path = path.as_ref();
-    let file = File::open(path)
-        .with_context(|| format!("failed to open Codex session {}", path.display()))?;
-    let reader = BufReader::new(file);
+    let reader = crate::lifecycle::open_rollout(path)?;
 
     let mut lines = 0usize;
     let mut session_id = None::<String>;
@@ -77,7 +75,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
     let mut cell_builder = CodexCellBuilder::default();
     let mut user_input = super::codex_user_input::CodexUserInput::default();
     let mut forked_from_session_id = None::<String>;
-    let mut history_base_session_id = None::<String>;
+    let mut history_base_rollout_id = None::<String>;
     let mut lineage_tracker = CodexLineageTracker::default();
 
     for line in reader.lines() {
@@ -126,7 +124,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
                 let payload = value.get("payload").unwrap_or(&Value::Null);
                 if session_id.is_none() {
                     forked_from_session_id = string_field(payload, "forked_from_id");
-                    history_base_session_id = payload
+                    history_base_rollout_id = payload
                         .get("history_base")
                         .and_then(|history_base| string_field(history_base, "thread_id"));
                 }
@@ -230,6 +228,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
     let (semantic_event_ids, assistant_or_tool_event_ids, codex_user_turns, trailing_aborted_turn) =
         lineage_tracker.finish();
 
+    let rollout_id = Some(crate::lifecycle::rollout_id(path, &session_id));
     Ok(Some(Session {
         session_id,
         agent: Agent::Codex,
@@ -255,8 +254,9 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
         cells,
         session_info,
         lineage: SessionLineage {
+            rollout_id,
             forked_from_session_id,
-            history_base_session_id,
+            history_base_rollout_id,
             semantic_event_ids,
             assistant_or_tool_event_ids,
             codex_user_turns,
@@ -2538,7 +2538,7 @@ mod cell_tests {
             session.lineage.forked_from_session_id.as_deref(),
             Some("parent")
         );
-        assert_eq!(session.lineage.history_base_session_id, None);
+        assert_eq!(session.lineage.history_base_rollout_id, None);
         assert_eq!(
             session.lineage.semantic_event_ids,
             ["function_call:call-1", "message:item-1"]
@@ -2564,7 +2564,7 @@ mod cell_tests {
             Some("logical-parent")
         );
         assert_eq!(
-            session.lineage.history_base_session_id.as_deref(),
+            session.lineage.history_base_rollout_id.as_deref(),
             Some("physical-parent")
         );
     }

@@ -2,6 +2,7 @@ pub mod clipboard;
 pub mod export;
 pub mod fs_safename;
 pub mod index;
+pub mod lifecycle;
 pub mod live;
 pub mod logging;
 pub mod manpage;

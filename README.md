@@ -23,6 +23,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Configurable Claude, Codex, and Antigravity launch commands so `aics` can hand off to resume a session
 - AICS trash, restore, and permanent deletion for session files and complete Antigravity bundles, with recorded trash reasons
 - `--json` mode for scripting, and `--export DIR` to batch-export matching sessions as Markdown
+- Dependency-aware session removal and restore, with related-session review and per-rule skip/include policies
 - JavaScript rules for previewing or applying batch session cleanup actions
 - Cross-platform: Windows, macOS, Linux, Android (Termux), FreeBSD, and NetBSD
   (path matching handles symlinks and Windows case-insensitivity)
@@ -87,6 +88,8 @@ JavaScript rules automate repeatable session cleanup. Rules live at
 `~/.config/aics/rules.js` by default; preview their proposed actions with
 `--preview-rules` or apply them with `--apply-rules`.
 Rules automatically exclude live or locked Claude, Codex, and Antigravity sessions.
+Dependency groups default to `dependencyPolicy: "skip"`; opt into `"include"` to
+process the complete required group. Use **Enter → g** to review related sessions.
 
 [Learn more about writing and running JavaScript rules.](docs/rules-js.md)
 

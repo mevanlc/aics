@@ -2,6 +2,7 @@ pub mod actions;
 pub mod ansi;
 pub mod app;
 pub mod color_ext;
+mod dependencies;
 pub mod filter;
 pub mod help;
 pub mod history;

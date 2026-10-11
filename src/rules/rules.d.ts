@@ -237,6 +237,14 @@ interface AicsRuleConfig {
    */
   applyAtStartup?: boolean;
 
+  /**
+   * "skip" (default) skips actions needing additional dependency members.
+   * "include" expands to the complete safe group, even outside search filters
+   * or this rule's matches, within the configured provider home.
+   * Applies to both trash and untrash. Live members and collisions block the group.
+   */
+  dependencyPolicy?: "skip" | "include";
+
   /** Additional configuration keys are accepted for forward compatibility. */
   [key: string]: unknown;
 }
@@ -306,7 +314,7 @@ declare function nothing(reason?: string): AicsNothingAction;
 
 /**
  * Returns an action that moves the session into the AICS trash store.
- * Applying it to an already-trashed session or an Antigravity bundle is skipped.
+ * Applying it to an already-trashed session is skipped. Antigravity moves the whole bundle.
  *
  * @param reason Optional human-readable explanation.
  */
@@ -314,7 +322,7 @@ declare function trash(reason?: string): AicsTrashAction;
 
 /**
  * Returns an action that restores a trashed session to its original path.
- * Applying it to a normal session or an Antigravity bundle is skipped.
+ * Applying it to a normal session is skipped. Antigravity restores the whole bundle.
  *
  * @param reason Optional human-readable explanation.
  */

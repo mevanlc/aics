@@ -7,8 +7,36 @@ process rules. In rules preview, ^T opens confirmation to process marked proposa
 
 Show trashed sessions with the **Trashed** filter or `--trashed yes`, then use
 **Undo Trash** in the actions menu to restore one. Trashing an already trashed
-session permanently deletes it. Antigravity actions include the whole conversation
+session opens confirmation for permanent deletion. Antigravity actions include the whole conversation
 bundle and its database companions.
+
+## Dependency review
+
+Codex rollouts sharing a thread ID are changed together. Removing history also
+requires removing its transitive dependents; an independent leaf can be removed
+alone. Restoring a session includes its trashed same-thread rollouts and missing
+history ancestors. Fork relationships alone do not force group removal.
+
+An expanded group opens a confirmation with selected and required members,
+counts, and blockers. Use `r` to review the related chain, `y` to confirm a safe
+group, or `Esc` to cancel. **Enter → g** opens the chain directly. Its local `/`
+filter and transcript viewer preserve your main search. Optional related members
+can be selected with Space; required members cannot be omitted.
+
+Discovery includes active, archived, compressed, and trashed Codex rollouts,
+including metadata-only files hidden from normal search. Unreadable or ambiguous
+metadata blocks removal. A purge from trash cannot silently delete active
+dependents: trash them first. Restore refuses existing destinations, including
+files, and never overwrites them.
+
+All UI and rules removal/restore paths recheck the group and native session locks
+before moving anything. AICS stages verified backups and records a recovery
+journal under `operations/` in its data directory. Failed operations roll back;
+startup retries interrupted recovery. Changed external files and uncertain
+publication are preserved with the backups and reported for manual recovery.
+On platforms without stable file identity support, destination cleanup during
+rollback also requires manual recovery. These checks cannot stop external tools
+that ignore session locks from changing files.
 
 ## Recorded reasons
 
@@ -36,7 +64,9 @@ and cause:
 
 The other causes are `{"source":"action_menu","action":"Move session to Trash"}`
 and `{"source":"rule","name":"rule name","reason":"rule explanation"}`.
-The rule explanation is omitted when the rule provides none. Startup rules,
+Grouped operations use `source: "dependency_group"` with `triggers`,
+`selected_paths`, and each member's `relation`. The rule explanation is omitted
+when the rule provides none. Startup rules,
 explicit rule application, and processing proposals in the TUI all record the
 rule that caused the move.
 
@@ -51,7 +81,7 @@ records never prevent browsing, restoration, or deletion.
 
 Reason updates use a lock and atomic file replacement. AICS preserves an
 unreadable or malformed reason file and refuses new trash operations that cannot
-record their reason before removing the original. Recovery remains available;
-failures to clean up a reason after recovery are logged as warnings.
+record their reason before removing the original. Lifecycle operations preserve malformed metadata and report the problem before
+changing session files.
 
 [Back to the README.](../README.md)

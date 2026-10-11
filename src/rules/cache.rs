@@ -13,7 +13,7 @@ use super::RawRuleOutcome;
 use crate::index::StoredSession;
 use crate::scan::SessionFile;
 
-const RULES_CACHE_FORMAT_VERSION: u32 = 5;
+const RULES_CACHE_FORMAT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct ContentFingerprint {

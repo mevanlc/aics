@@ -234,7 +234,7 @@ fn indexed_questions_use_conversation_fields_and_rebuild_version_20_caches() -> 
     std::fs::write(&paths.state_file, serde_json::to_string(&old_state)?)?;
     assert_eq!(manager.sync_with_roots(&roots, false)?.updated, 1);
     let state: Value = serde_json::from_str(&std::fs::read_to_string(&paths.state_file)?)?;
-    assert_eq!(state["format_version"], 21);
+    assert_eq!(state["format_version"], 22);
     assert_eq!(std::fs::read_to_string(&path)?, fixture);
     Ok(())
 }

@@ -24,6 +24,33 @@ Rules mode honors the usual scope and filter flags, including `-g`, `--dir`,
 `--agent`, `--after`, `--before`, `--min-lines`, and `--sub-agent`, but it does
 not accept a text search query yet.
 
+## Dependency groups
+
+```js
+rule("cleanup", { dependencyPolicy: "include" }, ({ session }) => {
+  return session.customTitle.startsWith("disposable:") ? trash("finished") : nothing();
+});
+```
+
+`dependencyPolicy` accepts `"skip"` (the default) or `"include"`. Skip permits a
+safe single session or an already complete set of matching proposals; it skips
+an action that needs additional members. Include adds the required group, even
+when those members do not match the rule or current filters. Expansion stays
+within the configured provider home, including its archived and trashed files.
+The policy also applies to `untrash()` and automatic startup rules.
+
+Codex rollouts sharing a thread ID form one unit. History references require
+dependent sessions to accompany removal and missing ancestors to accompany
+restore. Ordinary fork metadata is shown as context and does not force removal.
+
+Preview includes added rows and their dependency explanations. JSON proposals
+carry `dependency_policy` and a `dependency_group` summary with member paths and
+blockers; added rows carry `included_by`. Keep the complete
+reviewed group marked: unmarking a required member blocks application. Overlapping
+proposals execute together and preserve their originating rule reasons. Conflicting
+trash/restore proposals, live members, ambiguous metadata, destination collisions,
+or changes since preview block the affected operation. There is no unsafe override.
+
 ## Live and locked sessions
 
 Rules exclude live or locked Claude Code, Codex CLI, and Antigravity CLI sessions

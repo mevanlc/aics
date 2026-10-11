@@ -1,6 +1,6 @@
+mod lifecycle;
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::fs;
 use std::io;
 use std::panic;
 use std::path::{Path, PathBuf};
@@ -33,7 +33,7 @@ use crate::export::{
 };
 use crate::index::{
     IndexManager, Scope, SearchEngine, SearchFilters, SearchHit, SearchRequest, SortMode,
-    SyncOutcome, TrashFilter,
+    TrashFilter,
 };
 use crate::parse::claude::read_claude_autosummaries;
 use crate::parse::codex_summary::read_codex_autosummaries;
@@ -70,8 +70,8 @@ use crate::tui::statusline;
 use crate::tui::text_layout::LayoutDocument;
 use crate::tui::theme::Theme;
 use crate::tui::util::{
-    block_title, parse_highlighted_html, session_display_title, sticky_header_for_scroll,
-    StickyHeader, StickyRowMarker, STICKY_HEADER_HEIGHT,
+    block_title, parse_highlighted_html, sticky_header_for_scroll, StickyHeader, StickyRowMarker,
+    STICKY_HEADER_HEIGHT,
 };
 #[cfg(test)]
 use crate::tui::viewer::collect_message_rows;
@@ -120,7 +120,7 @@ enum Overlay {
     Viewer(ViewerState),
     Settings(SettingsModalState),
     History(HistoryModalState),
-    ConfirmDelete(DeleteMode),
+    Dependencies(super::dependencies::Review),
     ConfirmRulesProcess(RulesProcessSummary),
     ConfirmRestore(RestorePrompt),
     RestoreBlocked(RestoreBlockedDialog),
@@ -138,7 +138,7 @@ struct RestorePrompt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RestorePromptKind {
     CreateParent,
-    OverwriteFile,
+    Ready,
 }
 
 #[derive(Debug, Clone)]
@@ -487,6 +487,7 @@ pub struct App {
     pending_list_click: Option<PendingListClick>,
     pending_action_menu_click: Option<PendingListClick>,
     preview_resize_drag: Option<PreviewResizeDrag>,
+    dependency_before_viewer: Option<super::dependencies::Review>,
     viewer_before_actions: Option<ViewerState>,
     // Independent of the result list, which may change while the viewer is open.
     viewer_hit: Option<SearchHit>,
@@ -588,6 +589,7 @@ impl App {
             pending_list_click: None,
             pending_action_menu_click: None,
             preview_resize_drag: None,
+            dependency_before_viewer: None,
             viewer_before_actions: None,
             viewer_hit: None,
             pending_viewer_filter_check: None,
@@ -1318,6 +1320,7 @@ impl App {
         let preview_cache = &self.preview_cache;
         let viewer_before_actions = &mut self.viewer_before_actions;
         match &mut self.overlay {
+            Overlay::Dependencies(review) => review.render(frame, frame.area(), &theme),
             Overlay::None => {}
             Overlay::Filters(filter_state, viewer_before_filters) => {
                 if let Some(viewer_state) = viewer_before_filters.as_mut() {
@@ -1386,9 +1389,6 @@ impl App {
             }
             Overlay::Settings(settings_state) => settings_state.render(frame, frame.area(), &theme),
             Overlay::History(state) => state.render(frame, frame.area(), &theme),
-            Overlay::ConfirmDelete(mode) => {
-                Self::render_delete_confirm(frame, frame.area(), &theme, active_hit.as_ref(), *mode)
-            }
             Overlay::ConfirmRulesProcess(summary) => {
                 Self::render_rules_process_confirm(frame, frame.area(), &theme, *summary)
             }
@@ -1587,12 +1587,25 @@ impl App {
     }
 
     fn handle_overlay_key(&mut self, key: KeyEvent) -> Result<()> {
+        if matches!(self.overlay, Overlay::Dependencies(_)) {
+            return self.handle_dependency_key(key);
+        }
+        if self.dependency_before_viewer.is_some()
+            && matches!(self.overlay, Overlay::Viewer(_))
+            && key.code == KeyCode::Esc
+        {
+            self.overlay =
+                Overlay::Dependencies(self.dependency_before_viewer.take().expect("review exists"));
+            self.viewer_hit = None;
+            return Ok(());
+        }
         if matches!(self.overlay, Overlay::Viewer(_)) && is_help_key(key) {
             self.open_help(HelpTab::Viewer);
             return Ok(());
         }
 
-        if matches!(self.overlay, Overlay::Viewer(_))
+        if self.dependency_before_viewer.is_none()
+            && matches!(self.overlay, Overlay::Viewer(_))
             && key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
             && matches!(key.code, KeyCode::Char('f' | 'F'))
         {
@@ -1600,7 +1613,8 @@ impl App {
             return Ok(());
         }
 
-        if matches!(self.overlay, Overlay::Viewer(_))
+        if self.dependency_before_viewer.is_none()
+            && matches!(self.overlay, Overlay::Viewer(_))
             && key.modifiers == KeyModifiers::CONTROL
             && key.code == KeyCode::Char('t')
         {
@@ -1614,7 +1628,8 @@ impl App {
             return Ok(());
         }
 
-        if matches!(&self.overlay, Overlay::Viewer(state) if state.search_is_focused())
+        if self.dependency_before_viewer.is_none()
+            && matches!(&self.overlay, Overlay::Viewer(state) if state.search_is_focused())
             && key.code == KeyCode::Enter
             && key.modifiers.is_empty()
         {
@@ -1690,7 +1705,14 @@ impl App {
                     self.display_options,
                 ) {
                     ViewerOutcome::Stay => {}
-                    ViewerOutcome::Close => self.overlay = Overlay::None,
+                    ViewerOutcome::Close => {
+                        self.viewer_hit = None;
+                        self.overlay = self
+                            .dependency_before_viewer
+                            .take()
+                            .map(Overlay::Dependencies)
+                            .unwrap_or(Overlay::None);
+                    }
                     ViewerOutcome::CopySelection => {
                         if let Some(session) = viewer_session.as_ref() {
                             state.copy_selected(
@@ -1715,22 +1737,6 @@ impl App {
                 let outcome = state.handle_key(key);
                 self.apply_history_outcome(outcome)?;
             }
-            Overlay::ConfirmDelete(mode) => match key.code {
-                KeyCode::Esc | KeyCode::Char('n') => self.overlay = Overlay::None,
-                KeyCode::Char('y') | KeyCode::Enter => {
-                    let mode = *mode;
-                    self.overlay = Overlay::None;
-                    if let Err(error) = self.delete_selected_session(
-                        mode,
-                        &TrashReason::ActionMenu {
-                            action: "Delete immediately".to_owned(),
-                        },
-                    ) {
-                        self.statusline = Some(statusline::Entry::failed(format!("{error:#}")));
-                    }
-                }
-                _ => {}
-            },
             Overlay::ConfirmRulesProcess(_) => match key.code {
                 KeyCode::Esc | KeyCode::Char('n') => self.overlay = Overlay::None,
                 KeyCode::Char('y') | KeyCode::Enter => {
@@ -1768,6 +1774,7 @@ impl App {
                 }
                 _ => {}
             },
+            Overlay::Dependencies(_) => {}
             Overlay::None => {}
         }
         Ok(())
@@ -3374,6 +3381,7 @@ impl App {
 
     fn run_session_action(&mut self, action: SessionAction) -> Result<()> {
         match action {
+            SessionAction::ReviewDependencies => self.review_selected_dependencies()?,
             SessionAction::View => self.open_viewer(),
             SessionAction::Summarize => {
                 let Some(hit) = self.selected_hit() else {
@@ -3431,7 +3439,12 @@ impl App {
                 },
             )?,
             SessionAction::DeleteImmediately => {
-                self.overlay = Overlay::ConfirmDelete(DeleteMode::Immediate)
+                self.delete_selected_session(
+                    DeleteMode::Immediate,
+                    &TrashReason::ActionMenu {
+                        action: "Delete immediately".into(),
+                    },
+                )?;
             }
             SessionAction::Resume => {
                 let Some(hit) = self.selected_hit() else {
@@ -3531,112 +3544,26 @@ impl App {
             return Ok(());
         }
         if target.is_file() {
-            self.overlay = Overlay::ConfirmRestore(RestorePrompt {
-                hit,
-                target,
-                kind: RestorePromptKind::OverwriteFile,
-            });
+            self.overlay = Overlay::RestoreBlocked(RestoreBlockedDialog { target });
             return Ok(());
         }
 
         self.restore_trashed_session(RestorePrompt {
             hit,
             target,
-            kind: RestorePromptKind::OverwriteFile,
+            kind: RestorePromptKind::Ready,
         })
     }
 
     fn restore_trashed_session(&mut self, prompt: RestorePrompt) -> Result<()> {
-        let source = prompt.hit.session.file_path.clone();
-        let target = prompt.target;
-        let parent = target.parent().with_context(|| {
-            format!(
-                "restore target {} has no parent directory",
-                target.display()
-            )
-        })?;
-
-        match prompt.kind {
-            RestorePromptKind::CreateParent => fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?,
-            RestorePromptKind::OverwriteFile => {}
-        }
-
-        let restored_path = if prompt.hit.session.agent == Agent::Antigravity {
-            let paths = self
-                .roots
-                .trash
-                .clone()
-                .context("cannot restore Antigravity bundle: trash store is unavailable")?;
-            TrashStore::new(paths).restore_file(&source)?
-        } else {
-            if target.is_dir() {
-                bail!("cannot restore over directory {}", target.display());
-            }
-            if target.exists() && !target.is_file() {
-                bail!("cannot restore over non-file {}", target.display());
-            }
-
-            fs::copy(&source, &target).with_context(|| {
-                format!(
-                    "failed to restore {} to {}",
-                    source.display(),
-                    target.display()
-                )
-            })?;
-            fs::remove_file(&source).with_context(|| {
-                format!("failed to remove restored trash item {}", source.display())
-            })?;
-            target.clone()
-        };
-
-        self.results
-            .retain(|result| result.session.file_path != source);
-        if self.selected >= self.results.len() {
-            self.selected = self.results.len().saturating_sub(1);
-        }
-        self.preview_scroll = 0;
-        self.preview_cache.remove(&source);
-        if self
-            .viewer_hit
-            .as_ref()
-            .is_some_and(|hit| hit.session.file_path == source)
-        {
-            self.overlay = Overlay::None;
-            self.release_closed_viewer();
-        }
-        self.hidden_deleted_paths.insert(source.clone());
-        self.preview_render_cache = None;
-        self.cancel_pending_searches();
-
-        match self
-            .manager
-            .sync_with_roots_best_effort(&self.roots, false)?
-        {
-            SyncOutcome::Completed(_) => {
-                self.statusline = Some(statusline::Entry::completed(format!(
-                    "restored {}",
-                    if prompt.hit.session.agent == Agent::Antigravity {
-                        prompt.hit.session.session_id.clone()
-                    } else {
-                        file_label(&restored_path)
-                    }
-                )));
-                self.trigger_search_now()?;
-            }
-            SyncOutcome::Busy => {
-                self.statusline = Some(statusline::Entry::completed(format!(
-                    "restored {} · index refresh deferred",
-                    if prompt.hit.session.agent == Agent::Antigravity {
-                        prompt.hit.session.session_id.clone()
-                    } else {
-                        file_label(&restored_path)
-                    }
-                )));
-            }
-        }
-
-        Ok(())
+        self.start_lifecycle(
+            prompt.hit,
+            crate::lifecycle::Operation::Restore,
+            TrashReason::ActionMenu {
+                action: "Undo Trash".into(),
+            },
+            false,
+        )
     }
 
     fn export_selected_session(&mut self, display_options: DisplayOptions) -> Result<()> {
@@ -3677,183 +3604,36 @@ impl App {
         let Some(hit) = self.selected_hit() else {
             return Ok(());
         };
-        debug!(
-            "delete_selected_session selected={} results_before={} mode={:?} path={}",
-            self.selected,
-            self.results.len(),
-            mode,
-            hit.session.file_path.display()
-        );
-        let file_already_missing = match self.delete_file_for_mode(&hit, mode, reason) {
-            Ok(()) => false,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("failed to delete {}", hit.session.file_path.display())
-                });
-            }
-        };
-        self.results
-            .retain(|result| result.session.file_path != hit.session.file_path);
-        if self.selected >= self.results.len() {
-            self.selected = self.results.len().saturating_sub(1);
+        if !hit.session.file_path.try_exists()? {
+            self.results
+                .retain(|h| h.session.file_path != hit.session.file_path);
+            self.preview_cache.remove(&hit.session.file_path);
+            self.hidden_deleted_paths.insert(hit.session.file_path);
+            self.selected = self.selected.min(self.results.len().saturating_sub(1));
+            self.cancel_pending_searches();
+            self.overlay = Overlay::None;
+            self.statusline = Some(statusline::Entry::completed(
+                "removed missing session from results",
+            ));
+            return Ok(());
         }
-        self.preview_scroll = 0;
-        self.preview_cache.remove(&hit.session.file_path);
-        self.overlay = Overlay::None;
-        self.release_closed_viewer();
-        self.hidden_deleted_paths
-            .insert(hit.session.file_path.clone());
-        self.preview_render_cache = None;
-        self.cancel_pending_searches();
-        debug!(
-            "delete_selected_session local_remove path={} file_already_missing={} results_after={} hidden_deleted_paths={}",
-            hit.session.file_path.display(),
-            file_already_missing,
-            self.results.len(),
-            self.hidden_deleted_paths.len()
-        );
-        match self
-            .manager
-            .sync_with_roots_best_effort(&self.roots, false)?
-        {
-            SyncOutcome::Completed(_) => {
-                debug!(
-                    "delete_selected_session sync_completed path={}",
-                    hit.session.file_path.display()
-                );
-                self.statusline = Some(statusline::Entry::completed(if file_already_missing {
-                    format!("removed missing session {}", session_label(&hit))
-                } else {
-                    delete_status_label(mode, &session_label(&hit), false, hit.session.trashed)
-                }));
-            }
-            SyncOutcome::Busy => {
-                debug!(
-                    "delete_selected_session sync_busy path={}",
-                    hit.session.file_path.display()
-                );
-                self.statusline = Some(statusline::Entry::completed(if file_already_missing {
-                    format!(
-                        "removed missing session {} · index refresh deferred",
-                        session_label(&hit)
-                    )
-                } else {
-                    format!(
-                        "{} · index refresh deferred",
-                        delete_status_label(mode, &session_label(&hit), false, hit.session.trashed)
-                    )
-                }));
-            }
-        }
-        Ok(())
-    }
-
-    fn delete_file_for_mode(
-        &self,
-        hit: &SearchHit,
-        mode: DeleteMode,
-        reason: &TrashReason,
-    ) -> io::Result<()> {
-        if hit.session.agent != Agent::Antigravity {
-            if matches!(mode, DeleteMode::Trash) && !hit.session.trashed {
-                let Some(paths) = self.roots.trash.clone() else {
-                    return fs::remove_file(&hit.session.file_path);
-                };
-                return TrashStore::new(paths)
-                    .trash_session(&hit.session.file_path, hit.session.agent, reason)
-                    .map(|_| ())
-                    .map_err(io::Error::other);
-            }
-            if !hit.session.trashed {
-                return fs::remove_file(&hit.session.file_path);
-            }
-        }
-
-        if matches!(mode, DeleteMode::Trash) && !hit.session.trashed {
-            let Some(paths) = self.roots.trash.clone() else {
-                return crate::trash::delete_session_immediately(
-                    &hit.session.file_path,
-                    hit.session.agent,
-                )
-                .map_err(io::Error::other);
-            };
-            return TrashStore::new(paths)
-                .trash_session(&hit.session.file_path, hit.session.agent, reason)
-                .map(|_| ())
-                .map_err(io::Error::other);
-        }
-
-        if let Some(paths) = self.roots.trash.clone() {
-            TrashStore::new(paths)
-                .delete_session(
-                    &hit.session.file_path,
-                    hit.session.agent,
-                    hit.session.trashed,
-                )
-                .map_err(io::Error::other)
+        let operation = if matches!(mode, DeleteMode::Immediate) || hit.session.trashed {
+            crate::lifecycle::Operation::Delete
         } else {
-            crate::trash::delete_session_immediately(&hit.session.file_path, hit.session.agent)
-                .map_err(io::Error::other)
-        }
+            crate::lifecycle::Operation::Trash
+        };
+        self.start_lifecycle(
+            hit,
+            operation,
+            reason.clone(),
+            operation == crate::lifecycle::Operation::Delete,
+        )
     }
 
     fn copy_to_clipboard(&mut self, value: &str, label: &str) -> Result<()> {
         crate::clipboard::set_text(value).context("failed to set clipboard contents")?;
         self.statusline = Some(statusline::Entry::completed(format!("copied {label}")));
         Ok(())
-    }
-
-    fn render_delete_confirm(
-        frame: &mut Frame,
-        area: Rect,
-        theme: &Theme,
-        hit: Option<&SearchHit>,
-        mode: DeleteMode,
-    ) {
-        let popup = layout::centered_rect(area, 44, 20);
-        frame.render_widget(Clear, popup);
-        let title = hit
-            .map(|hit| session_display_title(hit.session.agent, &hit.session.project))
-            .unwrap_or_else(|| "selected session".to_owned());
-        let paragraph = Paragraph::new(vec![
-            Line::from(Span::styled(
-                confirm_delete_title(mode, &title),
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                confirm_delete_description(
-                    mode,
-                    hit.is_some_and(|hit| hit.session.agent == Agent::Antigravity),
-                ),
-                Style::default().fg(theme.muted),
-            )),
-            Line::from(vec![
-                Span::styled("Press ", Style::default().fg(theme.muted)),
-                Span::styled(
-                    "y",
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" to delete or ", Style::default().fg(theme.muted)),
-                Span::styled(
-                    "Esc",
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" to cancel.", Style::default().fg(theme.muted)),
-            ]),
-        ])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(theme.border_style(true))
-                .title(block_title("Confirm Delete")),
-        );
-        frame.render_widget(paragraph, popup);
     }
 
     fn render_rules_process_confirm(
@@ -3958,10 +3738,9 @@ impl App {
                 ),
                 "create",
             ),
-            RestorePromptKind::OverwriteFile => (
-                format!("Overwrite {}?", prompt.target.display()),
-                "overwrite",
-            ),
+            RestorePromptKind::Ready => {
+                (format!("Restore {}?", prompt.target.display()), "restore")
+            }
         };
         let paragraph = Paragraph::new(vec![
             Line::from(Span::styled(
@@ -4014,7 +3793,7 @@ impl App {
         frame.render_widget(Clear, popup);
         let paragraph = Paragraph::new(vec![
             Line::from(Span::styled(
-                "Cannot restore over a directory",
+                "Cannot restore over an existing destination",
                 Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
@@ -4423,49 +4202,6 @@ fn file_label(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
-}
-
-fn session_label(hit: &SearchHit) -> String {
-    if hit.session.agent == Agent::Antigravity {
-        hit.session.session_id.clone()
-    } else {
-        file_label(&hit.session.file_path)
-    }
-}
-
-fn delete_status_label(mode: DeleteMode, label: &str, missing: bool, trashed: bool) -> String {
-    if missing {
-        return format!("removed missing session {label}");
-    }
-    match mode {
-        DeleteMode::Trash if trashed => format!("deleted {label} from Trash"),
-        DeleteMode::Trash => format!("moved {label} to Trash"),
-        DeleteMode::Immediate => format!("deleted {label}"),
-    }
-}
-
-fn confirm_delete_title(mode: DeleteMode, title: &str) -> String {
-    match mode {
-        DeleteMode::Trash => format!("Move {title} to Trash?"),
-        DeleteMode::Immediate => format!("Delete {title} immediately?"),
-    }
-}
-
-fn confirm_delete_description(mode: DeleteMode, antigravity: bool) -> &'static str {
-    match (mode, antigravity) {
-        (DeleteMode::Trash, true) => {
-            "This moves the complete Antigravity bundle and local database to AICS Trash."
-        }
-        (DeleteMode::Trash, false) => {
-            "This copies the JSONL file to Trash, records metadata, then removes the original."
-        }
-        (DeleteMode::Immediate, true) => {
-            "This permanently removes the Antigravity bundle and local database."
-        }
-        (DeleteMode::Immediate, false) => {
-            "This permanently removes the JSONL file and refreshes the index."
-        }
-    }
 }
 
 fn load_summary_sources(
@@ -4882,6 +4618,7 @@ fn execute_handoff(command: ExternalCommand) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(test)]
     use std::fs;
     use std::path::PathBuf;
     use std::sync::mpsc;
@@ -5766,12 +5503,68 @@ mod tests {
     }
 
     #[test]
+    fn dependency_review_preserves_search_and_confirms_complete_group() {
+        let temp = TempDir::new().unwrap();
+        let mut app = test_app();
+        app.roots.codex_sessions = temp.path().join("codex/sessions");
+        app.roots.trash = Some(TrashPaths::from_data_root(temp.path().join("data")));
+        fs::create_dir_all(&app.roots.codex_sessions).unwrap();
+        let parent = app.roots.codex_sessions.join("parent.jsonl");
+        let child = app.roots.codex_sessions.join("child.jsonl");
+        fs::write(
+            &parent,
+            r#"{"type":"session_meta","payload":{"id":"parent"}}"#,
+        )
+        .unwrap();
+        fs::write(&child, r#"{"type":"session_meta","payload":{"id":"child","history_base":{"thread_id":"parent"}}}"#).unwrap();
+        app.query = Input::default().with_value("keep my query".into());
+        app.results = vec![sample_hit_with_path(Agent::Codex, parent.clone())];
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert!(
+            matches!(app.overlay, super::Overlay::Dependencies(ref review) if review.plan.members.len() == 2)
+        );
+        assert!(parent.exists() && child.exists());
+        app.handle_key(crossterm_key(KeyCode::Char('r'))).unwrap();
+        app.handle_key(crossterm_key(KeyCode::Char('/'))).unwrap();
+        for c in "child".chars() {
+            app.handle_key(crossterm_key(KeyCode::Char(c))).unwrap();
+        }
+        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
+        app.handle_key(crossterm_key(KeyCode::Char(' '))).unwrap();
+        assert!(
+            matches!(app.overlay, super::Overlay::Dependencies(ref review) if review.plan.members.len() == 2)
+        );
+        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
+        assert!(matches!(app.overlay, super::Overlay::Viewer(_)));
+        app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
+        assert!(matches!(app.overlay, super::Overlay::Dependencies(_)));
+        app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
+        assert_eq!(app.query.value(), "keep my query");
+        assert!(parent.exists() && child.exists());
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        app.handle_key(crossterm_key(KeyCode::Char('y'))).unwrap();
+        assert!(!parent.exists() && !child.exists());
+        assert!(app.results.is_empty());
+    }
+
+    #[test]
     fn ctrl_t_moves_selected_session_to_trash_without_confirmation() {
         let temp = TempDir::new().unwrap();
         let data_root = temp.path().join("data");
-        let source = temp.path().join("session.jsonl");
-        fs::write(&source, "{}\n").unwrap();
+        let source = temp.path().join("sessions/session.jsonl");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, r#"{"type":"user","sessionId":"session-123","message":{"role":"user","content":"fixture"}}"#).unwrap();
         let mut app = test_app();
+        app.roots.claude_projects = temp.path().join("sessions");
+        app.roots.trash = Some(TrashPaths::from_data_root(temp.path().join("data")));
         app.roots.trash = Some(TrashPaths::from_data_root(&data_root));
         app.results = vec![sample_hit_with_path(Agent::Claude, source.clone())];
 
@@ -5802,9 +5595,16 @@ mod tests {
     fn action_menu_records_trash_reason_and_cleans_it_on_permanent_delete() {
         let temp = TempDir::new().unwrap();
         let paths = TrashPaths::from_data_root(temp.path().join("data"));
-        let source = temp.path().join("session.jsonl");
-        fs::write(&source, "{}\n").unwrap();
+        let source = temp.path().join("sessions/session.jsonl");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(
+            &source,
+            r#"{"type":"session_meta","payload":{"id":"session-123"}}"#,
+        )
+        .unwrap();
         let mut app = test_app();
+        app.roots.codex_sessions = temp.path().join("sessions");
+        app.roots.trash = Some(TrashPaths::from_data_root(temp.path().join("data")));
         app.roots.trash = Some(paths.clone());
         app.results = vec![sample_hit_with_path(Agent::Codex, source.clone())];
         app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
@@ -5824,6 +5624,7 @@ mod tests {
         app.results = vec![hit];
         app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
         app.handle_key(crossterm_key(KeyCode::Char('d'))).unwrap();
+        app.handle_key(crossterm_key(KeyCode::Char('y'))).unwrap();
         assert!(!trashed.exists());
         assert!(store.reasons().unwrap().is_empty());
     }
@@ -5874,6 +5675,7 @@ mod tests {
         fs::write(&database, "sqlite data").unwrap();
         let data_root = temp.path().join("data");
         let mut app = test_app();
+        app.roots.antigravity_home = temp.path().join("antigravity");
         app.roots.trash = Some(TrashPaths::from_data_root(&data_root));
         app.results = vec![sample_hit_with_path(Agent::Antigravity, source.clone())];
 
@@ -6298,9 +6100,12 @@ mod tests {
     #[test]
     fn ctrl_t_from_viewer_deletes_and_closes_viewer() {
         let temp = TempDir::new().unwrap();
-        let source = temp.path().join("session.jsonl");
-        fs::write(&source, "{}\n").unwrap();
+        let source = temp.path().join("sessions/session.jsonl");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, r#"{"type":"user","sessionId":"session-123","message":{"role":"user","content":"fixture"}}"#).unwrap();
         let mut app = test_app();
+        app.roots.claude_projects = temp.path().join("sessions");
+        app.roots.trash = Some(TrashPaths::from_data_root(temp.path().join("data")));
         app.results = vec![sample_hit_with_path(Agent::Claude, source.clone())];
         app.open_viewer();
 
@@ -7429,11 +7234,14 @@ mod tests {
     #[test]
     fn delete_cancels_pending_and_in_flight_searches() {
         let temp = TempDir::new().unwrap();
-        let deleted_path = temp.path().join("deleted-session.jsonl");
-        let surviving_path = temp.path().join("surviving-session.jsonl");
-        fs::write(&deleted_path, "{}\n").unwrap();
-        fs::write(&surviving_path, "{}\n").unwrap();
+        let deleted_path = temp.path().join("sessions/deleted-session.jsonl");
+        let surviving_path = temp.path().join("sessions/surviving-session.jsonl");
+        fs::create_dir_all(deleted_path.parent().unwrap()).unwrap();
+        fs::write(&deleted_path, r#"{"type":"user","sessionId":"session-123","message":{"role":"user","content":"fixture"}}"#).unwrap();
+        fs::write(&surviving_path, r#"{"type":"user","sessionId":"survivor","message":{"role":"user","content":"fixture"}}"#).unwrap();
         let (mut app, response_tx) = test_app_with_response_sender();
+        app.roots.claude_projects = temp.path().join("sessions");
+        app.roots.trash = Some(TrashPaths::from_data_root(temp.path().join("data")));
         app.results = vec![sample_hit_with_path(Agent::Claude, deleted_path.clone())];
         app.selected = 0;
         app.pending_search = true;
@@ -7530,8 +7338,20 @@ mod tests {
         let trash_source = temp.path().join("data/trash/session.jsonl");
         let target = temp.path().join("restore/session.jsonl");
         fs::create_dir_all(trash_source.parent().unwrap()).unwrap();
-        fs::write(&trash_source, "{}\n").unwrap();
+        fs::write(&trash_source, r#"{"type":"user","sessionId":"session-123","message":{"role":"user","content":"fixture"}}"#).unwrap();
+        let entry = crate::trash::TrashEntry {
+            ts: "2026-10-11T00:00:00Z".into(),
+            nm: "session.jsonl".into(),
+            op: target.display().to_string(),
+            tn: "claude".into(),
+        };
+        fs::write(
+            temp.path().join("data/trash.jsonl"),
+            serde_json::to_string(&entry).unwrap() + "\n",
+        )
+        .unwrap();
         let mut app = test_app();
+        app.roots.claude_projects = temp.path().join("restore");
         app.roots.trash = Some(TrashPaths::from_data_root(temp.path().join("data")));
         app.results = vec![sample_trashed_hit_with_paths(
             Agent::Claude,
@@ -7585,6 +7405,7 @@ mod tests {
         let trash_source =
             archive.join("brain/session-123/.system_generated/logs/transcript.jsonl");
         let mut app = test_app();
+        app.roots.antigravity_home = temp.path().join("antigravity");
         app.roots.trash = Some(trash_paths);
         app.results = vec![sample_trashed_hit_with_paths(
             Agent::Antigravity,
@@ -7603,11 +7424,11 @@ mod tests {
         assert!(app
             .statusline
             .as_ref()
-            .is_some_and(|entry| entry.label == "restored session-123"));
+            .is_some_and(|entry| entry.label == "Restore completed: 1 sessions (1 files)"));
     }
 
     #[test]
-    fn undo_trash_prompts_before_overwriting_existing_file() {
+    fn undo_trash_blocks_overwriting_existing_file() {
         let temp = TempDir::new().unwrap();
         let trash_source = temp.path().join("data/trash/session.jsonl");
         let target = temp.path().join("restore/session.jsonl");
@@ -7626,19 +7447,13 @@ mod tests {
         app.run_session_action(super::SessionAction::UndoTrash)
             .unwrap();
 
-        assert!(matches!(
-            app.overlay,
-            super::Overlay::ConfirmRestore(super::RestorePrompt {
-                kind: super::RestorePromptKind::OverwriteFile,
-                ..
-            })
-        ));
+        assert!(matches!(app.overlay, super::Overlay::RestoreBlocked(_)));
 
         app.handle_overlay_key(crossterm_key(KeyCode::Enter))
             .unwrap();
 
-        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
-        assert!(!trash_source.exists());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "old\n");
+        assert!(trash_source.exists());
     }
 
     #[test]
@@ -7680,16 +7495,17 @@ mod tests {
             Agent::Claude,
             temp.path().to_path_buf(),
         )];
-        app.overlay = super::Overlay::ConfirmDelete(super::DeleteMode::Immediate);
+        app.run_session_action(super::SessionAction::DeleteImmediately)
+            .unwrap();
 
         app.handle_overlay_key(crossterm_key(KeyCode::Char('y')))
             .unwrap();
 
-        assert!(matches!(app.overlay, super::Overlay::None));
-        assert!(app
-            .statusline
-            .as_ref()
-            .is_some_and(|entry| entry.label.contains("failed to delete")));
+        assert!(
+            matches!(app.overlay, super::Overlay::Dependencies(ref review) if !review.plan.blockers.is_empty())
+        );
+        assert!(temp.path().exists());
+        assert!(!app.should_quit);
     }
 
     #[test]
@@ -7993,6 +7809,9 @@ mod tests {
             .to_owned();
         RulePreviewMatch {
             proposals: vec![RuleProposal {
+                reviewed_group: None,
+                dependency_policy: crate::lifecycle::DependencyPolicy::Skip,
+                included_by: None,
                 rule: "trash demo".to_owned(),
                 session_id: hit.session.session_id.clone(),
                 path: file_path,

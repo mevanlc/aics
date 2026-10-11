@@ -23,9 +23,9 @@ use crate::parse::{
 };
 use crate::scan::{scan_session_files, SessionFile, SessionRoots};
 use crate::settings::config_dir;
-use crate::trash::{TrashReason, TrashStore};
 
 mod cache;
+mod lifecycle;
 
 use cache::{
     fingerprint_session, CacheLookup, CachedDetermination, ContentFingerprint, RulesCache,
@@ -62,6 +62,9 @@ globalThis.rule = function(name, configOrCallback, callback) {
   }
   if (__aicsRuleNames.has(name)) {
     throw new Error(`duplicate rule name: ${name}`);
+  }
+  if (config.dependencyPolicy !== undefined && !["skip", "include"].includes(config.dependencyPolicy)) {
+    throw new TypeError(`rule ${name} config.dependencyPolicy must be skip or include`);
   }
   __aicsRuleNames.add(name);
   __aicsRules.push({ name, config, callback });
@@ -152,6 +155,7 @@ globalThis.__aicsRunRules = function(contextJson, applyAtStartupOnly) {
         }
         outcomes.push({
           rule: entry.name,
+          dependency_policy: entry.config.dependencyPolicy || "skip",
           action: actionName,
           reason,
         });
@@ -254,6 +258,15 @@ pub struct RuleDecision {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RuleProposal {
+    #[serde(
+        rename = "dependency_group",
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "lifecycle::serialize_review"
+    )]
+    pub reviewed_group: Option<crate::lifecycle::LifecyclePlan>,
+    pub dependency_policy: crate::lifecycle::DependencyPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub included_by: Option<std::path::PathBuf>,
     pub rule: String,
     pub session_id: String,
     pub path: PathBuf,
@@ -277,6 +290,8 @@ pub enum RuleAction {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AppliedRuleAction {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<crate::trash::TrashReason>,
     pub rule: String,
     pub session_id: String,
     pub path: PathBuf,
@@ -535,6 +550,8 @@ where
         .iter()
         .flat_map(|matched| matched.proposals.iter().cloned())
         .collect();
+
+    lifecycle::expand_preview(roots, &mut report);
 
     if matches!(options.mode, RulesMode::Apply) {
         apply_proposals(roots, &mut report);
@@ -1107,6 +1124,8 @@ fn boa_error(error: boa_engine::JsError) -> anyhow::Error {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RawRuleOutcome {
+    #[serde(default)]
+    dependency_policy: crate::lifecycle::DependencyPolicy,
     rule: String,
     action: Option<String>,
     reason: Option<String>,
@@ -1136,6 +1155,9 @@ fn collect_outcomes(
         match outcome.action.as_deref() {
             Some("trash") => {
                 let proposal = RuleProposal {
+                    reviewed_group: None,
+                    dependency_policy: outcome.dependency_policy,
+                    included_by: None,
                     rule: outcome.rule.clone(),
                     session_id: session.session_id.clone(),
                     path: file.path.clone(),
@@ -1144,13 +1166,16 @@ fn collect_outcomes(
                         reason: outcome.reason.clone(),
                     },
                 };
-                if seen_actions.insert(proposal.action.label()) {
+                if seen_actions.insert((proposal.action.label(), outcome.rule.clone())) {
                     proposals.push(proposal);
                 }
                 collect_rule_decision(&mut decisions, outcome, "trash");
             }
             Some("untrash") => {
                 let proposal = RuleProposal {
+                    reviewed_group: None,
+                    dependency_policy: outcome.dependency_policy,
+                    included_by: None,
                     rule: outcome.rule.clone(),
                     session_id: session.session_id.clone(),
                     path: file.path.clone(),
@@ -1159,7 +1184,7 @@ fn collect_outcomes(
                         reason: outcome.reason.clone(),
                     },
                 };
-                if seen_actions.insert(proposal.action.label()) {
+                if seen_actions.insert((proposal.action.label(), outcome.rule.clone())) {
                     proposals.push(proposal);
                 }
                 collect_rule_decision(&mut decisions, outcome, "untrash");
@@ -1307,107 +1332,7 @@ pub fn apply_rule_proposals(
     roots: &SessionRoots,
     proposals: &[RuleProposal],
 ) -> (Vec<AppliedRuleAction>, Vec<SkippedRuleAction>) {
-    let mut applied = Vec::new();
-    let mut skipped = Vec::new();
-    let Some(paths) = roots.trash.clone() else {
-        for proposal in proposals {
-            skipped.push(SkippedRuleAction {
-                rule: proposal.rule.clone(),
-                session_id: proposal.session_id.clone(),
-                path: proposal.path.clone(),
-                agent: proposal.agent,
-                action: proposal.action.clone(),
-                skip_reason: "trash store is unavailable".to_owned(),
-            });
-        }
-        return (applied, skipped);
-    };
-
-    let store = TrashStore::new(paths);
-    let tracker = LiveSessionTracker::new(roots.live_sessions.clone());
-    for proposal in proposals {
-        let _guard = match tracker.acquire_action_guard(proposal.agent, &proposal.session_id) {
-            Ok(guard) => guard,
-            Err(reason) => {
-                skipped.push(SkippedRuleAction {
-                    rule: proposal.rule.clone(),
-                    session_id: proposal.session_id.clone(),
-                    path: proposal.path.clone(),
-                    agent: proposal.agent,
-                    action: proposal.action.clone(),
-                    skip_reason: reason.message().to_owned(),
-                });
-                continue;
-            }
-        };
-        match &proposal.action {
-            RuleAction::Trash { reason } => {
-                if proposal.path.starts_with(store.paths().trash_dir.as_path()) {
-                    skipped.push(SkippedRuleAction {
-                        rule: proposal.rule.clone(),
-                        session_id: proposal.session_id.clone(),
-                        path: proposal.path.clone(),
-                        agent: proposal.agent,
-                        action: proposal.action.clone(),
-                        skip_reason: "session is already in trash".to_owned(),
-                    });
-                    continue;
-                }
-                let reason = TrashReason::Rule {
-                    name: proposal.rule.clone(),
-                    reason: reason.clone(),
-                };
-                match store.trash_session(&proposal.path, proposal.agent, &reason) {
-                    Ok(_) => applied.push(AppliedRuleAction {
-                        rule: proposal.rule.clone(),
-                        session_id: proposal.session_id.clone(),
-                        path: proposal.path.clone(),
-                        agent: proposal.agent,
-                        action: proposal.action.clone(),
-                    }),
-                    Err(error) => skipped.push(SkippedRuleAction {
-                        rule: proposal.rule.clone(),
-                        session_id: proposal.session_id.clone(),
-                        path: proposal.path.clone(),
-                        agent: proposal.agent,
-                        action: proposal.action.clone(),
-                        skip_reason: format!("{error:#}"),
-                    }),
-                }
-            }
-            RuleAction::Untrash { .. } => {
-                if !proposal.path.starts_with(store.paths().trash_dir.as_path()) {
-                    skipped.push(SkippedRuleAction {
-                        rule: proposal.rule.clone(),
-                        session_id: proposal.session_id.clone(),
-                        path: proposal.path.clone(),
-                        agent: proposal.agent,
-                        action: proposal.action.clone(),
-                        skip_reason: "session is already untrashed".to_owned(),
-                    });
-                    continue;
-                }
-                match store.restore_file(&proposal.path) {
-                    Ok(_) => applied.push(AppliedRuleAction {
-                        rule: proposal.rule.clone(),
-                        session_id: proposal.session_id.clone(),
-                        path: proposal.path.clone(),
-                        agent: proposal.agent,
-                        action: proposal.action.clone(),
-                    }),
-                    Err(error) => skipped.push(SkippedRuleAction {
-                        rule: proposal.rule.clone(),
-                        session_id: proposal.session_id.clone(),
-                        path: proposal.path.clone(),
-                        agent: proposal.agent,
-                        action: proposal.action.clone(),
-                        skip_reason: format!("{error:#}"),
-                    }),
-                }
-            }
-        }
-    }
-    (applied, skipped)
+    lifecycle::apply(roots, proposals)
 }
 
 fn file_matches_filters(file: &SessionFile, filters: &SearchFilters) -> bool {

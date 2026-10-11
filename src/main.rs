@@ -467,6 +467,7 @@ fn main() -> Result<()> {
         cli.codex_home.as_deref(),
         cli.antigravity_home.as_deref(),
     )?;
+    aics::lifecycle::recover(&resolved_paths.roots)?;
     let index_paths = aics::index::IndexPaths::discover_for_roots(&resolved_paths.roots)?;
     let rules_cache_path = index_paths.cache_root.join("rules-cache.json");
     let startup_rules_cache_path = index_paths.cache_root.join("startup-rules-cache.json");
