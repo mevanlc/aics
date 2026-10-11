@@ -40,6 +40,11 @@ Codex's session-name index, Claude Code's custom title (falling back to its slug
 or Antigravity's conversation title. Codex name changes are picked up during the
 next index sync even when the transcript has not changed.
 
+Text and JSON export filenames use the custom title or session ID, replacing
+whitespace, control characters, and characters forbidden on Windows, macOS, or
+Unix with `_`. Trailing periods become `_`, and Windows device names gain a
+leading `_`. Existing files are preserved by adding a numeric suffix.
+
 In `^F`, **Search content** (`v`) cycles Visible / All / Hidden with Space or a
 repeated mnemonic. Visible is the interactive default and follows the Visibility
 toggles. `all:`, `visible:`, and `hidden:` in the query temporarily override this

@@ -42,6 +42,32 @@ impl fmt::Display for WindowsFileNameIssue {
 
 impl std::error::Error for WindowsFileNameIssue {}
 
+/// Replace whitespace, control characters, and characters forbidden in Windows,
+/// macOS, or Unix filenames with underscores. Preserve other Unicode characters.
+/// Empty names, trailing periods, and Windows device names are made safe too.
+/// Length limits are left to the caller's validation.
+pub fn sanitize_filename_component(name: &str) -> String {
+    let mut sanitized: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_whitespace() || ch.is_control() || is_invalid_windows_character(ch) {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect();
+
+    let trailing_dots = sanitized.len() - sanitized.trim_end_matches('.').len();
+    sanitized.truncate(sanitized.len() - trailing_dots);
+    sanitized.extend(std::iter::repeat_n('_', trailing_dots));
+
+    if sanitized.is_empty() || is_reserved_windows_name(&sanitized) {
+        sanitized.insert(0, '_');
+    }
+    sanitized
+}
+
 pub fn validate_windows_filename_component(name: &str) -> Result<(), WindowsFileNameIssue> {
     validate_component(name, WINDOWS_MAX_COMPONENT_LEN)
 }
@@ -115,9 +141,41 @@ fn is_reserved_windows_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_windows_filename_component, validate_windows_stem_with_extension,
-        WindowsFileNameIssue,
+        sanitize_filename_component, validate_windows_filename_component,
+        validate_windows_stem_with_extension, WindowsFileNameIssue,
     };
+
+    #[test]
+    fn sanitizes_cross_platform_filename_components() {
+        for (input, expected) in [
+            ("../path", ".._path"),
+            ("..\\path", ".._path"),
+            ("/absolute/path", "_absolute_path"),
+            ("C:\\Users\\name", "C__Users_name"),
+            ("a<>:\"/\\|?*z", "a_________z"),
+            (" a  b\t\r\n\u{a0}c ", "_a__b____c_"),
+            ("résumé-日本語 (v2)!", "résumé-日本語_(v2)!"),
+            ("", "_"),
+            (".", "_"),
+            ("..", "__"),
+            ("report...", "report___"),
+            ("NUL", "_NUL"),
+            ("con.txt", "_con.txt"),
+            ("COM¹.log", "_COM¹.log"),
+        ] {
+            let sanitized = sanitize_filename_component(input);
+            assert_eq!(sanitized, expected, "input: {input:?}");
+            assert_eq!(validate_windows_filename_component(&sanitized), Ok(()));
+            assert_eq!(sanitize_filename_component(&sanitized), sanitized);
+        }
+    }
+
+    #[test]
+    fn sanitizes_control_characters() {
+        for ch in (0..=0x1f).chain(0x7f..=0x9f).filter_map(char::from_u32) {
+            assert_eq!(sanitize_filename_component(&format!("a{ch}b")), "a_b");
+        }
+    }
 
     #[test]
     fn accepts_plain_cross_platform_names() {

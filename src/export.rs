@@ -26,7 +26,8 @@ use chrono::{DateTime, Local, Utc};
 use serde_json::Value;
 
 use crate::fs_safename::{
-    validate_windows_filename_component, validate_windows_stem_with_extension,
+    sanitize_filename_component, validate_windows_filename_component,
+    validate_windows_stem_with_extension,
 };
 use crate::parse::{
     ExecStatus, MessageRole, PatchOp, PlanItemStatus, RuntimeMetrics, Session, SessionCell,
@@ -35,10 +36,10 @@ use crate::parse::{
 use crate::search_projection::visible_message_content;
 use crate::settings::DisplayOptions;
 
-/// Cap on the title slug appended to a Markdown export filename. Long enough to
+/// Cap on the title appended to a Markdown export filename. Long enough to
 /// stay recognizable, short enough that the date and session id stay visible in
 /// a narrow terminal.
-const MAX_TITLE_SLUG_CHARS: usize = 48;
+const MAX_TITLE_COMPONENT_CHARS: usize = 48;
 
 /// Source identity of a selectable viewer block, independent of wrapping and filters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -212,20 +213,22 @@ fn write_session_export_with_extension(
     write_unique(&cwd, &stem, extension, rendered)
 }
 
-/// Filename stem for the TUI's plain-text export: the custom title when the
-/// session has one, else the session id.
+/// Filename stem for TUI text and JSON exports: the custom title when the
+/// session has one, else the session id, sanitized for cross-platform use.
 pub fn export_stem_for_session(session: &Session) -> Result<String> {
-    let stem = session
-        .custom_title
-        .clone()
-        .unwrap_or_else(|| session.session_id.clone());
+    let stem = sanitize_filename_component(
+        session
+            .custom_title
+            .as_deref()
+            .unwrap_or(&session.session_id),
+    );
     validate_windows_filename_component(&stem)
         .with_context(|| format!("export stem `{stem}` is not Windows-safe"))?;
     Ok(stem)
 }
 
 /// Filename stem for a Markdown export: `YYYY-MM-DD-<agent>-<short id>` plus a
-/// title slug when the session has a custom title.
+/// sanitized lowercase title when the session has a custom title.
 ///
 /// The date sorts a batch chronologically, and the id ties each file back to the
 /// session it came from.
@@ -253,9 +256,9 @@ pub fn markdown_export_stem(session: &Session) -> String {
         session.agent,
         short_session_id(&session.session_id)
     );
-    if let Some(slug) = title_slug(session.custom_title.as_deref()) {
+    if let Some(title) = markdown_title_component(session.custom_title.as_deref()) {
         stem.push('-');
-        stem.push_str(&slug);
+        stem.push_str(&title);
     }
     stem
 }
@@ -304,29 +307,15 @@ fn short_session_id(session_id: &str) -> String {
     }
 }
 
-/// Lowercase the title and collapse every run of non-alphanumerics to a single
-/// dash. Titles with no ASCII alphanumerics slug to nothing, and the caller
-/// falls back to the date and id alone.
-fn title_slug(title: Option<&str>) -> Option<String> {
-    let title = title?.trim();
-    let mut slug = String::new();
-    let mut pending_separator = false;
-    for character in title.chars() {
-        if character.is_ascii_alphanumeric() {
-            if pending_separator && !slug.is_empty() {
-                slug.push('-');
-            }
-            pending_separator = false;
-            slug.push(character.to_ascii_lowercase());
-            if slug.chars().count() >= MAX_TITLE_SLUG_CHARS {
-                break;
-            }
-        } else {
-            pending_separator = true;
-        }
+/// Keep a short, lowercase title suffix using the same underscore replacement
+/// as TUI exports. Sanitize after truncation to handle newly trailing periods.
+fn markdown_title_component(title: Option<&str>) -> Option<String> {
+    let title = title?;
+    if title.is_empty() {
+        return None;
     }
-
-    (!slug.is_empty()).then_some(slug)
+    let shortened: String = title.chars().take(MAX_TITLE_COMPONENT_CHARS).collect();
+    Some(sanitize_filename_component(&shortened.to_ascii_lowercase()))
 }
 
 fn push_document_header(output: &mut String, session: &Session) {
@@ -1123,13 +1112,40 @@ mod tests {
     }
 
     #[test]
-    fn export_stem_rejects_windows_reserved_titles() {
+    fn export_stem_sanitizes_titles_and_session_ids() {
         let mut session = sample_session();
-        session.custom_title = Some("NUL".to_owned());
+        for (title, expected) in [("../path to/file", ".._path_to_file"), ("NUL", "_NUL")] {
+            session.custom_title = Some(title.to_owned());
+            assert_eq!(export_stem_for_session(&session).unwrap(), expected);
+            session.custom_title = None;
+            session.session_id = title.to_owned();
+            assert_eq!(export_stem_for_session(&session).unwrap(), expected);
+        }
+    }
 
-        let error = export_stem_for_session(&session).expect_err("reserved title");
+    #[test]
+    fn text_and_json_exports_resolve_collisions_after_sanitizing_titles() {
+        let temp = TempDir::new().unwrap();
+        let mut session = sample_session();
+        for extension in ["txt", "json"] {
+            session.custom_title = Some("../path to/file".to_owned());
+            let stem = export_stem_for_session(&session).unwrap();
+            let first = write_unique(temp.path(), &stem, extension, "first").unwrap();
+            assert_eq!(
+                first,
+                temp.path().join(format!(".._path_to_file.{extension}"))
+            );
 
-        assert!(format!("{error:#}").contains("not Windows-safe"));
+            session.custom_title = Some("..\\path:to\\file".to_owned());
+            let stem = export_stem_for_session(&session).unwrap();
+            let second = write_unique(temp.path(), &stem, extension, "second").unwrap();
+            assert_eq!(
+                second,
+                temp.path().join(format!(".._path_to_file-1.{extension}"))
+            );
+            assert_eq!(fs::read_to_string(first).unwrap(), "first");
+            assert_eq!(fs::read_to_string(second).unwrap(), "second");
+        }
     }
 
     #[test]
@@ -1179,16 +1195,25 @@ mod tests {
     }
 
     #[test]
-    fn markdown_stem_appends_slugified_custom_title() {
+    fn markdown_stem_appends_sanitized_custom_title() {
         let mut session = sample_session();
         session.custom_title = Some("  tmux TUI harness / rework!  ".to_owned());
 
         let stem = markdown_export_stem(&session);
 
         assert!(
-            stem.ends_with("-claude-a3f21c8e-tmux-tui-harness-rework"),
+            stem.ends_with("-claude-a3f21c8e-__tmux_tui_harness___rework!__"),
             "unexpected stem {stem}"
         );
+    }
+
+    #[test]
+    fn markdown_title_handles_unicode_and_truncation() {
+        let mut session = sample_session();
+        session.custom_title = Some(format!("{}..more", "日".repeat(47)));
+        let stem = markdown_export_stem(&session);
+        assert!(stem.ends_with(&format!("-{}_", "日".repeat(47))));
+        assert_eq!(validate_windows_stem_with_extension(&stem, "md"), Ok(()));
     }
 
     #[test]
@@ -1759,5 +1784,25 @@ mod tests {
         assert!(path.starts_with(&target));
         assert_eq!(path.extension().unwrap(), "md");
         assert!(fs::read_to_string(&path).unwrap().starts_with("# a3f21c8e"));
+    }
+
+    #[test]
+    fn markdown_export_sanitizes_path_titles_and_preserves_the_document_title() {
+        let temp = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.custom_title = Some("../Path to/file".to_owned());
+
+        let path = write_session_markdown(temp.path(), &session, DisplayOptions::SHOW_ALL).unwrap();
+
+        assert_eq!(path.parent(), Some(temp.path()));
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .ends_with("-.._path_to_file.md"));
+        assert!(fs::read_to_string(path)
+            .unwrap()
+            .starts_with("# ../Path to/file\n"));
     }
 }

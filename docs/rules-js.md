@@ -149,8 +149,11 @@ structure and camel-case property names documented by `rules.d.ts`.
 JSON cannot contain the lazy accessor functions available at runtime. Their
 complete values are materialized as strings under the corresponding property
 names: `text`, `stdout`, `stderr`, and patch-file `content`. Export filenames use
-the session's custom title when available, otherwise its session ID, and gain a
-numeric suffix instead of overwriting an existing file.
+the session's custom title when available, otherwise its session ID. Whitespace,
+control characters, and characters forbidden on Windows, macOS, or Unix become
+`_`; for example, `../path to/file` becomes `.._path_to_file.json`. Trailing periods
+become `_`, and Windows device names gain a leading `_`. Exports gain a numeric
+suffix instead of overwriting an existing file.
 
 ## Startup rules
 

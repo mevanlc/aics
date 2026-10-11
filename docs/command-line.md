@@ -163,8 +163,11 @@ batch. `-n`/`--num-results` caps how many sessions are exported, so raise it whe
 a batch could exceed the default of 2000.
 
 Filenames are `YYYY-MM-DD-AGENT-SESSIONID.md`, using the session's modified date
-in local time and the first eight characters of its id, plus a slug of the custom
-title when the session has one. A name already taken gains a `-1`, `-2`, … suffix
+in local time and the first eight characters of its id, plus a lowercase custom
+title suffix capped at 48 characters when the session has one. Whitespace, control
+characters, and characters forbidden on Windows, macOS, or Unix (including `/`
+and `\`) become `_`. Trailing periods become `_`, and Windows device names gain
+a leading `_`. A name already taken gains a `-1`, `-2`, … suffix
 rather than overwriting.
 
 The date is the modified date because that is what `--after` and `--before`
