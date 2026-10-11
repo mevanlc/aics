@@ -220,13 +220,22 @@ fn metadata(
     }
     let (thread_id, history_base, fork_parent) = if agent == Agent::Codex {
         let mut found = None;
-        for line in open_rollout(path)?.lines() {
+        for (line_number, line) in open_rollout(path)?.lines().enumerate() {
             let line = line?;
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
-            if value["type"] == "session_meta" {
-                let p = &value["payload"];
+            // Early Codex rollouts wrote the session header without an envelope.
+            let legacy_header = line_number == 0
+                && value.get("type").is_none()
+                && value.get("timestamp").is_some()
+                && value.get("id").is_some();
+            if value["type"] == "session_meta" || legacy_header {
+                let p = if legacy_header {
+                    &value
+                } else {
+                    &value["payload"]
+                };
                 let id = p["id"]
                     .as_str()
                     .filter(|s| !s.is_empty())

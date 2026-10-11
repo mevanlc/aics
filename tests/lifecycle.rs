@@ -81,6 +81,30 @@ impl Fixture {
 }
 
 #[test]
+fn legacy_codex_header_supports_dependency_discovery_and_restore() -> Result<()> {
+    let f = Fixture::new()?;
+    let legacy = f.rollout("legacy", "legacy", None)?;
+    fs::write(
+        &legacy,
+        "{\"id\":\"legacy\",\"timestamp\":\"2025-08-01T00:00:00Z\",\"instructions\":\"\"}\n\
+         {\"record_type\":\"state\"}\n\
+         {\"type\":\"message\",\"id\":\"message-id\",\"role\":\"user\",\"content\":[]}\n",
+    )?;
+    let child = f.rollout("child", "child", Some("legacy"))?;
+    let plan = f.plan(std::slice::from_ref(&legacy), Operation::Trash)?;
+    assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+    assert_eq!(plan.members.len(), 2);
+    assert_eq!(plan.members[&legacy].thread_id, "legacy");
+    f.execute(&plan)?;
+    let restore = f.plan(&[f.trash_path(&child)], Operation::Restore)?;
+    assert!(restore.blockers.is_empty(), "{:?}", restore.blockers);
+    assert_eq!(restore.members.len(), 2);
+    f.execute(&restore)?;
+    assert!(legacy.exists() && child.exists());
+    Ok(())
+}
+
+#[test]
 fn replacement_rollouts_move_and_restore_as_one_thread() -> Result<()> {
     let f = Fixture::new()?;
     let original = f.rollout("thread", "thread", None)?;
