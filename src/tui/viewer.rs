@@ -1696,6 +1696,60 @@ mod tests {
     };
 
     #[test]
+    fn codex_questions_and_answers_are_message_jump_targets() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sessions/codex/user_questions.jsonl");
+        let session = crate::parse::parse_codex_session_file(path)
+            .unwrap()
+            .unwrap();
+        let theme = Theme::default();
+        let options = DisplayOptions {
+            hide_tool_calls: true,
+            hide_tool_results: true,
+            ..DisplayOptions::SHOW_ALL
+        };
+        for message_only in [false, true] {
+            let mut session = session.clone();
+            if message_only {
+                session.cells.clear();
+            }
+            for width in [24, 100] {
+                let all = collect_message_rows(
+                    &session,
+                    None,
+                    &theme,
+                    width,
+                    MessageJumpScope::Any,
+                    options,
+                );
+                let user = collect_message_rows(
+                    &session,
+                    None,
+                    &theme,
+                    width,
+                    MessageJumpScope::UserOnly,
+                    options,
+                );
+                assert_eq!(all.len(), 6);
+                assert_eq!(user, [all[0], all[2], all[4]]);
+                let hidden = DisplayOptions {
+                    hide_user_messages: true,
+                    ..options
+                };
+                assert!(collect_message_rows(
+                    &session,
+                    None,
+                    &theme,
+                    width,
+                    MessageJumpScope::UserOnly,
+                    hidden
+                )
+                .is_empty());
+            }
+        }
+    }
+
+    #[test]
     #[allow(clippy::single_range_in_vec_init)] // Expected byte ranges, not integer collections.
     fn find_patterns_support_unicode_literals_regex_directives_and_zero_width() {
         assert_eq!(

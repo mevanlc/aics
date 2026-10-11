@@ -2,6 +2,7 @@ pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod codex_summary;
+mod codex_user_input;
 pub(crate) mod json_sources;
 pub mod search_fields;
 pub mod session;

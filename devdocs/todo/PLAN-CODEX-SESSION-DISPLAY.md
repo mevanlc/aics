@@ -1,21 +1,21 @@
 # TODO: Codex Session Presentation Enhancements
 
-Last reviewed: 2026-08-31
+Last reviewed: 2026-10-10
 
 The completed majority and original design record are archived in
 [done/PLAN-CODEX-SESSION-PRESENTATION-ENHANCEMENTS.md](done/PLAN-CODEX-SESSION-PRESENTATION-ENHANCEMENTS.md).
 
 The current implementation has the typed `SessionCell` foundation, session-info
 rendering, reasoning, structured tool/exec/patch cells, plan and web-search
-cells, and a runtime-metrics footer. The remaining work is narrower than the
-original plan.
+cells, and a runtime-metrics footer. Persisted `request_user_input` and
+`request_user_input_async` prompts now render as assistant turns with choices;
+blocking answers and wrapped async replies render as user turns. These follow
+conversation visibility/search filters, and known secret answers are masked.
+The remaining work is narrower than the original plan.
 
 ## Remaining work
 
-1. Add a dedicated persisted `request_user_input` cell when a stable rollout
-   shape is available. It should render prompts and choices distinctly and mask
-   secret responses.
-2. Re-scope list metadata enrichment around fields that rollouts actually
+1. Re-scope list metadata enrichment around fields that rollouts actually
    persist, such as model, provider, CLI version, and source. Git SHA and origin
    were removed from the design after real rollout inspection showed that they
    are not present.

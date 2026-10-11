@@ -342,6 +342,6 @@ fn index_visibility_and_format_rebuild_preserve_search_semantics() -> Result<()>
     let rebuilt = manager.sync_with_roots(&roots, false)?;
     assert_eq!(rebuilt.updated, 1);
     let state: Value = serde_json::from_str(&fs::read_to_string(&paths.state_file)?)?;
-    assert_eq!(state["format_version"], 20);
+    assert_eq!(state["format_version"], 21);
     Ok(())
 }

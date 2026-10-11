@@ -75,6 +75,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
     let mut fallback_preview_first_user = None::<String>;
     let mut session_info = SessionInfo::default();
     let mut cell_builder = CodexCellBuilder::default();
+    let mut user_input = super::codex_user_input::CodexUserInput::default();
     let mut forked_from_session_id = None::<String>;
     let mut history_base_session_id = None::<String>;
     let mut lineage_tracker = CodexLineageTracker::default();
@@ -142,8 +143,9 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
             Some("response_item") => {
                 if let Some(payload) = value.get("payload") {
                     lineage_tracker.capture(payload);
+                    let payload = user_input.normalize_response_item(payload);
                     handle_response_item(
-                        payload,
+                        &payload,
                         top_level_timestamp,
                         &mut messages,
                         &mut content_chunks,
@@ -151,20 +153,21 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
                         &mut fallback_preview_first_user,
                         &mut search_fields,
                     );
-                    cell_builder.handle_response_item(payload, top_level_timestamp);
+                    cell_builder.handle_response_item(&payload, top_level_timestamp);
                 }
             }
             Some("event_msg") => {
                 if let Some(payload) = value.get("payload") {
+                    let payload = user_input.normalize_event_msg(payload);
                     handle_event_msg(
-                        payload,
+                        &payload,
                         top_level_timestamp,
                         &mut messages,
                         &mut content_chunks,
                         &mut resume_preview_first_user,
                         &mut search_fields,
                     );
-                    cell_builder.handle_event_msg(payload, top_level_timestamp);
+                    cell_builder.handle_event_msg(&payload, top_level_timestamp);
                 }
             }
             Some("message")
@@ -174,8 +177,9 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
             | Some("custom_tool_call")
             | Some("custom_tool_call_output") => {
                 lineage_tracker.capture(&value);
+                let payload = user_input.normalize_response_item(&value);
                 handle_response_item(
-                    &value,
+                    &payload,
                     top_level_timestamp,
                     &mut messages,
                     &mut content_chunks,
@@ -183,7 +187,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
                     &mut fallback_preview_first_user,
                     &mut search_fields,
                 );
-                cell_builder.handle_response_item(&value, top_level_timestamp);
+                cell_builder.handle_response_item(&payload, top_level_timestamp);
             }
             Some(_) => {}
             None => {
@@ -653,7 +657,7 @@ fn handle_response_item(
     }
 }
 
-fn parse_embedded_json(value: &Value) -> Value {
+pub(super) fn parse_embedded_json(value: &Value) -> Value {
     value
         .as_str()
         .and_then(|text| serde_json::from_str(text).ok())
@@ -737,7 +741,7 @@ fn handle_event_msg(
     }
 }
 
-fn extract_message_text(content: Option<&Value>) -> Option<String> {
+pub(super) fn extract_message_text(content: Option<&Value>) -> Option<String> {
     let mut chunks = Vec::new();
 
     match content {
