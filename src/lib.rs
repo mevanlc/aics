@@ -7,6 +7,7 @@ pub mod live;
 pub mod logging;
 pub mod manpage;
 pub mod parse;
+pub mod program_lookup;
 pub mod ring_cursor;
 pub mod rules;
 pub mod scan;

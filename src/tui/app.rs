@@ -4,7 +4,6 @@ use std::env;
 use std::io;
 use std::panic;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -38,6 +37,7 @@ use crate::index::{
 use crate::parse::claude::read_claude_autosummaries;
 use crate::parse::codex_summary::read_codex_autosummaries;
 use crate::parse::{parse_session_file, Agent, Session};
+use crate::program_lookup;
 use crate::rules::{
     apply_rule_proposals, session_to_rule_context_json, RuleEvaluationError, RulePreviewMatch,
     RuleProposal, RulesReport,
@@ -4411,7 +4411,7 @@ fn run_claude_cwd_tool(
     session_id: &str,
     process_cwd: &Path,
 ) -> std::result::Result<(), ResumeErrorDialog> {
-    match Command::new(program)
+    match program_lookup::command(program)
         .arg("set")
         .arg(session_id)
         .arg(process_cwd)
@@ -4440,7 +4440,7 @@ fn run_codex_cwd_tool(
     process_cwd: &Path,
     codex_home: &Path,
 ) -> std::result::Result<(), ResumeErrorDialog> {
-    match Command::new(program)
+    match program_lookup::command(program)
         .arg("set")
         .arg("--codex-home")
         .arg(codex_home)
@@ -4588,7 +4588,7 @@ fn build_fork_in_cwd_command(
 fn execute_handoff(command: ExternalCommand) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
-    let mut process = Command::new(&command.program);
+    let mut process = program_lookup::command(&command.program);
     process.args(&command.args);
     for (key, value) in &command.env {
         process.env(key, value);
@@ -4602,7 +4602,7 @@ fn execute_handoff(command: ExternalCommand) -> Result<()> {
 
 #[cfg(not(unix))]
 fn execute_handoff(command: ExternalCommand) -> Result<()> {
-    let mut process = Command::new(&command.program);
+    let mut process = program_lookup::command(&command.program);
     process.args(&command.args);
     for (key, value) in &command.env {
         process.env(key, value);
