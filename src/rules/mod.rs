@@ -11,7 +11,7 @@ use boa_engine::{
     js_string, Context as BoaContext, JsArgs, JsNativeError, JsResult as BoaJsResult, JsString,
     JsValue, NativeFunction, Source,
 };
-use log::warn;
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::index::reader::fallback_snippet;
@@ -388,7 +388,13 @@ where
         }
     });
     let rules_must_be_validated = cache.as_ref().is_none_or(|cache| !cache.was_reused());
+    let phase_start = std::time::Instant::now();
     let files = scan_session_files(roots)?;
+    debug!(
+        "rules: scanned {} files in {:?}",
+        files.len(),
+        phase_start.elapsed()
+    );
     let tracker = LiveSessionTracker::new(roots.live_sessions.clone());
     let live_sessions = tracker.snapshot();
     let mut report = RulesReport::default();
@@ -478,6 +484,7 @@ where
         }
     }
 
+    let phase_start = std::time::Instant::now();
     if jobs.is_empty() {
         if rules_must_be_validated {
             JsRuleEngine::load(&options.rules_path)?;
@@ -509,6 +516,12 @@ where
             },
         )?;
     }
+
+    debug!(
+        "rules: evaluated {} uncached files in {:?}",
+        jobs.len(),
+        phase_start.elapsed()
+    );
 
     // Activity can change while workers are running, including for exact cache hits.
     let live_sessions = tracker.snapshot();
@@ -551,10 +564,26 @@ where
         .flat_map(|matched| matched.proposals.iter().cloned())
         .collect();
 
-    lifecycle::expand_preview(roots, &mut report);
+    let phase_start = std::time::Instant::now();
+    let mut graphs = lifecycle::DependencyGraphs::default();
+    lifecycle::expand_preview(roots, &mut report, &mut graphs);
+    debug!(
+        "rules: planned dependency groups for {} proposals in {:?}",
+        report.proposals.len(),
+        phase_start.elapsed()
+    );
 
     if matches!(options.mode, RulesMode::Apply) {
-        apply_proposals(roots, &mut report);
+        let phase_start = std::time::Instant::now();
+        let (applied, skipped) = lifecycle::apply(roots, &report.proposals, &mut graphs);
+        report.applied.extend(applied);
+        report.skipped.extend(skipped);
+        debug!(
+            "rules: applied {} and skipped {} actions in {:?}",
+            report.applied.len(),
+            report.skipped.len(),
+            phase_start.elapsed()
+        );
     }
 
     Ok(report)
@@ -1322,17 +1351,15 @@ fn dedupe_preview_matches(matches: Vec<RulePreviewMatch>) -> Vec<RulePreviewMatc
     deduped
 }
 
-fn apply_proposals(roots: &SessionRoots, report: &mut RulesReport) {
-    let (applied, skipped) = apply_rule_proposals(roots, &report.proposals);
-    report.applied.extend(applied);
-    report.skipped.extend(skipped);
-}
-
 pub fn apply_rule_proposals(
     roots: &SessionRoots,
     proposals: &[RuleProposal],
 ) -> (Vec<AppliedRuleAction>, Vec<SkippedRuleAction>) {
-    lifecycle::apply(roots, proposals)
+    lifecycle::apply(
+        roots,
+        proposals,
+        &mut lifecycle::DependencyGraphs::default(),
+    )
 }
 
 fn file_matches_filters(file: &SessionFile, filters: &SearchFilters) -> bool {

@@ -3,12 +3,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::live::LiveSessionTracker;
+use crate::live::{LiveSessionSnapshot, LiveSessionTracker};
+use crate::parse::session::fallback_session_id;
 use crate::parse::{parse_session_file, Agent};
 use crate::scan::SessionRoots;
 use crate::trash::{TrashEntry, TrashReason};
@@ -207,6 +209,31 @@ fn walk(path: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Claude Code also writes files holding only file-history snapshots. The parser reports no
+/// session for them, yet they are verifiable: read the same identity fields it would use, so a
+/// message-less file is a standalone member instead of blocking every Claude operation.
+fn claude_identity_without_messages(path: &Path) -> Result<(String, Option<String>)> {
+    let file = File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut session_id = None;
+    let mut fork_parent = None;
+    for line in BufReader::new(file).lines() {
+        // Like the parser, unreadable or malformed lines contribute nothing.
+        let Some(value) = line
+            .ok()
+            .and_then(|line| serde_json::from_str::<Value>(&line).ok())
+        else {
+            continue;
+        };
+        session_id = session_id.or_else(|| value["sessionId"].as_str().map(str::to_owned));
+        fork_parent =
+            fork_parent.or_else(|| value["forkedFrom"]["sessionId"].as_str().map(str::to_owned));
+    }
+    Ok((
+        session_id.unwrap_or_else(|| fallback_session_id(path)),
+        fork_parent,
+    ))
+}
+
 fn metadata(
     path: &Path,
     original: &Path,
@@ -267,12 +294,17 @@ fn metadata(
             None,
         )
     } else {
-        let session = parse_session_file(agent, path)?.context("session metadata is missing")?;
-        (
-            session.session_id,
-            None,
-            session.lineage.forked_from_session_id,
-        )
+        match parse_session_file(agent, path)? {
+            Some(session) => (
+                session.session_id,
+                None,
+                session.lineage.forked_from_session_id,
+            ),
+            None => {
+                let (thread_id, fork_parent) = claude_identity_without_messages(path)?;
+                (thread_id, None, fork_parent)
+            }
+        }
     };
     let rollout_id = if agent == Agent::Codex {
         rollout_id(original, &thread_id)
@@ -294,6 +326,42 @@ fn metadata(
             .modified()?
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos(),
+    })
+}
+
+/// Reading every active session dominates discovery in large homes, so spread it across cores.
+fn read_active_members(files: &[(PathBuf, bool)], agent: Agent) -> Vec<(&Path, Result<Member>)> {
+    fn read((path, archived): &(PathBuf, bool), agent: Agent) -> (&Path, Result<Member>) {
+        (path, metadata(path, path, agent, false, *archived))
+    }
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(files.len());
+    if workers <= 1 {
+        return files.iter().map(|file| read(file, agent)).collect();
+    }
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let handles = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut members = Vec::new();
+                    while let Some(file) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        members.push(read(file, agent));
+                    }
+                    members
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
     })
 }
 
@@ -323,9 +391,15 @@ impl DependencyGraph {
                 }
             }
         }
-        for path in files {
-            let archived = archive.as_ref().is_some_and(|p| path.starts_with(p));
-            graph.add(&path, &path, agent, false, archived);
+        let files = files
+            .into_iter()
+            .map(|path| {
+                let archived = archive.as_ref().is_some_and(|p| path.starts_with(p));
+                (path, archived)
+            })
+            .collect::<Vec<_>>();
+        for (path, member) in read_active_members(&files, agent) {
+            graph.insert(path, member);
         }
         if let Some(trash) = &roots.trash {
             match File::open(&trash.metadata_file) {
@@ -399,7 +473,11 @@ impl DependencyGraph {
     }
 
     fn add(&mut self, path: &Path, original: &Path, agent: Agent, trashed: bool, archived: bool) {
-        match metadata(path, original, agent, trashed, archived) {
+        self.insert(path, metadata(path, original, agent, trashed, archived));
+    }
+
+    fn insert(&mut self, path: &Path, member: Result<Member>) {
+        match member {
             Ok(member) => {
                 self.members.insert(path.into(), member);
             }
@@ -579,6 +657,11 @@ impl DependencyGraph {
 
     pub fn add_live_blockers(plan: &mut LifecyclePlan, roots: &SessionRoots) {
         let live = LiveSessionTracker::new(roots.live_sessions.clone()).snapshot();
+        Self::add_live_blockers_from(plan, &live);
+    }
+
+    /// Lets callers planning many groups share one process snapshot.
+    pub fn add_live_blockers_from(plan: &mut LifecyclePlan, live: &LiveSessionSnapshot) {
         for m in plan.members.values() {
             if let Some(reason) = live.protection_reason(m.agent, &m.thread_id) {
                 plan.blockers

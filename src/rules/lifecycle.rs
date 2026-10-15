@@ -6,6 +6,7 @@ use super::{
     SkippedRuleAction,
 };
 use crate::lifecycle::{self, DependencyGraph, DependencyPolicy, LifecyclePlan, Operation};
+use crate::live::LiveSessionTracker;
 use crate::parse::Agent;
 use crate::scan::SessionRoots;
 use crate::trash::TrashReason;
@@ -35,7 +36,49 @@ struct Group {
     triggers: Vec<RuleProposal>,
 }
 
-fn groups(roots: &SessionRoots, proposals: &[RuleProposal]) -> anyhow::Result<Vec<Group>> {
+/// Discovery reads every session in a provider home, so one rules run plans its preview
+/// expansion and its application from the same graphs. `lifecycle::execute` still
+/// rediscovers under the operation lock before anything moves.
+#[derive(Default)]
+pub(super) struct DependencyGraphs {
+    graphs: Vec<(Agent, Vec<PathBuf>, DependencyGraph)>,
+}
+
+impl DependencyGraphs {
+    fn get(
+        &mut self,
+        roots: &SessionRoots,
+        agent: Agent,
+        seeds: Vec<PathBuf>,
+    ) -> anyhow::Result<&DependencyGraph> {
+        let index = match self
+            .graphs
+            .iter()
+            .position(|(a, s, _)| *a == agent && *s == seeds)
+        {
+            Some(index) => index,
+            None => {
+                let start = std::time::Instant::now();
+                let graph = DependencyGraph::discover(roots, agent, &seeds)?;
+                log::debug!(
+                    "rules: discovered {agent:?} dependency graph ({} members, {} errors) in {:?}",
+                    graph.members.len(),
+                    graph.errors.len(),
+                    start.elapsed()
+                );
+                self.graphs.push((agent, seeds, graph));
+                self.graphs.len() - 1
+            }
+        };
+        Ok(&self.graphs[index].2)
+    }
+}
+
+fn groups(
+    roots: &SessionRoots,
+    proposals: &[RuleProposal],
+    graphs: &mut DependencyGraphs,
+) -> anyhow::Result<Vec<Group>> {
     let mut groups: Vec<Group> = Vec::new();
     for agent in [Agent::Claude, Agent::Codex, Agent::Antigravity] {
         let selected = proposals
@@ -45,10 +88,10 @@ fn groups(roots: &SessionRoots, proposals: &[RuleProposal]) -> anyhow::Result<Ve
         if selected.is_empty() {
             continue;
         }
-        let graph = DependencyGraph::discover(
+        let graph = graphs.get(
             roots,
             agent,
-            &selected.iter().map(|p| p.path.clone()).collect::<Vec<_>>(),
+            selected.iter().map(|p| p.path.clone()).collect(),
         )?;
         for proposal in selected {
             let mut seeds = BTreeSet::from([proposal.path.clone()]);
@@ -99,6 +142,7 @@ fn groups(roots: &SessionRoots, proposals: &[RuleProposal]) -> anyhow::Result<Ve
             }
         }
     }
+    let live = LiveSessionTracker::new(roots.live_sessions.clone()).snapshot();
     for group in &mut groups {
         let explicit = group
             .triggers
@@ -116,13 +160,17 @@ fn groups(roots: &SessionRoots, proposals: &[RuleProposal]) -> anyhow::Result<Ve
                 .blockers
                 .push("dependencyPolicy=skip: additional group members are required".into());
         }
-        DependencyGraph::add_live_blockers(&mut group.plan, roots);
+        DependencyGraph::add_live_blockers_from(&mut group.plan, &live);
     }
     Ok(groups)
 }
 
-pub(super) fn expand_preview(roots: &SessionRoots, report: &mut RulesReport) {
-    let planned = match groups(roots, &report.proposals) {
+pub(super) fn expand_preview(
+    roots: &SessionRoots,
+    report: &mut RulesReport,
+    graphs: &mut DependencyGraphs,
+) {
+    let planned = match groups(roots, &report.proposals, graphs) {
         Ok(groups) => groups,
         Err(error) => {
             for proposal in &report.proposals {
@@ -215,10 +263,11 @@ fn skip(p: &RuleProposal, reason: String) -> SkippedRuleAction {
 pub(super) fn apply(
     roots: &SessionRoots,
     proposals: &[RuleProposal],
+    graphs: &mut DependencyGraphs,
 ) -> (Vec<AppliedRuleAction>, Vec<SkippedRuleAction>) {
     let mut applied = Vec::new();
     let mut skipped = Vec::new();
-    let groups = match groups(roots, proposals) {
+    let groups = match groups(roots, proposals, graphs) {
         Ok(groups) => groups,
         Err(error) => {
             return (
@@ -318,4 +367,58 @@ pub(super) fn apply(
         }
     }
     (applied, skipped)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn dependency_graphs_discover_each_agent_and_seed_set_once() {
+        let temp = TempDir::new().unwrap();
+        let roots = SessionRoots {
+            live_sessions: Default::default(),
+            claude_projects: temp.path().join("claude"),
+            codex_sessions: temp.path().join("codex/sessions"),
+            antigravity_home: temp.path().join("antigravity"),
+            trash: None,
+        };
+        fs::create_dir_all(&roots.codex_sessions).unwrap();
+        let session = roots.codex_sessions.join("one.jsonl");
+        fs::write(
+            &session,
+            r#"{"type":"session_meta","payload":{"id":"one"}}"#,
+        )
+        .unwrap();
+        let mut graphs = DependencyGraphs::default();
+
+        let first = graphs
+            .get(&roots, Agent::Codex, vec![session.clone()])
+            .unwrap()
+            .members
+            .len();
+        // A file added after discovery stays invisible until the next rules run.
+        fs::write(
+            roots.codex_sessions.join("two.jsonl"),
+            r#"{"type":"session_meta","payload":{"id":"two"}}"#,
+        )
+        .unwrap();
+        let reused = graphs
+            .get(&roots, Agent::Codex, vec![session.clone()])
+            .unwrap()
+            .members
+            .len();
+        let fresh = graphs
+            .get(&roots, Agent::Codex, Vec::new())
+            .unwrap()
+            .members
+            .len();
+
+        assert_eq!((first, reused, fresh), (1, 1, 2));
+        assert_eq!(graphs.graphs.len(), 2);
+    }
 }

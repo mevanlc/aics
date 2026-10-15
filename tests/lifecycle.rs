@@ -350,6 +350,53 @@ fn malformed_metadata_and_duplicate_rollout_identity_block_removal() -> Result<(
 }
 
 #[test]
+fn message_less_claude_files_are_standalone_members() -> Result<()> {
+    let f = Fixture::new()?;
+    let project = f.roots.claude_projects.join("-tmp-test");
+    fs::create_dir_all(&project)?;
+    let selected = project.join("selected.jsonl");
+    fs::write(
+        &selected,
+        format!(
+            "{}\n",
+            serde_json::json!({"type":"user","sessionId":"selected","cwd":"/tmp/test","uuid":"u1","timestamp":"2026-09-30T11:55:37Z","message":{"role":"user","content":"hello"}})
+        ),
+    )?;
+    let snapshot_only = project.join("snapshot-only.jsonl");
+    fs::write(
+        &snapshot_only,
+        format!(
+            "{}\n",
+            serde_json::json!({"type":"file-history-snapshot","messageId":"m1","snapshot":{"messageId":"m1","trackedFileBackups":{},"timestamp":"2026-09-30T11:55:37Z"},"isSnapshotUpdate":false})
+        ),
+    )?;
+    // Lineage declared outside any message still links the file to its fork parent.
+    let forked = project.join("forked.jsonl");
+    fs::write(
+        &forked,
+        format!(
+            "{}\n",
+            serde_json::json!({"type":"file-history-snapshot","sessionId":"forked","forkedFrom":{"sessionId":"selected","messageUuid":"u1"}})
+        ),
+    )?;
+
+    let graph =
+        DependencyGraph::discover(&f.roots, Agent::Claude, std::slice::from_ref(&selected))?;
+    assert!(graph.errors.is_empty(), "{:?}", graph.errors);
+    assert_eq!(graph.members[&snapshot_only].thread_id, "snapshot-only");
+    let related = graph
+        .related(&BTreeSet::from([selected.clone()]))
+        .into_iter()
+        .map(|m| m.path)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(related, BTreeSet::from([selected.clone(), forked]));
+    let plan = graph.plan(BTreeSet::from([selected.clone()]), Operation::Trash);
+    assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+    assert_eq!(plan.members.keys().collect::<Vec<_>>(), vec![&selected]);
+    Ok(())
+}
+
+#[test]
 fn graph_discovery_is_read_only() -> Result<()> {
     let f = Fixture::new()?;
     let a = f.rollout("a", "a", None)?;
