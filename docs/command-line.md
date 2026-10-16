@@ -195,13 +195,13 @@ defaults, so a scripted export selects exactly what its flags asked for. Use
 
 `ITEM` is one of `project-docs-autodump`, `skill-text-injection`, `tool-calls`,
 `tool-results`, `user-tool-calls`, `user-tool-results`, `agent-replies`,
-`user-messages`, or `internal-context` — the nine
+`agent-thinking`, `user-messages`, or `internal-context` — the ten
 toggles the filter modal offers, each named after its `display_options` key in `settings.json` with
 `hide_` stripped.
 
 ```bash
 # A conversation-only export: no tool calls, results, or reasoning
-aics -g --export ./transcripts --hide tool-calls --hide tool-results deploy
+aics -g --export ./transcripts --hide tool-calls --hide tool-results --hide agent-thinking deploy
 
 # Start the TUI with tool results hidden on top of whatever is saved
 aics --hide tool-results deploy

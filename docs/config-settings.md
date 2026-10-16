@@ -41,7 +41,8 @@ stderr and in the TUI status line.
 - `summarize_command`: command used to generate a session summary
 - `summarize_prompt`: prompt template supplied to the summarizer
 - `display_options`: visibility of skill injection, tool calls, tool results,
-  agent replies, user messages, project-document boilerplate, and internal context
+  agent replies, agent thinking, user messages, project-document boilerplate, and
+  internal context
 - `default_filter`: saved startup scope, sort order, and search filters
 - `viewer_filter_exclusion`: `ask` (default), `keep`, or `close`; controls what happens
   when updated filters exclude the session open in the full viewer
@@ -58,9 +59,14 @@ Visible. Change **Search content** (`v`) in `Ctrl+F`; Enter applies it and `Ctrl
 also saves it. Query modifiers override the selection temporarily, without
 changing the saved preference. JSON/export modes ignore saved defaults.
 
+`display_options.hide_agent_thinking` defaults to `true`, including when the key
+is absent from existing settings. The **Agent Thinking** visibility toggle in
+`Ctrl+F` (mnemonic `8`) shows or hides Claude, Codex, and Antigravity thinking
+and reasoning blocks independently of **Agent Replies** (`7`).
+
 `display_options.hide_internal_context` defaults to `true`, including when the
 key is absent from existing settings. The **Internal Context** visibility toggle
-in `Ctrl+F` (mnemonic `9`) shows or hides user messages consisting entirely of
+in `Ctrl+F` (mnemonic `0`) shows or hides user messages consisting entirely of
 `<codex_internal_context …>` or `<goal_context>` blocks. Messages with ordinary
 prose outside the blocks or incomplete wrappers remain visible. Other generated
 context, such as environment blocks, keeps its existing visibility behavior.
@@ -83,6 +89,7 @@ Antigravity generated records use the existing visibility toggles:
 | Tool Results | Task completion/cancellation/stall output and execution errors |
 | Internal Context | Polling reminders, restart notices, and hook feedback |
 | Agent Replies | Worker messages and compaction checkpoints |
+| Agent Thinking | Planner thinking blocks |
 
 Original System/Summary roles are preserved. Unknown or malformed provider
 envelopes remain visible. User metadata/settings wrappers are still omitted

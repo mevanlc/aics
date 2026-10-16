@@ -436,7 +436,7 @@ fn push_cell(
             body,
             timestamp,
         } => {
-            if display_options.hide_agent_replies {
+            if display_options.hide_agent_thinking {
                 return;
             }
             let label = match header.as_deref().map(str::trim) {
@@ -1656,17 +1656,28 @@ mod tests {
     }
 
     #[test]
-    fn hiding_agent_replies_drops_reasoning_cells() {
-        let options = DisplayOptions {
+    fn hiding_agent_replies_and_agent_thinking_are_independent() {
+        let hide_replies = DisplayOptions {
             hide_agent_replies: true,
             ..DisplayOptions::SHOW_ALL
         };
+        let rendered_without_replies =
+            session_to_markdown_with_options(&session_with_every_cell_kind(), hide_replies);
 
-        let rendered = session_to_markdown_with_options(&session_with_every_cell_kind(), options);
+        assert!(!rendered_without_replies.contains("on it"));
+        assert!(rendered_without_replies.contains("thinking about it"));
+        assert!(rendered_without_replies.contains("run the tests"));
 
-        assert!(!rendered.contains("on it"));
-        assert!(!rendered.contains("thinking about it"));
-        assert!(rendered.contains("run the tests"));
+        let hide_thinking = DisplayOptions {
+            hide_agent_thinking: true,
+            ..DisplayOptions::SHOW_ALL
+        };
+        let rendered_without_thinking =
+            session_to_markdown_with_options(&session_with_every_cell_kind(), hide_thinking);
+
+        assert!(rendered_without_thinking.contains("on it"));
+        assert!(!rendered_without_thinking.contains("thinking about it"));
+        assert!(rendered_without_thinking.contains("run the tests"));
     }
 
     #[test]
@@ -1761,6 +1772,7 @@ mod tests {
             hide_user_tool_calls: true,
             hide_user_tool_results: true,
             hide_agent_replies: true,
+            hide_agent_thinking: true,
             hide_user_messages: true,
             hide_project_docs_autodump: true,
             hide_internal_context: true,

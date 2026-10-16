@@ -1172,7 +1172,7 @@ fn render_cell_into(
             body,
             timestamp,
         } => {
-            if display_options.hide_agent_replies {
+            if display_options.hide_agent_thinking {
                 return Vec::new();
             }
             render_reasoning_into(
@@ -1350,7 +1350,7 @@ fn bind_message_origins(
     if role == MessageRole::ToolCall {
         if let SourceBlock::Message(index) = &block {
             let index = *index;
-            if let Some(source) = session.search_fields.tool_call_sources.get(&index) {
+            if let Some(source) = session.search_fields.tool_call_source_for_message(index) {
                 let mut mapped = CellOrigins {
                     block: block.clone(),
                     line_starts: vec![0],

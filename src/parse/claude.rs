@@ -10,10 +10,10 @@ use serde_json::Value;
 
 use super::search_fields::{authored_user_text, SessionSearchFields, ToolCallSource};
 use super::session::{
-    cells_from_messages, earliest_timestamp, fallback_session_id, first_message_fields,
-    first_user_message, infer_derivation_type, last_message_fields, latest_timestamp,
-    metadata_created, metadata_modified, modified_ts, nonempty_trimmed, push_tool_message,
-    push_unique_chunk, push_unique_message, Agent, MessageRole, Session, SessionInfo,
+    earliest_timestamp, fallback_session_id, first_message_fields, first_user_message,
+    infer_derivation_type, last_message_fields, latest_timestamp, metadata_created,
+    metadata_modified, modified_ts, nonempty_trimmed, push_cell_from_message, push_tool_message,
+    push_unique_chunk, push_unique_message, Agent, MessageRole, Session, SessionCell, SessionInfo,
     SessionLineage,
 };
 use super::tool_format;
@@ -45,6 +45,8 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
     let mut model = None::<String>;
     let mut reasoning_effort = None::<String>;
     let mut messages = Vec::new();
+    let mut cells = Vec::new();
+    let mut last_tool_call_summary = None::<String>;
     let mut content_chunks = Vec::new();
     let mut search_fields = SessionSearchFields::default();
     let mut summary_chunks = Vec::new();
@@ -188,12 +190,38 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
                 for block in blocks {
                     match block {
                         MessageBlock::Text(text) => {
+                            let message_count_before = messages.len();
                             push_unique_message(&mut messages, role, text.clone(), entry_timestamp);
+                            if let Some(message) = messages.get(message_count_before) {
+                                push_cell_from_message(
+                                    &mut cells,
+                                    message,
+                                    &mut last_tool_call_summary,
+                                );
+                            }
+                            push_unique_chunk(&mut content_chunks, text);
+                        }
+                        MessageBlock::Thinking(text) => {
+                            if !matches!(
+                                cells.last(),
+                                Some(SessionCell::Reasoning {
+                                    header: None,
+                                    body,
+                                    ..
+                                }) if body == &text
+                            ) {
+                                cells.push(SessionCell::Reasoning {
+                                    header: None,
+                                    body: text.clone(),
+                                    timestamp: entry_timestamp,
+                                });
+                                last_tool_call_summary = None;
+                            }
                             push_unique_chunk(&mut content_chunks, text);
                         }
                         MessageBlock::ToolCall { name, text, input } => {
                             let label = tool_format::tool_label(&name).to_owned();
-                            let cell_index = messages.len();
+                            let message_index = messages.len();
                             push_tool_message(
                                 &mut messages,
                                 MessageRole::ToolCall,
@@ -201,18 +229,27 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
                                 text.clone(),
                                 entry_timestamp,
                             );
-                            if messages.len() > cell_index {
-                                search_fields.tool_call_sources.insert(
-                                    cell_index,
-                                    ToolCallSource {
-                                        raw_name: name,
-                                        input,
-                                    },
+                            if let Some(message) = messages.get(message_index) {
+                                push_cell_from_message(
+                                    &mut cells,
+                                    message,
+                                    &mut last_tool_call_summary,
                                 );
+                                let source = ToolCallSource {
+                                    raw_name: name,
+                                    input,
+                                };
+                                search_fields
+                                    .tool_call_sources
+                                    .insert(cells.len() - 1, source.clone());
+                                search_fields
+                                    .message_tool_call_sources
+                                    .insert(message_index, source);
                             }
                             push_unique_chunk(&mut content_chunks, text);
                         }
                         MessageBlock::ToolResult(text) => {
+                            let message_index = messages.len();
                             push_tool_message(
                                 &mut messages,
                                 MessageRole::ToolResult,
@@ -220,6 +257,13 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
                                 text.clone(),
                                 entry_timestamp,
                             );
+                            if let Some(message) = messages.get(message_index) {
+                                push_cell_from_message(
+                                    &mut cells,
+                                    message,
+                                    &mut last_tool_call_summary,
+                                );
+                            }
                             push_unique_chunk(&mut content_chunks, text);
                         }
                     }
@@ -255,17 +299,21 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
         }
     }
 
-    if messages.is_empty() {
+    if messages.is_empty() && cells.is_empty() {
         if summary_chunks.is_empty() {
             return Ok(None);
         }
 
+        let message_index = messages.len();
         push_unique_message(
             &mut messages,
             MessageRole::Summary,
             summary_chunks.join("\n\n"),
             modified,
         );
+        if let Some(message) = messages.get(message_index) {
+            push_cell_from_message(&mut cells, message, &mut last_tool_call_summary);
+        }
     }
 
     let created = created.or_else(|| metadata_created(path));
@@ -277,7 +325,6 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
     let derivation_type = infer_derivation_type(path, is_sidechain);
     let (first_msg_role, first_msg_content) = first_message_fields(&messages);
     let (last_msg_role, last_msg_content) = last_message_fields(&messages);
-    let cells = cells_from_messages(&messages);
     let session_info = if model.is_some() || reasoning_effort.is_some() {
         Some(SessionInfo {
             model,
@@ -346,7 +393,7 @@ fn capture_message_search_fields(
                     }
                     Some("thinking") => {
                         if let Some(text) = item.get("thinking").and_then(Value::as_str) {
-                            search_fields.push_agent(text);
+                            search_fields.push_agent(normalize_claude_text(text));
                         }
                     }
                     Some("tool_use") => {
@@ -524,6 +571,7 @@ fn extract_claude_summary_text(value: &Value) -> Option<String> {
 
 enum MessageBlock {
     Text(String),
+    Thinking(String),
     ToolCall {
         name: String,
         text: String,
@@ -570,8 +618,12 @@ fn extract_message_blocks(
                         }
                     }
                     Some("thinking") => {
+                        flush_text(&mut text_chunks, &mut blocks, is_meta);
                         if let Some(text) = item.get("thinking").and_then(Value::as_str) {
-                            push_unique_chunk(&mut text_chunks, normalize_claude_text(text));
+                            let normalized = normalize_claude_text(text);
+                            if !normalized.trim().is_empty() {
+                                blocks.push(MessageBlock::Thinking(normalized));
+                            }
                         }
                     }
                     Some("tool_use") => {
@@ -778,7 +830,10 @@ fn stringify_json(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_local_command_caveat_entry, normalize_claude_text, parse_claude_session_file};
+    use super::{
+        is_local_command_caveat_entry, normalize_claude_text, parse_claude_session_file,
+        MessageRole, SessionCell,
+    };
 
     #[test]
     fn normalizes_claude_local_command_wrappers() {
@@ -902,5 +957,71 @@ mod tests {
         assert_eq!(session.lineage.semantic_event_ids, ["child-reply"]);
         assert_eq!(session.lineage.inherited_event_ids, ["parent-user"]);
         assert_eq!(session.lineage.own_semantic_event_count, 1);
+    }
+
+    #[test]
+    fn parser_emits_reasoning_cells_for_thinking_blocks_and_aligns_tool_sources() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("thinking.jsonl");
+        let body = concat!(
+            "{\"type\":\"user\",\"sessionId\":\"s1\",\"uuid\":\"u1\",\"message\":{\"role\":\"user\",\"content\":\"investigate bug\"}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"s1\",\"parentUuid\":\"u1\",\"uuid\":\"a1\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"  ClaudeReasoningBeacon  \"},{\"type\":\"text\",\"text\":\"AssistantReplyBeacon\"},{\"type\":\"tool_use\",\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/bug.rs\"}}]}}\n",
+        );
+        std::fs::write(&path, body).expect("write fixture");
+
+        let mut session = parse_claude_session_file(&path)
+            .expect("parse")
+            .expect("session");
+
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.messages[0].content, "investigate bug");
+        assert_eq!(session.messages[1].content, "AssistantReplyBeacon");
+        assert_eq!(session.messages[2].role, MessageRole::ToolCall);
+
+        assert_eq!(session.cells.len(), 4);
+        assert!(matches!(
+            &session.cells[1],
+            SessionCell::Reasoning {
+                header: None,
+                body,
+                ..
+            } if body == "ClaudeReasoningBeacon"
+        ));
+        assert!(matches!(
+            &session.cells[2],
+            SessionCell::Message {
+                role: MessageRole::Assistant,
+                content,
+                ..
+            } if content == "AssistantReplyBeacon"
+        ));
+        assert!(matches!(&session.cells[3], SessionCell::ToolCall { .. }));
+        assert!(session.search_fields.tool_call_sources.contains_key(&3));
+        assert_eq!(
+            session
+                .search_fields
+                .tool_call_source_for_message(2)
+                .map(|source| source.raw_name.as_str()),
+            Some("Read")
+        );
+
+        let projection = crate::search_projection::SearchProjection::from_session(&session);
+        assert!(projection
+            .fields
+            .get("_vis_agent_thinking")
+            .is_some_and(|texts| texts[0].text.contains("ClaudeReasoningBeacon")));
+        assert!(projection
+            .fields
+            .get("_vis_agent")
+            .is_some_and(|texts| texts[0].text.contains("AssistantReplyBeacon")
+                && !texts[0].text.contains("ClaudeReasoningBeacon")));
+
+        session.cells.clear();
+        let fallback_projection =
+            crate::search_projection::SearchProjection::from_session(&session);
+        assert!(fallback_projection
+            .fields
+            .get("toolcall")
+            .is_some_and(|texts| texts[0].text.contains("/tmp/bug.rs")));
     }
 }

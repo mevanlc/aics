@@ -17,6 +17,7 @@ const PATHS_FIELD: &str = "paths";
 const VIS_ALWAYS_FIELD: &str = "_vis_always";
 const VIS_USER_FIELD: &str = "_vis_user";
 const VIS_AGENT_FIELD: &str = "_vis_agent";
+const VIS_AGENT_THINKING_FIELD: &str = "_vis_agent_thinking";
 const VIS_TOOL_CALL_FIELD: &str = "_vis_toolcall";
 const VIS_TOOL_RESULT_FIELD: &str = "_vis_toolresult";
 const VIS_TOOL_CALL_RESULT_FIELD: &str = "_vis_toolcall_result";
@@ -49,6 +50,7 @@ pub struct IndexSchema {
     pub vis_always: Field,
     pub vis_user: Field,
     pub vis_agent: Field,
+    pub vis_agent_thinking: Field,
     pub vis_tool_call: Field,
     pub vis_tool_result: Field,
     pub vis_tool_call_result: Field,
@@ -104,6 +106,8 @@ impl IndexSchema {
         let vis_always = builder.add_text_field(VIS_ALWAYS_FIELD, content_options.clone());
         let vis_user = builder.add_text_field(VIS_USER_FIELD, content_options.clone());
         let vis_agent = builder.add_text_field(VIS_AGENT_FIELD, content_options.clone());
+        let vis_agent_thinking =
+            builder.add_text_field(VIS_AGENT_THINKING_FIELD, content_options.clone());
         let vis_tool_call = builder.add_text_field(VIS_TOOL_CALL_FIELD, content_options.clone());
         let vis_tool_result =
             builder.add_text_field(VIS_TOOL_RESULT_FIELD, content_options.clone());
@@ -144,6 +148,7 @@ impl IndexSchema {
             vis_always,
             vis_user,
             vis_agent,
+            vis_agent_thinking,
             vis_tool_call,
             vis_tool_result,
             vis_tool_call_result,
@@ -202,6 +207,9 @@ impl IndexSchema {
                 .context("missing visibility field")?,
             vis_agent: schema
                 .get_field(VIS_AGENT_FIELD)
+                .context("missing visibility field")?,
+            vis_agent_thinking: schema
+                .get_field(VIS_AGENT_THINKING_FIELD)
                 .context("missing visibility field")?,
             vis_tool_call: schema
                 .get_field(VIS_TOOL_CALL_FIELD)

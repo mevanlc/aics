@@ -30,6 +30,7 @@ const SKILL: u16 = 32;
 const INTERNAL_CONTEXT: u16 = 64;
 const USER_TOOL_CALL: u16 = 128;
 const USER_TOOL_RESULT: u16 = 256;
+const AGENT_THINKING: u16 = 512;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VisibilityRequirement(pub u16);
@@ -39,6 +40,7 @@ impl VisibilityRequirement {
         let hidden_bit = |hidden, bit| if hidden { bit } else { 0 };
         let hidden = hidden_bit(options.hide_user_messages, USER)
             | hidden_bit(options.hide_agent_replies, AGENT)
+            | hidden_bit(options.hide_agent_thinking, AGENT_THINKING)
             | hidden_bit(options.hide_tool_calls, TOOL_CALL)
             | hidden_bit(options.hide_tool_results, TOOL_RESULT)
             | hidden_bit(options.hide_project_docs_autodump, PROJECT_DOCS)
@@ -54,6 +56,7 @@ impl VisibilityRequirement {
             0 => "_vis_always",
             USER => "_vis_user",
             AGENT => "_vis_agent",
+            AGENT_THINKING => "_vis_agent_thinking",
             TOOL_CALL => "_vis_toolcall",
             TOOL_RESULT => "_vis_toolresult",
             value if value == TOOL_CALL | TOOL_RESULT => "_vis_toolcall_result",
@@ -119,7 +122,7 @@ pub fn cell_visible(cell: &SessionCell, options: &DisplayOptions) -> bool {
             antigravity_kind,
             ..
         } => visible_message_content(*role, content, *antigravity_kind, *options).is_some(),
-        SessionCell::Reasoning { .. } => !options.hide_agent_replies,
+        SessionCell::Reasoning { .. } => !options.hide_agent_thinking,
         SessionCell::Exec { is_user: true, .. } => !options.hide_user_tool_calls,
         SessionCell::ToolCall { .. }
         | SessionCell::Exec { .. }
@@ -141,6 +144,7 @@ pub fn default_search_field_names(
         0,
         USER,
         AGENT,
+        AGENT_THINKING,
         TOOL_CALL,
         TOOL_RESULT,
         TOOL_CALL | TOOL_RESULT,
@@ -396,7 +400,7 @@ impl SearchProjection {
                     &message.content,
                     message.antigravity_kind,
                 );
-                if let Some(source) = session.search_fields.tool_call_sources.get(&index) {
+                if let Some(source) = session.search_fields.tool_call_source_for_message(index) {
                     result.segment(
                         SourceBlock::Message(index),
                         "raw_name",
@@ -602,9 +606,9 @@ impl SearchProjection {
             }
             SessionCell::Reasoning { header, body, .. } => {
                 if let Some(header) = header {
-                    add("header", header, AGENT);
+                    add("header", header, AGENT_THINKING);
                 }
-                add("body", body, AGENT);
+                add("body", body, AGENT_THINKING);
             }
             SessionCell::ToolCall {
                 tool,
@@ -771,8 +775,17 @@ impl SearchProjection {
             }
         } else {
             for cell in &session.cells {
-                if let SessionCell::Message { role, content, .. } = cell {
-                    visit(*role, content);
+                match cell {
+                    SessionCell::Message { role, content, .. } => {
+                        visit(*role, content);
+                    }
+                    SessionCell::Reasoning { header, body, .. } => {
+                        if let Some(header) = header {
+                            visit(MessageRole::Assistant, header);
+                        }
+                        visit(MessageRole::Assistant, body);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -995,7 +1008,7 @@ fn semantic_candidates(field: &str, session: &Session) -> BTreeMap<String, Vec<P
                 continue;
             }
             if field == "toolcall" {
-                if let Some(source) = session.search_fields.tool_call_sources.get(&index) {
+                if let Some(source) = session.search_fields.tool_call_source_for_message(index) {
                     insert(trimmed_source_text(
                         SourceBlock::Message(index),
                         "raw_name",

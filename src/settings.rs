@@ -106,6 +106,8 @@ pub struct DisplayOptions {
     pub hide_user_tool_results: bool,
     #[serde(default)]
     pub hide_agent_replies: bool,
+    #[serde(default = "default_hide_agent_thinking")]
+    pub hide_agent_thinking: bool,
     #[serde(default)]
     pub hide_user_messages: bool,
     #[serde(default = "default_hide_project_docs_autodump")]
@@ -282,6 +284,7 @@ impl DisplayOptions {
         hide_user_tool_calls: false,
         hide_user_tool_results: false,
         hide_agent_replies: false,
+        hide_agent_thinking: false,
         hide_user_messages: false,
         hide_project_docs_autodump: false,
         hide_internal_context: false,
@@ -291,6 +294,7 @@ impl DisplayOptions {
 impl Default for DisplayOptions {
     fn default() -> Self {
         Self {
+            hide_agent_thinking: default_hide_agent_thinking(),
             hide_project_docs_autodump: default_hide_project_docs_autodump(),
             hide_internal_context: default_hide_internal_context(),
             ..Self::SHOW_ALL
@@ -344,6 +348,10 @@ fn default_history_save_count() -> usize {
 
 fn default_history_save_dwell_ms() -> u64 {
     1000
+}
+
+fn default_hide_agent_thinking() -> bool {
+    true
 }
 
 fn default_hide_project_docs_autodump() -> bool {
@@ -789,6 +797,7 @@ mod tests {
         assert_eq!(parsed.preview_width_pct, 40);
         assert_eq!(parsed.display_options, DisplayOptions::default());
         assert!(!parsed.display_options.hide_skill_text_injection);
+        assert!(parsed.display_options.hide_agent_thinking);
         assert!(parsed.display_options.hide_project_docs_autodump);
         assert!(parsed.display_options.hide_internal_context);
     }
@@ -799,6 +808,7 @@ mod tests {
 
         assert!(parsed.hide_tool_calls);
         assert!(!parsed.hide_skill_text_injection);
+        assert!(parsed.hide_agent_thinking);
         assert!(parsed.hide_project_docs_autodump);
         assert!(parsed.hide_internal_context);
     }
@@ -809,6 +819,7 @@ mod tests {
         let path = temp.path().join("settings.json");
         for hide_internal_context in [false, true] {
             let options = DisplayOptions {
+                hide_agent_thinking: !hide_internal_context,
                 hide_internal_context,
                 ..DisplayOptions::default()
             };

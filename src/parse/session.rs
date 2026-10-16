@@ -882,46 +882,44 @@ pub fn cells_from_messages(messages: &[SessionMessage]) -> Vec<SessionCell> {
     // role lands between the pair.
     let mut last_tool_call_summary: Option<String> = None;
     for message in messages {
-        match message.role {
-            MessageRole::ToolCall => {
-                let summary = message.content.clone();
-                last_tool_call_summary = Some(summary.clone());
-                cells.push(SessionCell::ToolCall {
-                    tool: message.tool_name.clone().unwrap_or_default(),
-                    raw_name: message.tool_name.clone().unwrap_or_default(),
-                    summary,
-                    input: Value::Null,
-                    status: ToolStatus::Completed,
-                    timestamp: message.timestamp,
-                });
-            }
-            MessageRole::ToolResult => {
-                let call_summary = last_tool_call_summary.take();
-                cells.push(SessionCell::ToolResult {
-                    tool: message.tool_name.clone(),
-                    output: message.content.clone(),
-                    is_error: false,
-                    call_summary,
-                    timestamp: message.timestamp,
-                });
-            }
-            MessageRole::User => {
-                last_tool_call_summary = None;
-                if let Some(exec_cell) =
-                    parse_user_shell_command(&message.content, message.timestamp)
-                {
-                    cells.push(exec_cell);
-                } else {
-                    cells.push(SessionCell::Message {
-                        role: message.role,
-                        content: message.content.clone(),
-                        timestamp: message.timestamp,
-                        antigravity_kind: message.antigravity_kind,
-                    });
-                }
-            }
-            MessageRole::Assistant | MessageRole::System | MessageRole::Summary => {
-                last_tool_call_summary = None;
+        push_cell_from_message(&mut cells, message, &mut last_tool_call_summary);
+    }
+    cells
+}
+
+pub fn push_cell_from_message(
+    cells: &mut Vec<SessionCell>,
+    message: &SessionMessage,
+    last_tool_call_summary: &mut Option<String>,
+) {
+    match message.role {
+        MessageRole::ToolCall => {
+            let summary = message.content.clone();
+            *last_tool_call_summary = Some(summary.clone());
+            cells.push(SessionCell::ToolCall {
+                tool: message.tool_name.clone().unwrap_or_default(),
+                raw_name: message.tool_name.clone().unwrap_or_default(),
+                summary,
+                input: Value::Null,
+                status: ToolStatus::Completed,
+                timestamp: message.timestamp,
+            });
+        }
+        MessageRole::ToolResult => {
+            let call_summary = last_tool_call_summary.take();
+            cells.push(SessionCell::ToolResult {
+                tool: message.tool_name.clone(),
+                output: message.content.clone(),
+                is_error: false,
+                call_summary,
+                timestamp: message.timestamp,
+            });
+        }
+        MessageRole::User => {
+            *last_tool_call_summary = None;
+            if let Some(exec_cell) = parse_user_shell_command(&message.content, message.timestamp) {
+                cells.push(exec_cell);
+            } else {
                 cells.push(SessionCell::Message {
                     role: message.role,
                     content: message.content.clone(),
@@ -930,8 +928,16 @@ pub fn cells_from_messages(messages: &[SessionMessage]) -> Vec<SessionCell> {
                 });
             }
         }
+        MessageRole::Assistant | MessageRole::System | MessageRole::Summary => {
+            *last_tool_call_summary = None;
+            cells.push(SessionCell::Message {
+                role: message.role,
+                content: message.content.clone(),
+                timestamp: message.timestamp,
+                antigravity_kind: message.antigravity_kind,
+            });
+        }
     }
-    cells
 }
 
 pub fn first_message_fields(messages: &[SessionMessage]) -> (Option<MessageRole>, String) {

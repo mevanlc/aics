@@ -22,6 +22,10 @@ pub struct SessionSearchFields {
     /// corresponding cell index. Search and render provenance share these
     /// records without changing the cells' serialized/exported representation.
     pub tool_call_sources: BTreeMap<usize, ToolCallSource>,
+    /// Same raw tool call components keyed by `Session::messages` index for the
+    /// legacy message-only fallback when `Session::cells` contains reasoning
+    /// cells that shift cell indices.
+    pub message_tool_call_sources: BTreeMap<usize, ToolCallSource>,
     pub dirs: BTreeSet<String>,
     pub files: BTreeSet<String>,
     pub paths: BTreeSet<String>,
@@ -34,6 +38,12 @@ pub struct ToolCallSource {
 }
 
 impl SessionSearchFields {
+    pub fn tool_call_source_for_message(&self, index: usize) -> Option<&ToolCallSource> {
+        self.message_tool_call_sources
+            .get(&index)
+            .or_else(|| self.tool_call_sources.get(&index))
+    }
+
     pub fn push_user(&mut self, text: impl Into<String>) {
         push_text(&mut self.user, text);
     }

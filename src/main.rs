@@ -360,6 +360,7 @@ enum CliHideItem {
     UserToolCalls,
     UserToolResults,
     AgentReplies,
+    AgentThinking,
     UserMessages,
     InternalContext,
 }
@@ -377,6 +378,7 @@ impl CliHideItem {
             Self::UserToolCalls => options.hide_user_tool_calls = true,
             Self::UserToolResults => options.hide_user_tool_results = true,
             Self::AgentReplies => options.hide_agent_replies = true,
+            Self::AgentThinking => options.hide_agent_thinking = true,
             Self::UserMessages => options.hide_user_messages = true,
             Self::InternalContext => options.hide_internal_context = true,
         }
@@ -1777,6 +1779,8 @@ mod tests {
             "--hide",
             "agent-replies",
             "--hide",
+            "agent-thinking",
+            "--hide",
             "user-messages",
             "--hide",
             "internal-context",
@@ -1791,6 +1795,7 @@ mod tests {
         assert!(options.hide_user_tool_calls);
         assert!(options.hide_user_tool_results);
         assert!(options.hide_agent_replies);
+        assert!(options.hide_agent_thinking);
         assert!(options.hide_user_messages);
         assert!(options.hide_internal_context);
     }

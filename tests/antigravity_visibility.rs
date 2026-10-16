@@ -342,6 +342,88 @@ fn index_visibility_and_format_rebuild_preserve_search_semantics() -> Result<()>
     let rebuilt = manager.sync_with_roots(&roots, false)?;
     assert_eq!(rebuilt.updated, 1);
     let state: Value = serde_json::from_str(&fs::read_to_string(&paths.state_file)?)?;
-    assert_eq!(state["format_version"], 22);
+    assert_eq!(state["format_version"], 23);
+    Ok(())
+}
+
+#[test]
+fn agent_thinking_visibility_controls_planner_thinking_independently_of_agent_replies() -> Result<()>
+{
+    let temp = TempDir::new()?;
+    let path = transcript_path(&temp)?;
+    let record = json!({
+        "step_index": 0,
+        "source": "MODEL",
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "created_at": "2026-09-21T20:29:56Z",
+        "thinking": "THINKING_BEACON Inspecting visibility options.",
+        "content": "ASSISTANT_BEACON Ready to update filters."
+    });
+    fs::write(&path, format!("{record}\n"))?;
+    let session = parse_antigravity_session_file(&path)?.unwrap();
+    let theme = Theme::default();
+
+    // Hidden by default
+    let defaults = DisplayOptions::default();
+    let default_preview = render_session_text_with_options(&session, &theme, None, defaults)
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!default_preview.contains("THINKING_BEACON"));
+    assert!(default_preview.contains("ASSISTANT_BEACON"));
+    assert!(!session_to_markdown_with_options(&session, defaults).contains("THINKING_BEACON"));
+    assert!(!session_to_plain_text_with_options(&session, defaults).contains("THINKING_BEACON"));
+
+    // Visible when hide_agent_thinking is false, even if hide_agent_replies is true
+    let thinking_only = DisplayOptions {
+        hide_agent_replies: true,
+        hide_agent_thinking: false,
+        ..DisplayOptions::SHOW_ALL
+    };
+    let thinking_preview = render_session_text_with_options(&session, &theme, None, thinking_only)
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(thinking_preview.contains("THINKING_BEACON"));
+    assert!(!thinking_preview.contains("ASSISTANT_BEACON"));
+    assert!(session_to_markdown_with_options(&session, thinking_only).contains("THINKING_BEACON"));
+    assert!(!session_to_markdown_with_options(&session, thinking_only).contains("ASSISTANT_BEACON"));
+
+    let roots = SessionRoots {
+        live_sessions: Default::default(),
+        claude_projects: temp.path().join("missing-claude"),
+        codex_sessions: temp.path().join("missing-codex"),
+        antigravity_home: temp.path().to_owned(),
+        trash: None,
+    };
+    let paths = IndexPaths::from_root(temp.path().join("index-cache"));
+    let manager = IndexManager::with_paths(paths);
+    manager.sync_with_roots(&roots, false)?;
+    let engine = manager.open_search_engine()?;
+    let search = |query: &str, options| -> Result<bool> {
+        Ok(!engine
+            .search_with_display_options(
+                &SearchRequest {
+                    query: query.to_owned(),
+                    visibility_search: VisibilitySearch::Visible,
+                    scope: Scope::Global,
+                    limit: 10,
+                    sort: SortMode::Relevance,
+                    filters: SearchFilters::default(),
+                },
+                options,
+            )?
+            .is_empty())
+    };
+    assert!(!search("visible: THINKING_BEACON", defaults)?);
+    assert!(search("hidden: THINKING_BEACON", defaults)?);
+    assert!(search("all: THINKING_BEACON", defaults)?);
+    assert!(search("visible: THINKING_BEACON", thinking_only)?);
+    assert!(!search("visible: ASSISTANT_BEACON", thinking_only)?);
     Ok(())
 }

@@ -40,7 +40,7 @@ const FIELD_ORDER: [FilterField; 16] = [
     FilterField::Sort,
 ];
 
-const DISPLAY_ORDER: [DisplayField; 9] = [
+const DISPLAY_ORDER: [DisplayField; 10] = [
     DisplayField::ProjectDocsAutodump,
     DisplayField::SkillTextInjection,
     DisplayField::ToolCalls,
@@ -48,6 +48,7 @@ const DISPLAY_ORDER: [DisplayField; 9] = [
     DisplayField::UserToolCalls,
     DisplayField::UserToolResults,
     DisplayField::AgentReplies,
+    DisplayField::AgentThinking,
     DisplayField::UserMessages,
     DisplayField::InternalContext,
 ];
@@ -85,6 +86,7 @@ enum DisplayField {
     UserToolCalls,
     UserToolResults,
     AgentReplies,
+    AgentThinking,
     UserMessages,
     InternalContext,
 }
@@ -507,6 +509,10 @@ impl FilterModalState {
             DisplayField::AgentReplies => {
                 self.display_options.hide_agent_replies = !self.display_options.hide_agent_replies;
             }
+            DisplayField::AgentThinking => {
+                self.display_options.hide_agent_thinking =
+                    !self.display_options.hide_agent_thinking;
+            }
             DisplayField::UserMessages => {
                 self.display_options.hide_user_messages = !self.display_options.hide_user_messages;
             }
@@ -888,8 +894,9 @@ impl DisplayField {
             Self::UserToolCalls => '5',
             Self::UserToolResults => '6',
             Self::AgentReplies => '7',
-            Self::UserMessages => '8',
-            Self::InternalContext => '9',
+            Self::AgentThinking => '8',
+            Self::UserMessages => '9',
+            Self::InternalContext => '0',
         }
     }
 
@@ -908,6 +915,7 @@ impl DisplayField {
             Self::UserToolCalls => "User Tool Calls",
             Self::UserToolResults => "User Tool Results",
             Self::AgentReplies => "Agent Replies",
+            Self::AgentThinking => "Agent Thinking",
             Self::UserMessages => "User Messages",
             Self::InternalContext => "Internal Context",
         }
@@ -923,7 +931,8 @@ impl DisplayField {
             Self::ToolResults => "Hide tool results, including Antigravity task outcomes and execution errors.",
             Self::UserToolCalls => "Hide user shell command executions from previews and viewers.",
             Self::UserToolResults => "Hide user shell command outputs from previews and viewers.",
-            Self::AgentReplies => "Hide agent messages and reasoning, including Antigravity worker messages and checkpoints.",
+            Self::AgentReplies => "Hide agent messages, including Antigravity worker messages and checkpoints.",
+            Self::AgentThinking => "Hide agent thinking and reasoning blocks from previews and viewers.",
             Self::UserMessages => "Hide user messages from previews and viewers.",
             Self::InternalContext => {
                 "Hide memory citation footers, internal/goal context, and Antigravity polling, restart, and hook notices. Reply text stays visible."
@@ -940,6 +949,7 @@ impl DisplayField {
             DisplayField::UserToolCalls => options.hide_user_tool_calls,
             DisplayField::UserToolResults => options.hide_user_tool_results,
             DisplayField::AgentReplies => options.hide_agent_replies,
+            DisplayField::AgentThinking => options.hide_agent_thinking,
             DisplayField::UserMessages => options.hide_user_messages,
             DisplayField::InternalContext => options.hide_internal_context,
         };
@@ -1052,8 +1062,13 @@ mod tests {
         assert_eq!(DisplayField::UserToolCalls.value(defaults), "on");
         assert_eq!(DisplayField::UserToolResults.label(), "User Tool Results");
         assert_eq!(DisplayField::UserToolResults.value(defaults), "on");
+        assert_eq!(DisplayField::AgentThinking.label(), "Agent Thinking");
+        assert_eq!(DisplayField::AgentThinking.value(defaults), "off");
         assert_eq!(DisplayField::InternalContext.value(defaults), "off");
-        for (field, mnemonic) in super::DISPLAY_ORDER.into_iter().zip('1'..='9') {
+        for (field, mnemonic) in super::DISPLAY_ORDER
+            .into_iter()
+            .zip(('1'..='9').chain(std::iter::once('0')))
+        {
             assert_eq!(field.mnemonic(), mnemonic);
         }
     }
@@ -1448,6 +1463,60 @@ mod tests {
     }
 
     #[test]
+    fn agent_thinking_toggle_applies_saves_and_resets() {
+        let scope = Scope::Global;
+        let mut state = FilterModalState::new(
+            &scope,
+            &SearchFilters::default(),
+            SortMode::Time,
+            DisplayOptions::default(),
+            super::VisibilitySearch::Visible,
+        );
+        for _ in 0..2 {
+            state
+                .handle_key(
+                    KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE),
+                    &scope,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            *state.display_selected.current(),
+            DisplayField::AgentThinking
+        );
+        assert!(
+            !state
+                .build_update(&scope)
+                .unwrap()
+                .display_options
+                .hide_agent_thinking
+        );
+        let super::FilterOutcome::SaveDefault(update) = state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                &scope,
+            )
+            .unwrap()
+        else {
+            panic!("expected save-default action");
+        };
+        assert!(!update.display_options.hide_agent_thinking);
+        state
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                &scope,
+            )
+            .unwrap();
+        assert!(
+            state
+                .build_update(&scope)
+                .unwrap()
+                .display_options
+                .hide_agent_thinking
+        );
+    }
+
+    #[test]
     fn internal_context_toggle_applies_saves_and_resets() {
         let scope = Scope::Global;
         let mut state = FilterModalState::new(
@@ -1460,7 +1529,7 @@ mod tests {
         for _ in 0..2 {
             state
                 .handle_key(
-                    KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE),
+                    KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE),
                     &scope,
                 )
                 .unwrap();
