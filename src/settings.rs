@@ -74,6 +74,8 @@ pub struct Settings {
     pub session_separator: String,
     #[serde(default = "default_snippet_line_count")]
     pub snippet_line_count: usize,
+    #[serde(default)]
+    pub two_line_topbar: bool,
     #[serde(default = "default_history_save_count")]
     pub history_save_count: usize,
     #[serde(default = "default_history_save_dwell_ms")]
@@ -150,6 +152,7 @@ pub struct SettingsPatch {
     preview_width_pct: Option<u16>,
     session_separator: Option<String>,
     snippet_line_count: Option<usize>,
+    two_line_topbar: Option<bool>,
     history_save_count: Option<usize>,
     summarize_command: Option<String>,
     summarize_prompt: Option<String>,
@@ -159,6 +162,13 @@ pub struct SettingsPatch {
 }
 
 impl SettingsPatch {
+    pub fn two_line_topbar(enabled: bool) -> Self {
+        Self {
+            two_line_topbar: Some(enabled),
+            ..Self::default()
+        }
+    }
+
     pub fn viewer_filter_exclusion(choice: ViewerFilterExclusion) -> Self {
         Self {
             viewer_filter_exclusion: Some(choice),
@@ -254,6 +264,9 @@ impl SettingsPatch {
         }
         if let Some(value) = self.snippet_line_count {
             settings.snippet_line_count = value;
+        }
+        if let Some(value) = self.two_line_topbar {
+            settings.two_line_topbar = value;
         }
         if let Some(value) = self.history_save_count {
             settings.history_save_count = value;
@@ -384,6 +397,7 @@ impl Default for Settings {
             preview_width_pct: default_preview_width_pct(),
             session_separator: default_session_separator(),
             snippet_line_count: default_snippet_line_count(),
+            two_line_topbar: false,
             history_save_count: default_history_save_count(),
             history_save_dwell_ms: default_history_save_dwell_ms(),
             summarize_command: String::new(),
@@ -622,6 +636,7 @@ const SETTINGS_FIELD_NAMES: &[&str] = &[
     "preview_width_pct",
     "session_separator",
     "snippet_line_count",
+    "two_line_topbar",
     "history_save_count",
     "history_save_dwell_ms",
     "summarize_command",
@@ -678,6 +693,26 @@ mod tests {
     use super::*;
     use crate::ring_cursor::RingCursor;
     use tempfile::TempDir;
+
+    #[test]
+    fn topbar_preference_round_trips_without_overwriting_other_settings() {
+        let defaults: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!defaults.two_line_topbar);
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.json");
+        fs::write(&path, r#"{"theme":"late","custom":"keep"}"#).unwrap();
+        Settings::save_patch_to_path(&path, &SettingsPatch::two_line_topbar(true)).unwrap();
+        let saved = Settings::load_from_path(&path).unwrap();
+        assert!(saved.two_line_topbar);
+        assert_eq!(saved.theme, ThemeName::Late);
+        // A settings modal opened with an older draft cannot undo the toggle.
+        Settings::save_patch_to_path(&path, &SettingsPatch::settings_modal(&defaults)).unwrap();
+        assert!(Settings::load_from_path(&path).unwrap().two_line_topbar);
+        let raw: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["custom"], "keep");
+        Settings::save_patch_to_path(&path, &SettingsPatch::two_line_topbar(false)).unwrap();
+        assert!(!Settings::load_from_path(&path).unwrap().two_line_topbar);
+    }
 
     #[test]
     fn history_settings_defaults_and_modal_patch_preserve_json_only_dwell() {

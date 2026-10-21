@@ -71,6 +71,7 @@ pub(crate) fn parse_codex_session_lines(
     let mut lines = 0usize;
     let mut session_id = None::<String>;
     let mut cwd = None::<String>;
+    let mut branch = None::<String>;
     let mut created = None::<DateTime<Utc>>;
     let mut modified = None::<DateTime<Utc>>;
     let mut messages = Vec::new();
@@ -137,6 +138,11 @@ pub(crate) fn parse_codex_session_lines(
                 }
                 session_id = session_id.or_else(|| string_field(payload, "id"));
                 cwd = cwd.or_else(|| string_field(payload, "cwd"));
+                branch = branch.or_else(|| {
+                    payload
+                        .get("git")
+                        .and_then(|git| string_field(git, "branch"))
+                });
                 created = earliest_timestamp(created, extract_timestamp(payload.get("timestamp")));
                 update_session_info_from_meta(&mut session_info, payload);
             }
@@ -240,7 +246,7 @@ pub(crate) fn parse_codex_session_lines(
         session_id,
         agent: Agent::Codex,
         project,
-        branch: None,
+        branch,
         cwd,
         created,
         modified,

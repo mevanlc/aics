@@ -128,6 +128,118 @@ fn message(id: &str, role: &str, text: &str) -> Value {
     json!({"type":"response_item","payload":{"type":"message","id":id,"role":role,"content":[{"type":"input_text","text":text}]}})
 }
 
+#[test]
+fn codex_branch_follows_resume_metadata_and_refreshes_without_rollout_changes() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let written = fixture.write(
+        "thread",
+        "thread",
+        None,
+        None,
+        &[message("u", "user", "branch test")],
+    )?;
+    let contents = fs::read_to_string(&written.path)?;
+    let mut records = contents
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    records[0]["payload"]["git"] = json!({"branch":"recorded-branch"});
+    fs::write(
+        &written.path,
+        records
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>(),
+    )?;
+    assert_eq!(
+        parse_session_file(Agent::Codex, &written.path)?
+            .unwrap()
+            .branch
+            .as_deref(),
+        Some("recorded-branch")
+    );
+    assert_eq!(
+        parse_scanned_session_file(&fixture.logical()?[0])?
+            .unwrap()
+            .branch
+            .as_deref(),
+        Some("recorded-branch")
+    );
+
+    // Older/missing branch columns leave rollout metadata usable.
+    fixture.select("thread", &written.path)?;
+    let source = fixture.logical()?[0].conversation.clone().unwrap();
+    assert_eq!(
+        source.parse()?.unwrap().branch.as_deref(),
+        Some("recorded-branch")
+    );
+    let connection = Connection::open(
+        fixture
+            .roots
+            .codex_sessions
+            .parent()
+            .unwrap()
+            .join("state_5.sqlite"),
+    )?;
+    connection.execute_batch(
+        "ALTER TABLE threads ADD COLUMN git_branch TEXT;
+        UPDATE threads SET git_branch = 'picker-branch'",
+    )?;
+    assert!(!source.is_current());
+    let manager = fixture.manager();
+    manager.sync_with_roots(&fixture.roots, true)?;
+    let hits = manager
+        .open_search_engine()?
+        .search(&request("", SupersededFilter::Both))?;
+    assert_eq!(hits[0].session.branch.as_deref(), Some("picker-branch"));
+    let source = fixture.logical()?[0].conversation.clone().unwrap();
+    assert!(source.is_current());
+    // Snapshot round trips preserve SQLite's explicit NULL clears too.
+    let encoded = serde_json::to_vec(&*source)?;
+    let restored: ConversationSource = serde_json::from_slice(&encoded)?;
+    assert!(restored.is_current());
+    let unchanged_rollout = fs::read(&written.path)?;
+    connection.execute_batch("UPDATE threads SET git_branch = 'updated-branch'")?;
+    assert!(!source.is_current());
+    let stats = manager.sync_with_roots(&fixture.roots, false)?;
+    assert_eq!(stats.updated, 1);
+    let hits = manager
+        .open_search_engine()?
+        .search(&request("", SupersededFilter::Both))?;
+    assert_eq!(hits[0].session.branch.as_deref(), Some("updated-branch"));
+    let mut branch_request = request("", SupersededFilter::Both);
+    branch_request.filters.branch = Some("updated-branch".into());
+    assert_eq!(
+        manager.open_search_engine()?.search(&branch_request)?.len(),
+        1
+    );
+    connection.execute_batch("UPDATE threads SET git_branch = NULL")?;
+    manager.sync_with_roots(&fixture.roots, false)?;
+    assert_eq!(
+        manager
+            .open_search_engine()?
+            .search(&request("", SupersededFilter::Both))?[0]
+            .session
+            .branch,
+        None
+    );
+    let source = fixture.logical()?[0].conversation.clone().unwrap();
+    let restored: ConversationSource = serde_json::from_slice(&serde_json::to_vec(&*source)?)?;
+    assert!(restored.is_current());
+    assert_eq!(restored.parse()?.unwrap().branch, None);
+    // Legacy reconciliation fills missing Git fields from the rollout instead.
+    connection.execute_batch("UPDATE threads SET history_mode = 'legacy'")?;
+    assert_eq!(
+        parse_scanned_session_file(&fixture.logical()?[0])?
+            .unwrap()
+            .branch
+            .as_deref(),
+        Some("recorded-branch")
+    );
+    assert_eq!(fs::read(&written.path)?, unchanged_rollout);
+    Ok(())
+}
+
 fn request(query: &str, superseded: SupersededFilter) -> SearchRequest {
     SearchRequest {
         query: query.into(),

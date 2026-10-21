@@ -102,13 +102,14 @@ impl SourceStamp {
 pub struct ConversationSource {
     pub thread_id: String,
     pub custom_title: Option<String>,
+    pub branch: Option<String>,
     pub selected_path: PathBuf,
     pub segments: Vec<HistorySegment>,
     pub owned_paths: Vec<PathBuf>,
     pub history: SessionHistory,
     pub signature: u64,
     codex_home: PathBuf,
-    selected_db_path: Option<PathBuf>,
+    selected_db: Option<Selection>,
     stamps: Vec<SourceStamp>,
 }
 
@@ -144,10 +145,8 @@ impl ConversationSource {
             _ => return false,
         }
         match read_selections(&self.codex_home, Some(&self.thread_id)) {
-            Ok(selections) => {
-                selections.get(&self.thread_id).map(|s| &s.path) == self.selected_db_path.as_ref()
-            }
-            Err(_) => self.selected_db_path.is_none(),
+            Ok(selections) => selections.get(&self.thread_id) == self.selected_db.as_ref(),
+            Err(_) => self.selected_db.is_none(),
         }
     }
 }
@@ -162,6 +161,7 @@ struct HistoryBase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RolloutMetadata {
     thread_id: String,
+    branch: Option<String>,
     rollout_id: String,
     base: Option<HistoryBase>,
     paginated: bool,
@@ -185,10 +185,12 @@ struct Rollout {
     eligible: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Selection {
     path: PathBuf,
     paginated: bool,
+    branch: Option<String>,
+    has_branch: bool,
 }
 
 fn read_selections(home: &Path, thread: Option<&str>) -> Result<HashMap<String, Selection>> {
@@ -199,17 +201,18 @@ fn read_selections(home: &Path, thread: Option<&str>) -> Result<HashMap<String, 
     let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("cannot read {}", path.display()))?;
     connection.busy_timeout(Duration::from_millis(250))?;
-    let has_mode = connection
+    let columns = connection
         .prepare("PRAGMA table_info(threads)")?
         .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .iter()
-        .any(|column| column == "history_mode");
-    let query = if has_mode {
-        "SELECT id, rollout_path, history_mode FROM threads"
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mode = if columns.iter().any(|column| column == "history_mode") {
+        "history_mode"
     } else {
-        "SELECT id, rollout_path, 'legacy' FROM threads"
+        "'legacy'"
     };
+    let has_branch = columns.iter().any(|column| column == "git_branch");
+    let branch = if has_branch { "git_branch" } else { "NULL" };
+    let query = format!("SELECT id, rollout_path, {mode}, {branch} FROM threads");
     let query = if thread.is_some() {
         format!("{query} WHERE id = ?1")
     } else {
@@ -227,6 +230,8 @@ fn read_selections(home: &Path, thread: Option<&str>) -> Result<HashMap<String, 
                     home.join(path)
                 },
                 paginated: row.get::<_, String>(2)? == "paginated",
+                branch: row.get(3)?,
+                has_branch,
             },
         ))
     })?;
@@ -274,6 +279,7 @@ fn read_metadata(file: &SessionFile) -> Result<Option<RolloutMetadata>> {
     });
     Ok(Some(RolloutMetadata {
         thread_id: id.to_owned(),
+        branch: payload["git"]["branch"].as_str().map(str::to_owned),
         rollout_id: crate::lifecycle::rollout_id(
             file.original_path.as_deref().unwrap_or(&file.path),
             id,
@@ -621,6 +627,17 @@ pub(crate) fn logical_files(
             let mut source = ConversationSource {
                 thread_id: thread.clone(),
                 custom_title: names.get(&thread).cloned(),
+                // Codex's picker prefers SQLite Git metadata. In paginated
+                // mode a NULL explicitly clears the rollout's initial branch.
+                branch: match selection {
+                    Some(selection)
+                        if selection.has_branch
+                            && (selection.paginated || selection.branch.is_some()) =>
+                    {
+                        selection.branch.clone()
+                    }
+                    _ => tip.metadata.branch.clone(),
+                },
                 selected_path: tip.file.path.clone(),
                 segments,
                 owned_paths: members
@@ -630,7 +647,7 @@ pub(crate) fn logical_files(
                 history,
                 signature: 0,
                 codex_home: home.to_path_buf(),
-                selected_db_path: selection.map(|selection| selection.path.clone()),
+                selected_db: selection.cloned(),
                 stamps,
             };
             let digest = Sha256::digest(serde_json::to_vec(&source)?);

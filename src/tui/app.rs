@@ -1018,46 +1018,13 @@ impl App {
             )
         };
 
-        if hit.session.agent == Agent::Codex {
-            if let Some(title) = hit.session.custom_title.as_deref().map(str::trim) {
-                if !title.is_empty() {
-                    let title_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
-                    let highlight_style = title_style.patch(theme.search_match_style());
-                    self.ensure_snippet_query_plan();
-                    let mut projection = SearchProjection::default();
-                    for field in ["content", "_vis_always"] {
-                        projection.fields.insert(
-                            field.to_owned(),
-                            vec![crate::search_projection::ProjectedText {
-                                text: title.to_owned(),
-                                origins: Vec::new(),
-                            }],
-                        );
-                    }
-                    let ranges: Vec<_> = self
-                        .snippet_query_plan
-                        .as_ref()
-                        .and_then(|cache| cache.plan.as_ref())
-                        .map(|plan| {
-                            plan.field_matches(&projection)
-                                .1
-                                .into_iter()
-                                .map(|matched| matched.range)
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let mut spans = crate::tui::text_layout::highlight_ranges(
-                        &Text::from(Span::styled(title.to_owned(), title_style)),
-                        &ranges,
-                        highlight_style,
-                    )
-                    .lines
-                    .remove(0)
-                    .spans;
-                    spans.push(Span::styled(": ", Style::default().fg(theme.muted)));
-                    spans.append(&mut line.spans);
-                    line = Line::from(spans);
-                }
+        if !self.settings.two_line_topbar && hit.session.agent == Agent::Codex {
+            if let Some(mut title) = self.list_session_title_line(hit, theme) {
+                title
+                    .spans
+                    .push(Span::styled(": ", Style::default().fg(theme.muted)));
+                title.spans.append(&mut line.spans);
+                line = title;
             }
         }
 
@@ -1077,8 +1044,55 @@ impl App {
         line
     }
 
+    pub fn list_session_title_line(
+        &mut self,
+        hit: &SearchHit,
+        theme: &Theme,
+    ) -> Option<Line<'static>> {
+        let title = strip_terminal_escapes(hit.session.custom_title.as_deref()?)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if title.is_empty() {
+            return None;
+        }
+        let title_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
+        self.ensure_snippet_query_plan();
+        let mut projection = SearchProjection::default();
+        for field in ["content", "_vis_always"] {
+            projection.fields.insert(
+                field.to_owned(),
+                vec![crate::search_projection::ProjectedText {
+                    text: title.clone(),
+                    origins: Vec::new(),
+                }],
+            );
+        }
+        let ranges: Vec<_> = self
+            .snippet_query_plan
+            .as_ref()
+            .and_then(|cache| cache.plan.as_ref())
+            .map(|plan| {
+                plan.field_matches(&projection)
+                    .1
+                    .into_iter()
+                    .map(|matched| matched.range)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(
+            crate::tui::text_layout::highlight_ranges(
+                &Text::from(Span::styled(title, title_style)),
+                &ranges,
+                title_style.patch(theme.search_match_style()),
+            )
+            .lines
+            .remove(0),
+        )
+    }
+
     pub fn list_extra_row_count(&self) -> usize {
-        usize::from(self.rules_preview.is_some())
+        usize::from(self.rules_preview.is_some()) + usize::from(self.settings.two_line_topbar)
     }
 
     pub fn list_rule_decision(&self, hit: &SearchHit) -> Option<String> {
@@ -1279,6 +1293,7 @@ impl App {
         let session_separator = self.settings.session_separator.clone();
         let snippet_line_count = self.settings.snippet_line_count;
         let extra_row_count = self.list_extra_row_count();
+        let two_line_topbar = self.settings.two_line_topbar;
         list::render(
             frame,
             self,
@@ -1289,6 +1304,7 @@ impl App {
                 snippet_line_count,
                 extra_row_count,
                 preview_open: areas.preview.is_some(),
+                two_line_topbar,
             },
         );
 
@@ -1496,6 +1512,9 @@ impl App {
             KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => self.open_history(),
             KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.toggle_preview()
+            }
+            KeyCode::Char('o') if key.modifiers == KeyModifiers::CONTROL => {
+                self.toggle_two_line_topbar()
             }
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_filters()
@@ -3146,6 +3165,17 @@ impl App {
         self.preview_visible = !self.preview_visible;
         self.preview_render_cache = None;
         self.save_layout_prefs();
+    }
+
+    fn toggle_two_line_topbar(&mut self) {
+        let patch = SettingsPatch::two_line_topbar(!self.settings.two_line_topbar);
+        patch.apply_to(&mut self.settings);
+        self.ensure_selection_visible();
+        if let Err(err) = Settings::save_patch(&patch) {
+            self.statusline = Some(statusline::Entry::failed(format!(
+                "settings error: {err:#}"
+            )));
+        }
     }
 
     fn cycle_snippet_source(&mut self) {
@@ -7236,6 +7266,86 @@ mod tests {
             .unwrap()
             .body = "alpha stale summary".into();
         assert!(highlighted_text(&app.list_snippet_line(&hit, &theme)).is_empty());
+    }
+
+    #[test]
+    fn two_line_topbar_moves_highlighted_titles_out_of_snippets_for_all_agents() {
+        for agent in [Agent::Codex, Agent::Claude, Agent::Antigravity] {
+            let mut app = test_app();
+            app.settings.two_line_topbar = true;
+            app.committed_query = "title".into();
+            let mut hit = sample_hit(agent);
+            hit.session.custom_title = Some("  Named \x1b[31mtitle\x1b[0m\n next  ".into());
+            hit.snippet_html = "body text".into();
+            let theme = crate::tui::theme::Theme::default();
+            assert_eq!(app.list_snippet_line(&hit, &theme).to_string(), "body text");
+            let title = app.list_session_title_line(&hit, &theme).unwrap();
+            assert_eq!(title.to_string(), "Named title next");
+            assert!(title.spans.iter().any(
+                |span| span.content == "title" && span.style.bg == Some(theme.search_match_bg)
+            ));
+        }
+    }
+
+    #[test]
+    fn topbar_toggle_keeps_selection_and_mouse_rows_in_sync() {
+        let mut app = test_app();
+        app.preview_visible = false;
+        app.settings.snippet_line_count = 1;
+        app.results = (0..9)
+            .map(|i| {
+                let mut hit = sample_hit(Agent::Codex);
+                hit.session.custom_title = Some(format!("Card title {i}"));
+                hit.snippet_html = format!("Snippet body {i}");
+                hit
+            })
+            .collect();
+        app.selected = 5;
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let query = app.query.value().to_owned();
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert!(app.settings.two_line_topbar);
+        assert_eq!(app.query.value(), query);
+        assert_eq!(app.selected, 5);
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let area = app.last_layout.unwrap().list;
+        let buffer = terminal.backend().buffer();
+        let rows = (area.y + 1..area.bottom() - 1)
+            .map(|y| {
+                (area.x + 1..area.right() - 1)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let title_row = rows
+            .iter()
+            .position(|row| row.contains("Card title 5"))
+            .unwrap();
+        assert!(rows[title_row].contains("git: main"));
+        assert!(rows[title_row + 1].contains("Snippet body 5"));
+        for offset in [0, 1] {
+            assert_eq!(
+                app.list_index_at(area, area.y + 1 + title_row as u16 + offset),
+                Some(5)
+            );
+        }
+        let title_y = area.y + 1 + title_row as u16;
+        assert_eq!(
+            buffer[(area.x + 2, title_y)].bg,
+            app.theme.selected_list_header_bg()
+        );
+        app.handle_key(crossterm_key_mods(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+        ))
+        .unwrap();
+        assert!(!app.settings.two_line_topbar);
+        assert_eq!(app.selected, 5);
     }
 
     #[test]

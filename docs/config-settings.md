@@ -34,6 +34,11 @@ stderr and in the TUI status line.
 - `preview_width_pct`: the preview panel's percentage width
 - `session_separator`: separator shown between session messages
 - `snippet_line_count`: number of lines shown in session-card snippets
+- `two_line_topbar`: show session titles and recorded Git branches in a second
+  card header row; default `false`, toggled and saved with `Ctrl+O`. The snippet
+  keeps its configured line count and omits the title prefix in this view.
+  Codex branches follow its resume picker: state database metadata takes
+  precedence over the rollout's recorded branch when available.
 - `history_save_count`: maximum saved searches, default `100`; also editable in
   `Ctrl+S` as **Search History Count**. `0` clears and disables history.
 - `history_save_dwell_ms`: milliseconds a main search query must remain active

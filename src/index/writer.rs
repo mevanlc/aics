@@ -979,7 +979,7 @@ fn working_dir_search_terms(cwd: &str) -> Vec<String> {
 
 /// Bump when indexed/stored fields or searchable-content semantics change so old
 /// state files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 24;
+const INDEX_FORMAT_VERSION: u32 = 25;
 
 /// The manifest is stored with the index document, but is not part of CLI JSON.
 #[derive(Serialize, Deserialize)]

@@ -35,7 +35,7 @@ const RIGHT_PANEL_HORIZONTAL_CHROME: u16 = 3;
 const RIGHT_PANEL_MIN_WIDTH: u16 = RIGHT_PANEL_MIN_CONTENT_WIDTH + RIGHT_PANEL_HORIZONTAL_CHROME;
 const HELP_KEY_COLUMN_WIDTH: usize = 12;
 
-const SESSION_LIST_ITEMS: [HelpItem; 22] = [
+const SESSION_LIST_ITEMS: [HelpItem; 23] = [
     HelpItem::new(
         "Type",
         "filter sessions",
@@ -115,6 +115,11 @@ const SESSION_LIST_ITEMS: [HelpItem; 22] = [
         "^Shift ↑ / ↓",
         "jump user message",
         "When the preview pane is visible, jump backward or forward to the previous or next user-authored message, skipping assistant replies, tool calls, and tool results.",
+    ),
+    HelpItem::new(
+        "^O",
+        "two-line topbar",
+        "Toggle two-line session card topbars. The second row shows the session title and recorded Git branch, leaving the snippet for session text or summaries. This preference is saved for the next launch.",
     ),
     HelpItem::new(
         "^Y",

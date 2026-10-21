@@ -45,6 +45,7 @@ pub struct ListOptions<'a> {
     pub snippet_line_count: usize,
     pub extra_row_count: usize,
     pub preview_open: bool,
+    pub two_line_topbar: bool,
 }
 
 pub fn render(
@@ -121,6 +122,11 @@ pub fn render(
                         options.separator
                     };
                     let snippet = app.list_snippet_line(hit, theme);
+                    let title = options.two_line_topbar.then(|| {
+                        app.list_session_title_line(hit, theme).unwrap_or_else(|| {
+                            Line::styled("(untitled)", Style::default().fg(theme.muted))
+                        })
+                    });
                     let decision = app.list_rule_decision(hit);
                     let extra_line = app.list_rule_line(hit, theme);
                     let render_ctx = RenderItemContext {
@@ -130,7 +136,14 @@ pub fn render(
                         separator: item_separator,
                         snippet_line_count: options.snippet_line_count,
                     };
-                    render_item(hit, snippet, decision.as_deref(), extra_line, &render_ctx)
+                    render_item(
+                        hit,
+                        snippet,
+                        title,
+                        decision.as_deref(),
+                        extra_line,
+                        &render_ctx,
+                    )
                 })
                 .collect::<Vec<_>>()
         }
@@ -222,6 +235,7 @@ struct RenderItemContext<'a> {
 fn render_item(
     hit: &SearchHit,
     snippet: Line<'static>,
+    title: Option<Line<'static>>,
     decision: Option<&str>,
     extra_line: Option<Line<'static>>,
     render_ctx: &RenderItemContext<'_>,
@@ -312,6 +326,23 @@ fn render_item(
     }
 
     let mut lines = vec![header];
+    if let Some(title) = title {
+        let branch = crate::tui::ansi::strip_terminal_escapes(
+            hit.session.branch.as_deref().unwrap_or_default(),
+        )
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+        let branch = if branch.is_empty() {
+            branch
+        } else {
+            format!("git: {branch}")
+        };
+        lines.push(
+            title_branch_line(title, &branch, item_width, metadata_fg)
+                .patch_style(Style::default().bg(header_bg)),
+        );
+    }
     lines.extend(
         snippet_rows
             .into_iter()
@@ -334,6 +365,52 @@ fn render_item(
         );
     }
     ListItem::new(lines)
+}
+
+fn title_branch_line(
+    title: Line<'static>,
+    branch: &str,
+    width: usize,
+    metadata_fg: ratatui::style::Color,
+) -> Line<'static> {
+    let branch_width = Span::raw(branch).width();
+    let gap = usize::from(branch_width > 0).min(width);
+    let (title_budget, branch_budget) =
+        balanced_header_budgets(title.width(), branch_width, width.saturating_sub(gap));
+    let mut title = truncate_styled_line(title, title_budget);
+    let branch = truncate_with_ellipsis(branch, branch_budget);
+    let padding = width.saturating_sub(title.width() + Span::raw(&branch).width());
+    title.spans.insert(0, Span::raw(" "));
+    title.spans.push(Span::raw(" ".repeat(padding)));
+    title
+        .spans
+        .push(Span::styled(branch, Style::default().fg(metadata_fg)));
+    title
+}
+
+fn truncate_styled_line(line: Line<'static>, width: usize) -> Line<'static> {
+    if line.width() <= width {
+        return line;
+    }
+    if width == 0 {
+        return Line::default();
+    }
+    let mut remaining = width - 1;
+    let line_style = line.style;
+    let mut spans = Vec::new();
+    let mut style = Style::default();
+    for span in line.spans {
+        style = span.style;
+        let text = truncate_plain(&span.content, remaining);
+        remaining = remaining.saturating_sub(Span::raw(&text).width());
+        let truncated = text.len() < span.content.len();
+        spans.push(Span::styled(text, style));
+        if truncated || remaining == 0 {
+            break;
+        }
+    }
+    spans.push(Span::styled("…", style));
+    Line::from(spans).style(line_style)
 }
 
 /// Keep metadata left-justified and the project title right-justified while
@@ -594,6 +671,23 @@ mod tests {
     use crate::parse::{Agent, DerivationType};
     use crate::tui::theme::Theme;
 
+    #[test]
+    fn topbar_title_and_branch_fit_unicode_and_narrow_widths() {
+        let style = Style::default().fg(Color::White).bg(Color::Blue);
+        let title = Line::styled("Named 界界 e\u{301} session", style);
+        for width in 0..80 {
+            let line =
+                super::title_branch_line(title.clone(), "git: feature/界界", width, Color::Gray);
+            assert_eq!(line.width(), width + 1);
+            for span in &line.spans[1..line.spans.len() - 2] {
+                assert_eq!(line.style.patch(span.style), style);
+            }
+        }
+        let line = super::title_branch_line(title, "git: main", 50, Color::Gray);
+        assert!(line.to_string().starts_with(" Named 界界 e\u{301} session"));
+        assert!(line.to_string().ends_with("git: main"));
+    }
+
     fn plain_snippet(text: &str) -> Line<'static> {
         crate::tui::util::parse_highlighted_html(text, Style::default(), Style::default())
     }
@@ -801,7 +895,7 @@ mod tests {
             separator: "·",
             snippet_line_count: 0,
         };
-        let item = render_item(&hit, plain_snippet(""), None, None, &render_ctx);
+        let item = render_item(&hit, plain_snippet(""), None, None, None, &render_ctx);
         let backend = TestBackend::new(32, 2);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = ListState::default();
@@ -860,7 +954,7 @@ mod tests {
             separator: "·",
             snippet_line_count: 0,
         };
-        let item = render_item(&hit, plain_snippet(""), None, None, &render_ctx);
+        let item = render_item(&hit, plain_snippet(""), None, None, None, &render_ctx);
         let backend = TestBackend::new(32, 2);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = ListState::default();

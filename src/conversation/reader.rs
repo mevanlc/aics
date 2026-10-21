@@ -53,6 +53,7 @@ pub(super) fn parse(source: &ConversationSource) -> Result<Option<Session>> {
         // even when every user-facing record is inherited from another thread.
         session.session_id.clone_from(&source.thread_id);
         session.custom_title.clone_from(&source.custom_title);
+        session.branch.clone_from(&source.branch);
         session.lineage.rollout_id = Some(source.history.selected_rollout_id.clone());
         session.history = Some(lines.history);
     }

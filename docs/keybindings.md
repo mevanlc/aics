@@ -19,6 +19,7 @@ In the tables below, `^` means Ctrl.
 | `^S` | Open settings |
 | `^R` | Save the current search and open fuzzy-filtered search history |
 | `^V` | Show or hide the preview panel |
+| `^O` | Toggle two-line session-card topbars with the session title and recorded Git branch; saved between launches |
 | `^N` / `^P` | Jump to the next or previous highlighted preview match |
 | `Shift+↑` / `Shift+↓` | Jump to the previous or next message/event in the preview |
 | `^Shift+↑` / `^Shift+↓` | Jump to the previous or next user message in the preview |
