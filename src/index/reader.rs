@@ -907,7 +907,11 @@ fn stored_session_from_document(
         .get_first(field)
         .and_then(|value| value.as_str())
         .context("missing stored session field")?;
-    serde_json::from_str(payload).context("failed to deserialize stored session field")
+    let stored: crate::index::writer::IndexedSession =
+        serde_json::from_str(payload).context("failed to deserialize stored session field")?;
+    let mut session = stored.session;
+    session.source = stored.source.map(std::sync::Arc::new);
+    Ok(session)
 }
 
 fn matches_scope(scope: &Scope, session: &StoredSession) -> bool {
@@ -1235,6 +1239,8 @@ mod tests {
             trashed: false,
             original_path: None,
             superseded_by: None,
+            history: None,
+            source: None,
         }
     }
 

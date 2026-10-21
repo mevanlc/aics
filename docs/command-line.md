@@ -110,15 +110,17 @@ A superseded session is either a direct fork source whose stable semantic event
 IDs are fully present in a fork that continued beyond it, or a non-keeper member
 of a semantically equivalent fork family. Detection always requires the source
 format's explicit fork lineage, so unrelated sessions with similar text are
-never classified by transcript comparison. AICS also leaves an entire Codex fork
-family unclassified when any member has a reference-backed `history_base`,
-because reconstructing that family's tip requires another rollout JSONL. A
-trailing user/abort-only Codex turn is ignored when comparing equivalence.
+never classified by transcript comparison. Paginated Codex conversations are
+reconstructed through their bounded `history_base` references before comparison.
+Incomplete or unresolved histories remain visible and unclassified. A trailing
+user/abort-only Codex turn is ignored when comparing equivalence.
 Equivalent families keep a leaf descendant; equivalent sibling leaves are
 resolved by latest file modification time, then session ID. The default `no`
 hides these superseded sources and duplicates; use `--superseded yes` to review
-only them or `--superseded both` to restore the unfiltered session list. JSON
-results expose the keeper's session ID as `session.superseded_by`.
+only them or `--superseded both` to show both logical conversation sets. Older
+physical pages remain accessible through related-session review. JSON results
+expose the retained keeper's session ID as `session.superseded_by`, and Codex
+history status and source paths as `session.history`.
 
 ## Sorting and output
 

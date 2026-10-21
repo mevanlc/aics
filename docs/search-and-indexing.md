@@ -68,20 +68,34 @@ CPU detection falls back to one worker. A single job runs on the calling thread.
 Progress advances as reads complete; results are folded in the original file
 order before resolving relationships and building the index.
 
-Fork lineage and stable semantic event IDs are cached in the same state. AICS
-uses declared parent session IDs to form fork families, then checks direct
-parent/child candidates for event-set coverage and groups equal semantic event
-sets within each family. This avoids comparing unrelated transcripts. An
-ordinary search reads the cached `superseded_by` property; when a changed or
-deleted fork alters the family collapse, affected family members are refreshed
-in addition to the changed files.
+Codex history is indexed by logical conversation rather than physical page.
+AICS reads Codex's selected rollout from `state_5.sqlite` without modifying the
+database, then follows immutable `history_base` references. Each inherited range
+ends at its recorded ordinal and byte cutoff, so a fork or revert cannot acquire
+later records from its source. Plain, compressed, archived, and recorded trashed
+history can be inspected. An active conversation requiring trashed history is
+marked incomplete until its dependencies are restored.
 
-Some paginated Codex forks store only a local suffix and name another rollout in
-`session_meta.payload.history_base` for their inherited prefix. If any member of
-a declared fork/reference family has such an external history dependency, AICS
-does not mark any session in that family as superseded. This keeps the visible
-set of required source rollouts out of the superseded review set, where users may
-choose sessions for deletion.
+When database selection is unavailable, a unique terminal version can identify
+the conversation. Multiple candidates remain visible as unresolved versions;
+AICS never guesses the current version from file modification times. Missing or
+invalid history remains searchable with an incomplete-history notice and is
+excluded from supersession and automated cleanup. JSON results include
+`session.history` with `status`, `issues`, `selected_rollout_id`, and `source_paths`.
+
+Search, previews, viewers, exports, summary inputs, and JavaScript rules use the
+same reconstructed history. Older physical pages are available through
+**Enter → g**, not as additional Superseded results. Source fingerprints include
+the selected rollout, inherited files, and cutoffs; changes invalidate affected
+conversations and cached rule outcomes.
+
+Fork lineage and stable semantic event IDs are cached in the same state. AICS
+compares complete histories within explicitly declared fork families, checking
+direct parent/child coverage and grouping equal semantic event sets. Unrelated
+transcripts are never compared merely because they have similar text or titles.
+Ordinary searches read the cached `superseded_by` property. Required storage
+dependencies are protected independently by lifecycle checks, even when their
+logical conversation is superseded in search.
 
 Codex may leave a final aborted turn in the parent while creating a fork. AICS
 accepts two narrow forms of this exception. It ignores an otherwise-empty
@@ -96,8 +110,8 @@ event outside the aborted turn or a changed retry line still prevents
 supersession.
 
 Use `--rebuild-index` to discard and rebuild the current profile's index before
-searching. Use `--delete-index` to delete it and exit. Index format 20 adds memory
-citation visibility within assistant messages; older profiles rebuild
+searching. Use `--delete-index` to delete it and exit. Index format 24 groups
+paginated Codex conversations and records their source manifests; older profiles rebuild
 automatically. These coordinates stay inside the index and are excluded from
 session JSON and exports.
 

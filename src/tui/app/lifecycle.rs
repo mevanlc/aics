@@ -65,7 +65,7 @@ impl App {
                         return Ok(());
                     }
                 };
-                self.preview_cache.insert(member.path, session);
+                self.preview_cache.insert(hit.session.cache_key(), session);
                 self.viewer_hit = Some(hit);
                 self.dependency_before_viewer = Some(review);
                 self.overlay = Overlay::Viewer(ViewerState::with_search(""));
@@ -106,7 +106,7 @@ impl App {
             .retain(|hit| !plan.members.contains_key(&hit.session.file_path));
         self.selected = self.selected.min(self.results.len().saturating_sub(1));
         for path in plan.members.keys() {
-            self.preview_cache.remove(path);
+            self.preview_cache.retain(|(cached, _), _| cached != path);
             self.hidden_deleted_paths.insert(path.clone());
         }
         self.overlay = Overlay::None;

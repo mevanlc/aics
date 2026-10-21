@@ -3626,6 +3626,7 @@ mod tests {
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),
+            history: None,
         }
     }
 
@@ -3670,6 +3671,7 @@ mod tests {
             ],
             session_info: None,
             lineage: Default::default(),
+            history: None,
         }
     }
 
@@ -3705,6 +3707,7 @@ mod tests {
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),
+            history: None,
         }
     }
 
@@ -3791,6 +3794,7 @@ mod tests {
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),
+            history: None,
         }
     }
 
@@ -3835,6 +3839,7 @@ mod tests {
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),
+            history: None,
         }
     }
 }

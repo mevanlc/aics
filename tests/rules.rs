@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -121,7 +120,7 @@ fn rules_expose_missing_session_strings_as_empty() -> Result<()> {
             json: true,
             scope: Scope::Global,
             filters: SearchFilters::default(),
-            supersession: BTreeMap::new(),
+            supersession: Default::default(),
         },
         |_| {},
     )?;
@@ -192,14 +191,14 @@ fn rules_expose_supersession_keeper_id_and_invalidate_cached_outcomes() -> Resul
         json: true,
         scope: Scope::Global,
         filters: SearchFilters::default(),
-        supersession: BTreeMap::new(),
+        supersession: Default::default(),
     };
 
     let before = aics::rules::run_rules(&roots, &options)?;
     assert_eq!(before.proposals.len(), 1);
     assert_eq!(before.proposals[0].rule, "keeper");
 
-    options.supersession = supersession;
+    options.supersession = manager.supersession_snapshot()?;
     let after = aics::rules::run_rules(&roots, &options)?;
     assert_eq!(after.proposals.len(), 2);
     assert!(after
@@ -635,6 +634,8 @@ fn rule_proposals_trash_and_untrash_antigravity_bundles() -> Result<()> {
     };
     let trash_proposal = RuleProposal {
         reviewed_group: None,
+        source: None,
+        keeper_source: None,
         dependency_policy: aics::lifecycle::DependencyPolicy::Skip,
         included_by: None,
         rule: "trash antigravity".to_owned(),
@@ -670,6 +671,8 @@ fn rule_proposals_trash_and_untrash_antigravity_bundles() -> Result<()> {
         .join("brain/conversation-123/.system_generated/logs/transcript.jsonl");
     let untrash_proposal = RuleProposal {
         reviewed_group: None,
+        source: None,
+        keeper_source: None,
         dependency_policy: aics::lifecycle::DependencyPolicy::Skip,
         included_by: None,
         rule: "untrash antigravity".to_owned(),
@@ -748,6 +751,8 @@ fn applying_antigravity_lifecycle_action_rejects_invalid_bundle_path() -> Result
     };
     let proposal = RuleProposal {
         reviewed_group: None,
+        source: None,
+        keeper_source: None,
         dependency_policy: aics::lifecycle::DependencyPolicy::Skip,
         included_by: None,
         rule: "cleanup".to_owned(),
@@ -818,7 +823,7 @@ fn parallel_rules_keep_lazy_text_isolated_and_results_path_ordered() -> Result<(
             json: true,
             scope: Scope::Global,
             filters: SearchFilters::default(),
-            supersession: BTreeMap::new(),
+            supersession: Default::default(),
         },
     )?;
 
@@ -870,7 +875,7 @@ fn rules_progress_reports_processing_count() -> Result<()> {
             json: true,
             scope: Scope::Global,
             filters: SearchFilters::default(),
-            supersession: BTreeMap::new(),
+            supersession: Default::default(),
         },
         |event| events.push(event),
     )?;
@@ -929,7 +934,7 @@ fn non_empty_nothing_decision_is_available_to_interactive_preview_only() -> Resu
             json: true,
             scope: Scope::Global,
             filters: SearchFilters::default(),
-            supersession: BTreeMap::new(),
+            supersession: Default::default(),
         },
         |_| {},
     )?;

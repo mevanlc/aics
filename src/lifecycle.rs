@@ -89,6 +89,8 @@ impl Member {
                     trashed: self.trashed,
                     original_path: Some(self.original_path.clone()),
                     superseded_by: None,
+                    history: None,
+                    source: None,
                 });
         session.trashed = self.trashed;
         session.original_path = self.trashed.then(|| self.original_path.clone());
@@ -176,7 +178,7 @@ pub(crate) fn rollout_id(path: &Path, thread: &str) -> String {
 
 // Resolve existing ancestors too, so a trashed path under /private/var still belongs
 // to a configured /var home after its original parent directory was removed.
-fn resolved_path(path: &Path) -> PathBuf {
+pub(crate) fn resolved_path(path: &Path) -> PathBuf {
     if let Ok(canonical) = path.canonicalize() {
         return canonical;
     }

@@ -205,6 +205,15 @@ pub fn render_session_document_with_options(
     let mut blocks = Vec::new();
     let mut origin_blocks = Vec::new();
 
+    if let Some(notice) = session
+        .history
+        .as_ref()
+        .and_then(|history| history.notice())
+    {
+        lines.push(Line::from(notice));
+        lines.push(Line::default());
+    }
+
     if let Some(info) = session.session_info.as_ref() {
         let info_lines = render_session_info_block(info, theme, highlight_query);
         if !info_lines.is_empty() {
@@ -2730,6 +2739,7 @@ mod tests {
             cells,
             session_info: None,
             lineage: Default::default(),
+            history: None,
         }
     }
 
@@ -4446,6 +4456,7 @@ mod tests {
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),
+            history: None,
         };
 
         let text = render_session_text(&session, &theme, Some("alpha"));
@@ -4511,6 +4522,7 @@ mod tests {
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),
+            history: None,
         };
 
         let document = render_session_document(&session, &theme, None);
@@ -4560,6 +4572,7 @@ mod tests {
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),
+            history: None,
         };
 
         let doc = render_session_document(&session, &theme, None);
@@ -4719,6 +4732,7 @@ mod tests {
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),
+            history: None,
         };
         let text = render_composite_text(
             Some(&session),

@@ -6,4 +6,7 @@ pub use reader::{
     Scope, SearchEngine, SearchFilters, SearchHit, SearchRequest, SortMode, SupersededFilter,
     TrashFilter,
 };
-pub use writer::{IndexManager, IndexPaths, StoredSession, SyncOutcome, SyncProgress, SyncStats};
+pub use writer::{
+    IndexManager, IndexPaths, StoredSession, SupersessionSnapshot, SyncOutcome, SyncProgress,
+    SyncStats,
+};

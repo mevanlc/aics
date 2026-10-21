@@ -60,7 +60,14 @@ pub(crate) fn parse_codex_session_meta_lineage_file(
 pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session>> {
     let path = path.as_ref();
     let reader = crate::lifecycle::open_rollout(path)?;
+    parse_codex_session_lines(path, reader.lines(), false)
+}
 
+pub(crate) fn parse_codex_session_lines(
+    path: &Path,
+    input: impl Iterator<Item = std::io::Result<String>>,
+    allow_empty: bool,
+) -> Result<Option<Session>> {
     let mut lines = 0usize;
     let mut session_id = None::<String>;
     let mut cwd = None::<String>;
@@ -78,7 +85,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
     let mut history_base_rollout_id = None::<String>;
     let mut lineage_tracker = CodexLineageTracker::default();
 
-    for line in reader.lines() {
+    for line in input {
         let line = match line {
             Ok(line) => line,
             Err(error) => {
@@ -195,7 +202,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
         }
     }
 
-    if messages.is_empty() && content_chunks.is_empty() {
+    if !allow_empty && messages.is_empty() && content_chunks.is_empty() {
         return Ok(None);
     }
 
@@ -263,6 +270,7 @@ pub fn parse_codex_session_file(path: impl AsRef<Path>) -> Result<Option<Session
             trailing_aborted_turn,
             ..SessionLineage::default()
         },
+        history: None,
     }))
 }
 

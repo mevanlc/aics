@@ -416,6 +416,8 @@ pub struct Session {
     /// Stable source-format evidence used to identify direct fork supersession.
     #[serde(default, skip_serializing_if = "SessionLineage::is_empty")]
     pub lineage: SessionLineage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<crate::conversation::SessionHistory>,
 }
 
 impl Session {
@@ -431,9 +433,9 @@ pub struct SessionLineage {
     pub rollout_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from_session_id: Option<String>,
-    /// Codex rollout whose paginated history prefix must be read to reconstruct
-    /// this session. Sessions in a family containing such a reference are not
-    /// eligible for supersession because no single tip JSONL is self-contained.
+    /// Immutable Codex rollout supplying a bounded inherited prefix. Logical
+    /// sources reconstruct this history before comparing semantic event sets;
+    /// lifecycle planning protects the physical dependency independently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_base_rollout_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

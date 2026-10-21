@@ -326,6 +326,13 @@ fn push_document_header(output: &mut String, session: &Session) {
         .filter(|title| !title.is_empty())
         .unwrap_or(&session.session_id);
     output.push_str(&format!("# {title}\n\n"));
+    if let Some(notice) = session
+        .history
+        .as_ref()
+        .and_then(|history| history.notice())
+    {
+        output.push_str(&format!("> {notice}\n\n"));
+    }
 
     push_meta(
         output,
@@ -966,6 +973,7 @@ mod tests {
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),
+            history: None,
         }
     }
 

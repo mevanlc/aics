@@ -27,6 +27,7 @@ use crate::summary::SummarizeBackend;
 #[derive(Debug, Clone)]
 pub struct SummaryCommand {
     pub jsonl_path: PathBuf,
+    pub source: Option<std::sync::Arc<crate::conversation::ConversationSource>>,
     pub backend: SummarizeBackend,
     /// Shell template to execute. For built-in backends, caller should pass
     /// `backend.builtin_template()`; for `Custom`, pass the user's command.
@@ -137,15 +138,25 @@ fn run_one(command: &SummaryCommand) -> Result<PathBuf> {
         bail!("jsonl does not exist: {}", jsonl_path.display());
     }
 
-    let fp = fingerprint(jsonl_path)
-        .with_context(|| format!("failed to fingerprint {}", jsonl_path.display()))?;
-
     let work_dir = create_work_dir()?;
+    let _cleanup = WorkDirectory(work_dir.clone());
     let prompt_file = work_dir.join("prompt.txt");
     let output_file = work_dir.join("output.md");
+    let (input_path, fp) = if let Some(source) = &command.source {
+        let input_path = work_dir.join("conversation.jsonl");
+        let mut output = fs::File::create(&input_path)?;
+        let lines = source.write_jsonl(&mut output)?;
+        (input_path, source.summary_fingerprint(lines))
+    } else {
+        (
+            jsonl_path.to_path_buf(),
+            fingerprint(jsonl_path)
+                .with_context(|| format!("failed to fingerprint {}", jsonl_path.display()))?,
+        )
+    };
 
     // Expand the prompt first. Only `{{jsonl_path}}` is meaningful here.
-    let jsonl_path_str = jsonl_path.to_string_lossy().into_owned();
+    let jsonl_path_str = input_path.to_string_lossy().into_owned();
     let jsonl_dir_str = jsonl_path
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
@@ -203,12 +214,27 @@ fn run_one(command: &SummaryCommand) -> Result<PathBuf> {
         bail!("summarizer produced empty output");
     }
 
+    if command
+        .source
+        .as_ref()
+        .is_some_and(|source| !source.is_current())
+    {
+        bail!("conversation history changed while the summary was generated");
+    }
     let sidecar = SummarySidecar::new(jsonl_path, &fp, command.backend, body);
     let target = sidecar_path(jsonl_path);
     sidecar.write_atomic(&target)?;
 
     let _ = fs::remove_dir_all(&work_dir);
     Ok(target)
+}
+
+struct WorkDirectory(PathBuf);
+
+impl Drop for WorkDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 fn create_work_dir() -> Result<PathBuf> {
@@ -298,6 +324,7 @@ mod tests {
         worker
             .send(SummaryCommand {
                 jsonl_path: jsonl.clone(),
+                source: None,
                 backend: SummarizeBackend::Custom,
                 command_template: template.to_owned(),
                 prompt_template: prompt.to_owned(),
@@ -352,6 +379,7 @@ mod tests {
         worker
             .send(SummaryCommand {
                 jsonl_path: jsonl,
+                source: None,
                 backend: SummarizeBackend::Custom,
                 command_template: template.to_owned(),
                 prompt_template: prompt.to_owned(),

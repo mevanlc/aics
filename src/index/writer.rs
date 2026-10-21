@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use tantivy::directory::error::LockError;
 use tantivy::{Index, TantivyDocument, TantivyError, Term};
 
+use crate::conversation::{ConversationSource, HeaderCache, SessionHistory};
 use crate::index::reader::SearchEngine;
 use crate::index::schema::IndexSchema;
 use crate::live::LiveSessionTracker;
@@ -58,9 +59,27 @@ pub struct StoredSession {
     pub original_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<SessionHistory>,
+    #[serde(skip)]
+    pub source: Option<std::sync::Arc<ConversationSource>>,
 }
 
 impl StoredSession {
+    pub fn parse(&self) -> Result<Option<Session>> {
+        match &self.source {
+            Some(source) => source.parse(),
+            None => crate::parse::parse_session_file(self.agent, &self.file_path),
+        }
+    }
+
+    pub fn cache_key(&self) -> (PathBuf, Option<u64>) {
+        (
+            self.file_path.clone(),
+            self.source.as_ref().map(|source| source.signature),
+        )
+    }
+
     pub fn has_resume_preview(&self) -> bool {
         !self.first_user_msg_content.trim().is_empty()
     }
@@ -89,6 +108,8 @@ impl From<&Session> for StoredSession {
             trashed: false,
             original_path: None,
             superseded_by: None,
+            history: session.history.clone(),
+            source: None,
         }
     }
 }
@@ -103,6 +124,7 @@ impl StoredSession {
         stored.trashed = file.trashed;
         stored.original_path = file.original_path.clone();
         stored.superseded_by = superseded_by;
+        stored.source.clone_from(&file.conversation);
         stored
     }
 }
@@ -113,6 +135,39 @@ pub struct SyncStats {
     pub updated: usize,
     pub skipped: usize,
     pub removed: usize,
+}
+
+/// A supersession decision is valid only for the two source versions compared
+/// during indexing. Rules validate it against their freshly resolved catalog.
+#[derive(Debug, Clone, Default)]
+pub struct SupersessionSnapshot {
+    entries: Vec<RelationshipSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct RelationshipSnapshot {
+    path: PathBuf,
+    fingerprint: FileFingerprint,
+    keeper_id: String,
+    keeper_path: PathBuf,
+    keeper_fingerprint: FileFingerprint,
+}
+
+impl SupersessionSnapshot {
+    pub(crate) fn current(&self, files: &[SessionFile]) -> BTreeMap<PathBuf, String> {
+        let current = files
+            .iter()
+            .map(|file| (file.path.as_path(), FileFingerprint::from(file)))
+            .collect::<HashMap<_, _>>();
+        self.entries
+            .iter()
+            .filter(|entry| {
+                current.get(entry.path.as_path()) == Some(&entry.fingerprint)
+                    && current.get(entry.keeper_path.as_path()) == Some(&entry.keeper_fingerprint)
+            })
+            .map(|entry| (entry.path.clone(), entry.keeper_id.clone()))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -383,14 +438,18 @@ impl IndexManager {
             let mut scan_progress = ScanToSyncProgress { progress };
             scan_session_files_with_progress(roots, &mut scan_progress)?
         };
+        let (scanned_files, headers) =
+            crate::conversation::logical_files(roots, scanned_files, &previous_state.headers)?;
         // Codex /rename updates its name index without touching the rollout.
         // Compare each session's name so unrelated rollouts can still be skipped.
-        let codex_thread_names = read_codex_thread_names(&roots.codex_sessions)
-            .inspect_err(|error| warn!("failed to read Codex session names: {error:#}"))
-            .ok();
+        let codex_thread_names =
+            read_codex_thread_names(&crate::conversation::codex_home(roots).join("sessions"))
+                .inspect_err(|error| warn!("failed to read Codex session names: {error:#}"))
+                .ok();
         let mut next_state = IndexState {
             format_version: INDEX_FORMAT_VERSION,
             files: BTreeMap::new(),
+            headers,
         };
         let mut stats = SyncStats {
             scanned: scanned_files.len(),
@@ -405,6 +464,12 @@ impl IndexManager {
         let mut writer =
             index.writer_with_num_threads(writer_threads, writer_threads * 50_000_000)?;
         let mut changed = rebuild;
+        // A format migration can change document identities (physical pages to
+        // conversations). Clearing only the old state would leave stale pages.
+        if previous_state.format_version != INDEX_FORMAT_VERSION {
+            writer.delete_all_documents()?;
+            changed = true;
+        }
         let mut pending_files = Vec::new();
         let mut scanned_by_key = HashMap::new();
 
@@ -638,6 +703,36 @@ impl IndexManager {
             .collect())
     }
 
+    pub fn supersession_snapshot(&self) -> Result<SupersessionSnapshot> {
+        let state = load_state(&self.paths.state_file)?;
+        let keepers = state
+            .files
+            .iter()
+            .filter(|(_, file)| file.indexed && !file.trashed && file.superseded_by.is_none())
+            .filter_map(|(path, file)| {
+                file.session_id
+                    .as_deref()
+                    .map(|id| ((file.agent, id), (path, file)))
+            })
+            .collect::<HashMap<_, _>>();
+        let entries = state
+            .files
+            .iter()
+            .filter_map(|(path, file)| {
+                let id = file.superseded_by.as_deref()?;
+                let (keeper_path, keeper) = keepers.get(&(file.agent, id))?;
+                Some(RelationshipSnapshot {
+                    path: PathBuf::from(path),
+                    fingerprint: file.fingerprint(),
+                    keeper_id: id.to_owned(),
+                    keeper_path: PathBuf::from(keeper_path),
+                    keeper_fingerprint: keeper.fingerprint(),
+                })
+            })
+            .collect();
+        Ok(SupersessionSnapshot { entries })
+    }
+
     fn open_or_create_index(&self) -> Result<(Index, IndexSchema)> {
         let schema = IndexSchema::new();
         fs::create_dir_all(&self.paths.index_dir)
@@ -830,7 +925,11 @@ fn add_session_document(
 ) -> Result<()> {
     let mut document = TantivyDocument::default();
     let stored = StoredSession::from_session_file(session, file, superseded_by);
-    let stored_json = serde_json::to_string(&stored).context("failed to serialize session")?;
+    let stored_json = serde_json::to_string(&IndexedSession {
+        session: stored,
+        source: file.conversation.as_deref().cloned(),
+    })
+    .context("failed to serialize session")?;
 
     document.add_text(fields.file_path, normalize_path_key(&session.file_path));
     let projection = crate::search_projection::SearchProjection::from_session(session);
@@ -880,13 +979,24 @@ fn working_dir_search_terms(cwd: &str) -> Vec<String> {
 
 /// Bump when indexed/stored fields or searchable-content semantics change so old
 /// state files are discarded and the index is rebuilt against fresh data.
-const INDEX_FORMAT_VERSION: u32 = 23;
+const INDEX_FORMAT_VERSION: u32 = 24;
+
+/// The manifest is stored with the index document, but is not part of CLI JSON.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct IndexedSession {
+    #[serde(flatten)]
+    pub session: StoredSession,
+    #[serde(default, rename = "_source", skip_serializing_if = "Option::is_none")]
+    pub source: Option<ConversationSource>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct IndexState {
     #[serde(default)]
     format_version: u32,
     files: BTreeMap<String, IndexedFileState>,
+    #[serde(default)]
+    headers: HeaderCache,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -907,6 +1017,8 @@ struct IndexedFileState {
     lineage: SessionLineage,
     #[serde(default)]
     superseded_by: Option<String>,
+    #[serde(default)]
+    history: Option<SessionHistory>,
 }
 
 impl IndexedFileState {
@@ -927,6 +1039,7 @@ impl IndexedFileState {
             custom_title: None,
             lineage: SessionLineage::default(),
             superseded_by: None,
+            history: None,
         }
     }
 
@@ -935,6 +1048,7 @@ impl IndexedFileState {
         state.session_id = Some(session.session_id.clone());
         state.custom_title.clone_from(&session.custom_title);
         state.lineage = session.lineage.clone();
+        state.history.clone_from(&session.history);
         state
     }
 
@@ -958,28 +1072,11 @@ fn apply_supersession(state: &mut IndexState) {
     // Declared parent IDs bound all semantic comparisons to actual fork families.
     let keys = state.files.keys().cloned().collect::<Vec<_>>();
     let mut indexes_by_session = HashMap::<(Agent, String), Vec<usize>>::new();
-    let mut dependency_indexes_by_rollout = HashMap::<(Agent, String), Vec<usize>>::new();
-    let mut dependency_indexes_by_session = HashMap::<(Agent, String), Vec<usize>>::new();
     for (index, key) in keys.iter().enumerate() {
         let Some(file) = state.files.get(key) else {
             continue;
         };
-        if let Some(id) = file
-            .lineage
-            .rollout_id
-            .as_ref()
-            .or(file.session_id.as_ref())
-        {
-            dependency_indexes_by_rollout
-                .entry((file.agent, id.clone()))
-                .or_default()
-                .push(index);
-        }
         if let Some(session_id) = file.session_id.as_ref() {
-            dependency_indexes_by_session
-                .entry((file.agent, session_id.clone()))
-                .or_default()
-                .push(index);
             if file.indexed {
                 indexes_by_session
                     .entry((file.agent, session_id.clone()))
@@ -989,51 +1086,17 @@ fn apply_supersession(state: &mut IndexState) {
         }
     }
 
-    // A reference-backed Codex fork cannot be reconstructed from its tip JSONL
-    // alone. Conservatively disqualify its complete declared lineage component,
-    // including copied ancestors and descendants, from supersession.
-    let mut dependency_parents = (0..keys.len()).collect::<Vec<_>>();
-    let mut reference_backed_indexes = Vec::new();
-    for (child_index, child_key) in keys.iter().enumerate() {
-        let Some(child) = state.files.get(child_key) else {
-            continue;
-        };
-        if child.lineage.history_base_rollout_id.is_some() {
-            reference_backed_indexes.push(child_index);
-        }
-        for (parent_id, lookup) in [
-            (
-                child.lineage.forked_from_session_id.as_ref(),
-                &dependency_indexes_by_session,
-            ),
-            (
-                child.lineage.history_base_rollout_id.as_ref(),
-                &dependency_indexes_by_rollout,
-            ),
-        ] {
-            let Some(parent_id) = parent_id else {
-                continue;
-            };
-            let Some(parent_indexes) = lookup.get(&(child.agent, parent_id.clone())) else {
-                continue;
-            };
-            for &parent_index in parent_indexes {
-                if parent_index != child_index {
-                    union_families(&mut dependency_parents, parent_index, child_index);
-                }
-            }
-        }
-    }
-    let dependency_roots = (0..keys.len())
-        .map(|index| find_family(&mut dependency_parents, index))
-        .collect::<Vec<_>>();
-    let unsafe_dependency_roots = reference_backed_indexes
-        .into_iter()
-        .map(|index| dependency_roots[index])
-        .collect::<HashSet<_>>();
-    let supersession_safe = dependency_roots
+    // Visibility uses complete logical transcripts. Physical dependencies are
+    // protected independently by lifecycle planning.
+    let supersession_safe = keys
         .iter()
-        .map(|root| !unsafe_dependency_roots.contains(root))
+        .map(|key| {
+            let file = &state.files[key];
+            file.history.as_ref().map_or_else(
+                || file.lineage.history_base_rollout_id.is_none(),
+                SessionHistory::is_complete,
+            )
+        })
         .collect::<Vec<_>>();
 
     let mut family_parents = (0..keys.len()).collect::<Vec<_>>();
@@ -1045,14 +1108,14 @@ fn apply_supersession(state: &mut IndexState) {
         let Some(parent_id) = child.lineage.forked_from_session_id.as_ref() else {
             continue;
         };
-        if !child.indexed || child.trashed {
+        if !child.indexed || child.trashed || !supersession_safe[child_index] {
             continue;
         }
         let Some(parent_indexes) = indexes_by_session.get(&(child.agent, parent_id.clone())) else {
             continue;
         };
         for &parent_index in parent_indexes {
-            if parent_index == child_index {
+            if parent_index == child_index || !supersession_safe[parent_index] {
                 continue;
             }
             union_families(&mut family_parents, parent_index, child_index);
@@ -1208,6 +1271,35 @@ fn apply_supersession(state: &mut IndexState) {
         superseded_by[source] = Some(target_id);
     }
 
+    // Resolve intermediate links so the public keeper is a retained session.
+    let by_id = keys
+        .iter()
+        .enumerate()
+        .filter_map(|(index, key)| {
+            state.files[key]
+                .session_id
+                .clone()
+                .map(|id| ((state.files[key].agent, id), index))
+        })
+        .collect::<HashMap<_, _>>();
+    let direct = superseded_by.clone();
+    for (index, successor) in superseded_by.iter_mut().enumerate() {
+        let mut visited = HashSet::from([index]);
+        while let Some(next) = successor
+            .as_ref()
+            .and_then(|id| by_id.get(&(state.files[&keys[index]].agent, id.clone())))
+            .copied()
+        {
+            if !visited.insert(next) {
+                *successor = None;
+                break;
+            }
+            match &direct[next] {
+                Some(target) => *successor = Some(target.clone()),
+                None => break,
+            }
+        }
+    }
     for (index, successor) in superseded_by.into_iter().enumerate() {
         if let Some(successor) = successor {
             state

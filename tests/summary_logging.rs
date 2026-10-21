@@ -20,6 +20,7 @@ fn summary_failure_is_durable_even_when_rust_log_is_off() -> Result<()> {
     let worker = SummaryWorker::spawn()?;
     worker.send(SummaryCommand {
         jsonl_path: missing_session.clone(),
+        source: None,
         backend: SummarizeBackend::Custom,
         command_template: "unused".to_owned(),
         prompt_template: "unused".to_owned(),

@@ -7,6 +7,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 ## Features
 
 - Full-text search across Claude Code, Codex CLI, and Antigravity CLI sessions
+- Paginated Codex history grouped into complete conversations, with physical pages available in related-session review
 - Persistent search history with a fuzzy-filtered Ctrl+R recall modal
 - Native Claude Code autosummaries and Codex rollout summaries in previews and summary snippets
 - Incremental indexing with parallel reading of new or changed sessions on startup

@@ -17,6 +17,11 @@ requires removing its transitive dependents; an independent leaf can be removed
 alone. Restoring a session includes its trashed same-thread rollouts and missing
 history ancestors. Fork relationships alone do not force group removal.
 
+Normal search presents a paginated Codex conversation as one session. Related
+review exposes its individual physical pages and their original transcripts.
+A superseded conversation can still supply required history to another
+conversation; its visibility does not bypass dependency checks.
+
 An expanded group opens a confirmation with selected and required members,
 counts, and blockers. Use `r` to review the related chain, `y` to confirm a safe
 group, or `Esc` to cancel. **Enter → g** opens the chain directly. Its local `/`

@@ -36,7 +36,7 @@ use crate::index::{
 };
 use crate::parse::claude::read_claude_autosummaries;
 use crate::parse::codex_summary::read_codex_autosummaries;
-use crate::parse::{parse_session_file, Agent, Session};
+use crate::parse::{Agent, Session};
 use crate::program_lookup;
 use crate::rules::{
     apply_rule_proposals, session_to_rule_context_json, RuleEvaluationError, RulePreviewMatch,
@@ -445,6 +445,7 @@ pub struct App {
     worker: Option<SearchWorker>,
     summary_worker: SummaryWorker,
     summary_cache: HashMap<PathBuf, SummarySources>,
+    summary_cache_sources: HashMap<PathBuf, Option<u64>>,
     codex_autosummary_cache: Option<HashMap<String, CodexAutosummaryPreview>>,
     summary_inflight: HashSet<PathBuf>,
     snippet_mode: SnippetMode,
@@ -457,7 +458,7 @@ pub struct App {
     result_limit: usize,
     selected: usize,
     list_offset: usize,
-    preview_cache: HashMap<PathBuf, Option<Session>>,
+    preview_cache: HashMap<(PathBuf, Option<u64>), Option<Session>>,
     hidden_deleted_paths: HashSet<PathBuf>,
     preview_render_cache: Option<PreviewRenderCache>,
     preview_active_match: Option<usize>,
@@ -545,6 +546,7 @@ impl App {
             worker: Some(worker),
             summary_worker,
             summary_cache: HashMap::new(),
+            summary_cache_sources: HashMap::new(),
             codex_autosummary_cache: None,
             summary_inflight: HashSet::new(),
             snippet_mode: SnippetMode::default(),
@@ -816,25 +818,26 @@ impl App {
 
     pub fn selected_preview(&mut self) -> Option<&Session> {
         let hit = self.results.get(self.selected)?;
-        let path = hit.session.file_path.clone();
+        let key = hit.session.cache_key();
 
-        if !self.preview_cache.contains_key(&path) {
-            let parsed = parse_session_file(hit.session.agent, &path).ok().flatten();
-            self.preview_cache.insert(path.clone(), parsed);
+        if !self.preview_cache.contains_key(&key) {
+            let parsed = hit.session.parse().ok().flatten();
+            self.preview_cache.insert(key.clone(), parsed);
+            self.summary_cache.remove(&hit.session.file_path);
         }
 
         self.preview_cache
-            .get(&path)
+            .get(&key)
             .and_then(|session| session.as_ref())
     }
 
     fn active_session(&mut self) -> Option<&Session> {
         let hit = self.selected_hit()?;
-        let path = hit.session.file_path;
+        let key = hit.session.cache_key();
         self.preview_cache
-            .entry(path.clone())
-            .or_insert_with(|| parse_session_file(hit.session.agent, &path).ok().flatten());
-        self.preview_cache.get(&path).and_then(Option::as_ref)
+            .entry(key.clone())
+            .or_insert_with(|| hit.session.parse().ok().flatten());
+        self.preview_cache.get(&key).and_then(Option::as_ref)
     }
 
     pub fn preview_render_state(
@@ -845,6 +848,7 @@ impl App {
         let hit = self.results.get(self.selected)?;
         let agent = hit.session.agent;
         let path = hit.session.file_path.clone();
+        let cache_key = hit.session.cache_key();
         let session_id = hit.session.session_id.clone();
         let query = self.committed_query.clone();
         let width = area.width.saturating_sub(2);
@@ -854,7 +858,7 @@ impl App {
 
         let _ = self.selected_preview();
         self.ensure_summary_cache(agent, &path, &session_id);
-        let session = self.preview_cache.get(&path).and_then(Option::as_ref);
+        let session = self.preview_cache.get(&cache_key).and_then(Option::as_ref);
         let summaries = self.summary_cache.get(&path)?;
         let summary_inflight = self.summary_inflight.contains(&path);
 
@@ -1165,12 +1169,8 @@ impl App {
         if let Some(index) = snippet.native_source {
             let session = self
                 .preview_cache
-                .entry(hit.session.file_path.clone())
-                .or_insert_with(|| {
-                    parse_session_file(hit.session.agent, &hit.session.file_path)
-                        .ok()
-                        .flatten()
-                })
+                .entry(hit.session.cache_key())
+                .or_insert_with(|| hit.session.parse().ok().flatten())
                 .as_ref();
             // Match the selected native record's identity and bytes. A sidecar,
             // external summary, or stale body must not borrow another source's hits.
@@ -1326,7 +1326,7 @@ impl App {
                 if let Some(viewer_state) = viewer_before_filters.as_mut() {
                     let hit = active_hit.as_ref();
                     let session = hit
-                        .and_then(|hit| preview_cache.get(&hit.session.file_path))
+                        .and_then(|hit| preview_cache.get(&hit.session.cache_key()))
                         .and_then(|session| session.as_ref());
                     if let Some(session) = session {
                         viewer_state.render(
@@ -1347,7 +1347,7 @@ impl App {
                 if let Some(viewer_state) = viewer_before_actions.as_mut() {
                     let hit = active_hit.as_ref();
                     let session = hit
-                        .and_then(|hit| preview_cache.get(&hit.session.file_path))
+                        .and_then(|hit| preview_cache.get(&hit.session.cache_key()))
                         .and_then(|session| session.as_ref());
                     if let Some(session) = session {
                         viewer_state.render(
@@ -1372,7 +1372,7 @@ impl App {
                     .set_search_options(self.visibility_search, self.settings.viewer_find_jump);
                 let hit = active_hit.as_ref();
                 let session = hit
-                    .and_then(|hit| preview_cache.get(&hit.session.file_path))
+                    .and_then(|hit| preview_cache.get(&hit.session.cache_key()))
                     .and_then(|session| session.as_ref());
                 if let Some(session) = session {
                     viewer_state.render(
@@ -2755,7 +2755,7 @@ impl App {
             });
             let session = hit
                 .as_ref()
-                .and_then(|hit| self.preview_cache.get(&hit.session.file_path))
+                .and_then(|hit| self.preview_cache.get(&hit.session.cache_key()))
                 .and_then(|session| session.as_ref());
             if let (Overlay::Filters(_, Some(viewer)), Some(session)) = (&mut self.overlay, session)
             {
@@ -3095,7 +3095,7 @@ impl App {
             self.results
                 .retain(|hit| !applied_paths.contains(&hit.session.file_path));
             for path in &applied_paths {
-                self.preview_cache.remove(path);
+                self.preview_cache.retain(|(cached, _), _| cached != path);
                 self.hidden_deleted_paths.insert(path.clone());
             }
             self.preview_render_cache = None;
@@ -3154,6 +3154,37 @@ impl App {
     }
 
     fn ensure_summary_cache(&mut self, agent: Agent, path: &Path, session_id: &str) {
+        let target = self
+            .selected_hit()
+            .filter(|hit| hit.session.file_path == path)
+            .or_else(|| {
+                self.results
+                    .iter()
+                    .find(|hit| hit.session.file_path == path)
+                    .cloned()
+            });
+        let signature = target
+            .as_ref()
+            .and_then(|hit| hit.session.source.as_ref().map(|source| source.signature));
+        if self.summary_cache_sources.get(path).copied().flatten() != signature {
+            self.summary_cache.remove(path);
+        }
+        let logical_fingerprint = target.and_then(|hit| {
+            hit.session
+                .source
+                .as_ref()
+                .map(|source| source.summary_fingerprint(hit.session.lines))
+        });
+        if let Some(fingerprint) = &logical_fingerprint {
+            if self
+                .summary_cache
+                .get(path)
+                .and_then(|sources| sources.aics_sidecar.as_ref())
+                .is_some_and(|summary| summary.fingerprint != *fingerprint)
+            {
+                self.summary_cache.remove(path);
+            }
+        }
         if self.summary_cache.contains_key(path) {
             return;
         }
@@ -3162,8 +3193,15 @@ impl App {
         } else {
             None
         };
-        let entry = load_summary_sources(agent, path, codex_autosummary);
+        let mut entry = load_summary_sources(agent, path, codex_autosummary);
+        if let (Some(summary), Some(fingerprint)) =
+            (entry.aics_sidecar.as_mut(), logical_fingerprint)
+        {
+            summary.fingerprint = fingerprint;
+        }
         self.summary_cache.insert(path.to_path_buf(), entry);
+        self.summary_cache_sources
+            .insert(path.to_path_buf(), signature);
     }
 
     fn codex_autosummary_for_thread(
@@ -3195,6 +3233,7 @@ impl App {
 
     fn invalidate_summary_cache(&mut self, path: &Path) {
         self.summary_cache.remove(path);
+        self.summary_cache_sources.remove(path);
         if self
             .preview_render_cache
             .as_ref()
@@ -3220,6 +3259,7 @@ impl App {
 
         let command = SummaryCommand {
             jsonl_path: path.clone(),
+            source: hit.session.source.clone(),
             backend: crate::summary::SummarizeBackend::Custom,
             command_template: template,
             prompt_template: self.settings.summarize_prompt.clone(),
@@ -3346,7 +3386,7 @@ impl App {
         });
         let viewer_session = active_hit
             .as_ref()
-            .and_then(|hit| self.preview_cache.get(&hit.session.file_path))
+            .and_then(|hit| self.preview_cache.get(&hit.session.cache_key()))
             .and_then(|session| session.as_ref());
         if let (Overlay::Viewer(state), Some(session)) = (&mut self.overlay, viewer_session) {
             let max_scroll = state.max_scroll(
@@ -3607,7 +3647,8 @@ impl App {
         if !hit.session.file_path.try_exists()? {
             self.results
                 .retain(|h| h.session.file_path != hit.session.file_path);
-            self.preview_cache.remove(&hit.session.file_path);
+            self.preview_cache
+                .retain(|(cached, _), _| cached != &hit.session.file_path);
             self.hidden_deleted_paths.insert(hit.session.file_path);
             self.selected = self.selected.min(self.results.len().saturating_sub(1));
             self.cancel_pending_searches();
@@ -4661,7 +4702,8 @@ mod tests {
         let session = sample_preview_session();
         let path = session.file_path.clone();
         app.results = vec![sample_hit_with_path(Agent::Claude, path.clone())];
-        app.preview_cache.insert(path.clone(), Some(session));
+        app.preview_cache
+            .insert((path.clone(), None), Some(session));
         app.committed_query = "first".into();
         app.open_viewer();
         app.last_frame_area = Rect::new(0, 0, 100, 30);
@@ -4670,7 +4712,12 @@ mod tests {
 
     fn open_scroll_test_viewer(app: &mut App) -> PathBuf {
         let path = open_test_viewer(app);
-        let session = app.preview_cache.get_mut(&path).unwrap().as_mut().unwrap();
+        let session = app
+            .preview_cache
+            .get_mut(&(path.clone(), None))
+            .unwrap()
+            .as_mut()
+            .unwrap();
         session.messages[1].content = "Earlier assistant reply\n\n".repeat(30);
         session.messages[4].content = "Second user reading location\n\n".repeat(30);
         path
@@ -4678,7 +4725,9 @@ mod tests {
 
     fn second_user_row(app: &App) -> usize {
         let path = &app.viewer_hit.as_ref().unwrap().session.file_path;
-        let session = app.preview_cache[path].as_ref().unwrap();
+        let session = app.preview_cache[&(path.to_path_buf(), None)]
+            .as_ref()
+            .unwrap();
         *super::collect_message_rows(
             session,
             None,
@@ -6206,7 +6255,7 @@ mod tests {
             status: Rect::new(0, 23, 120, 2),
         });
         app.preview_cache
-            .insert(path, Some(sample_preview_session()));
+            .insert((path, None), Some(sample_preview_session()));
 
         app.handle_search_key(crossterm_key_mods(
             KeyCode::Down,
@@ -6691,7 +6740,8 @@ mod tests {
         let path = session.file_path.clone();
         let hit = sample_hit_with_path(Agent::Claude, path.clone());
         app.results = vec![hit.clone()];
-        app.preview_cache.insert(path.clone(), Some(session));
+        app.preview_cache
+            .insert((path.clone(), None), Some(session));
         let fingerprint = Fingerprint {
             line_count: 1,
             last_line_sha256: "abc".repeat(21) + "a",
@@ -6769,14 +6819,15 @@ mod tests {
         let session = sample_preview_session();
         let path = session.file_path.clone();
         app.results = vec![sample_hit_with_path(Agent::Claude, path.clone())];
-        app.preview_cache.insert(path.clone(), Some(session));
+        app.preview_cache
+            .insert((path.clone(), None), Some(session));
         app.summary_cache
             .insert(path.clone(), SummarySources::default());
         let area = Rect::new(0, 0, 60, 20);
         let theme = app.current_frame_theme();
         app.preview_render_state(area, &theme).unwrap();
         app.preview_cache
-            .get_mut(&path)
+            .get_mut(&(path.clone(), None))
             .unwrap()
             .as_mut()
             .unwrap()
@@ -6829,7 +6880,8 @@ mod tests {
         }];
         let path = session.file_path.clone();
         app.results = vec![sample_hit_with_path(Agent::Claude, path.clone())];
-        app.preview_cache.insert(path.clone(), Some(session));
+        app.preview_cache
+            .insert((path.clone(), None), Some(session));
         app.summary_cache.insert(path, SummarySources::default());
         app.committed_query = "alpha".into();
         let theme = app.current_frame_theme();
@@ -7110,7 +7162,9 @@ mod tests {
         app.snippet_mode = super::SnippetMode::BuiltinSummary;
         app.committed_query = "agent:alpha -user:alpha".into();
         let highlighted = app.list_snippet_line(&hit, &theme);
-        let parsed = app.preview_cache[&path].as_ref().unwrap();
+        let parsed = app.preview_cache[&(path.to_path_buf(), None)]
+            .as_ref()
+            .unwrap();
         assert!(!parsed.search_fields.native_summaries.is_empty());
         assert!(!parsed.search_fields.tool_call_sources.is_empty());
         let mut without_search_metadata = parsed.clone();
@@ -7782,6 +7836,8 @@ mod tests {
                 trashed: false,
                 original_path: None,
                 superseded_by: None,
+                history: None,
+                source: None,
             },
             snippet_html: String::new(),
             score: 0.0,
@@ -7810,6 +7866,8 @@ mod tests {
         RulePreviewMatch {
             proposals: vec![RuleProposal {
                 reviewed_group: None,
+                source: None,
+                keeper_source: None,
                 dependency_policy: crate::lifecycle::DependencyPolicy::Skip,
                 included_by: None,
                 rule: "trash demo".to_owned(),
@@ -7913,6 +7971,7 @@ mod tests {
             cells: Vec::new(),
             session_info: None,
             lineage: Default::default(),
+            history: None,
         }
     }
 }

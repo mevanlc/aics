@@ -406,7 +406,7 @@ fn superseded_filter_tracks_direct_codex_forks_across_incremental_sync() -> Resu
 }
 
 #[test]
-fn superseded_filter_excludes_families_with_reference_backed_codex_history() -> Result<()> {
+fn incomplete_codex_history_does_not_block_complete_family_members() -> Result<()> {
     let temp = TempDir::new()?;
     let sessions = temp.path().join(".codex/sessions/2026/08/07");
     fs::create_dir_all(&sessions)?;
@@ -454,22 +454,20 @@ fn superseded_filter_excludes_families_with_reference_backed_codex_history() -> 
     assert_eq!(search(SupersededFilter::No)?.len(), 1);
     assert_eq!(search(SupersededFilter::Yes)?.len(), 1);
 
-    // This newly created tip has no local transcript yet and must follow
-    // copied-child's rollout to reconstruct the inherited history. Its presence
-    // still makes the whole parent -> copied-child -> referenced-tip chain
-    // ineligible for collapse.
+    // This tip has an invalid cutoff. It remains visible with a diagnostic,
+    // while the complete copied-child can still supersede its complete parent.
     fs::write(
         sessions.join("referenced-tip.jsonl"),
         "{\"timestamp\":\"2026-08-07T10:02:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"referenced-tip\",\"forked_from_id\":\"copied-child\",\"history_mode\":\"paginated\",\"history_base\":{\"thread_id\":\"copied-child\",\"end_ordinal_exclusive\":5,\"end_byte_offset\":2048},\"cwd\":\"/tmp/demo\"}}\n",
     )?;
     manager.sync_with_roots(&roots, false)?;
 
-    assert_eq!(search(SupersededFilter::Both)?.len(), 2);
+    assert_eq!(search(SupersededFilter::Both)?.len(), 3);
     assert_eq!(search(SupersededFilter::No)?.len(), 2);
-    assert!(search(SupersededFilter::Yes)?.is_empty());
-    assert!(manager.supersession_map()?.is_empty());
+    assert_eq!(search(SupersededFilter::Yes)?.len(), 1);
+    assert_eq!(manager.supersession_map()?.len(), 1);
     // A replacement's immutable ID differs from its logical thread ID. A tip
-    // without fork metadata must still protect the referenced copied family.
+    // without cutoff metadata remains incomplete after its source is renamed.
     fs::rename(
         sessions.join("copied-child.jsonl"),
         sessions.join("copied-child_replacement.jsonl"),
@@ -482,7 +480,7 @@ fn superseded_filter_excludes_families_with_reference_backed_codex_history() -> 
     )?;
     manager.sync_with_roots(&roots, false)?;
     assert_eq!(search(SupersededFilter::No)?.len(), 2);
-    assert!(manager.supersession_map()?.is_empty());
+    assert_eq!(manager.supersession_map()?.len(), 1);
     Ok(())
 }
 

@@ -49,8 +49,8 @@ impl Fixture {
             &path,
             format!(
                 "{}\n{}\n",
-                serde_json::json!({"type":"session_meta","payload":payload}),
-                serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}})
+                serde_json::json!({"ordinal":if parent.is_some() { 10 } else { 0 },"type":"session_meta","payload":payload}),
+                serde_json::json!({"ordinal":if parent.is_some() { 11 } else { 1 },"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}})
             ),
         )?;
         Ok(path)
@@ -225,6 +225,8 @@ fn restore_follows_missing_ancestors_and_refuses_collisions() -> Result<()> {
 fn proposal(path: PathBuf, policy: DependencyPolicy) -> RuleProposal {
     RuleProposal {
         reviewed_group: None,
+        source: None,
+        keeper_source: None,
         dependency_policy: policy,
         included_by: None,
         rule: "cleanup".into(),
@@ -413,6 +415,14 @@ fn configured_include_preview_expands_outside_filters_and_requires_all_marked_me
     let f = Fixture::new()?;
     let a = f.rollout("a", "a", None)?;
     let b = f.rollout("b", "b", Some("a"))?;
+    fs::write(
+        &b,
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"ordinal":2,"type":"session_meta","payload":{"id":"b","cwd":"/tmp/test","history_mode":"paginated","history_base":{"thread_id":"a","end_ordinal_exclusive":2,"end_byte_offset":fs::metadata(&a)?.len()}}}),
+            serde_json::json!({"ordinal":3,"type":"response_item","payload":{"type":"message","id":"b-user","role":"user","content":[{"type":"input_text","text":"continued"}]}}),
+        ),
+    )?;
     let rules_path = f._temp.path().join("rules.js");
     fs::write(
         &rules_path,

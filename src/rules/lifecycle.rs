@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use super::{
@@ -8,7 +8,7 @@ use super::{
 use crate::lifecycle::{self, DependencyGraph, DependencyPolicy, LifecyclePlan, Operation};
 use crate::live::LiveSessionTracker;
 use crate::parse::Agent;
-use crate::scan::SessionRoots;
+use crate::scan::{SessionFile, SessionRoots};
 use crate::trash::TrashReason;
 
 pub(super) fn serialize_review<S: serde::Serializer>(
@@ -147,7 +147,10 @@ fn groups(
         let explicit = group
             .triggers
             .iter()
-            .map(|p| &p.path)
+            .flat_map(|p| {
+                std::iter::once(&p.path)
+                    .chain(p.source.iter().flat_map(|source| source.owned_paths.iter()))
+            })
             .collect::<BTreeSet<_>>();
         if !group
             .triggers
@@ -167,9 +170,21 @@ fn groups(
 
 pub(super) fn expand_preview(
     roots: &SessionRoots,
+    files: &[SessionFile],
     report: &mut RulesReport,
     graphs: &mut DependencyGraphs,
 ) {
+    let owners = files
+        .iter()
+        .flat_map(|file| {
+            file.conversation.iter().flat_map(move |source| {
+                source
+                    .owned_paths
+                    .iter()
+                    .map(move |path| (path.clone(), file))
+            })
+        })
+        .collect::<HashMap<_, _>>();
     let planned = match groups(roots, &report.proposals, graphs) {
         Ok(groups) => groups,
         Err(error) => {
@@ -179,7 +194,15 @@ pub(super) fn expand_preview(
             return;
         }
     };
-    for group in planned {
+    for mut group in planned {
+        for skip in &report.processing_skips {
+            if group.plan.members.contains_key(&skip.path) {
+                group.plan.blockers.push(format!(
+                    "required conversation cannot be evaluated: {}",
+                    skip.reason
+                ));
+            }
+        }
         let Some(trigger) = group.triggers.first() else {
             continue;
         };
@@ -188,20 +211,40 @@ pub(super) fn expand_preview(
             .iter()
             .any(|p| p.dependency_policy == DependencyPolicy::Include);
         for (path, member) in &group.plan.members {
+            let logical = owners.get(path).copied();
+            let proposal_path = logical.map_or(path, |file| &file.path);
             let existing = report
                 .proposals
                 .iter()
-                .any(|p| &p.path == path && operation(p) == group.plan.operation);
-            if !existing && include {
+                .any(|p| &p.path == proposal_path && operation(p) == group.plan.operation);
+            let owned_page = group.triggers.iter().any(|trigger| {
+                trigger
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.owned_paths.contains(path))
+            });
+            if !existing && include && !owned_page {
                 let mut proposal = trigger.clone();
-                proposal.path = path.clone();
+                proposal.path = proposal_path.clone();
                 proposal.session_id = member.thread_id.clone();
                 proposal.included_by = Some(trigger.path.clone());
+                proposal.source = logical.and_then(|file| file.conversation.clone());
                 report.proposals.push(proposal.clone());
                 report.preview_matches.push(RulePreviewMatch {
                     proposals: vec![proposal],
                     decisions: Vec::new(),
-                    hit: member.search_hit(),
+                    hit: logical
+                        .and_then(|file| {
+                            crate::parse::parse_scanned_session_file(file)
+                                .ok()
+                                .flatten()
+                                .map(|session| {
+                                    super::rule_search_hit(super::stored_rule_session(
+                                        &session, file, None,
+                                    ))
+                                })
+                        })
+                        .unwrap_or_else(|| member.search_hit()),
                 });
             }
         }
@@ -281,12 +324,34 @@ pub(super) fn apply(
     };
     for group in groups {
         let mut plan = group.plan;
+        for proposal in proposals.iter().filter(|proposal| {
+            plan.members.contains_key(&proposal.path) && operation(proposal) == plan.operation
+        }) {
+            if proposal
+                .source
+                .iter()
+                .chain(proposal.keeper_source.iter())
+                .any(|source| !source.is_current())
+            {
+                plan.blockers.push(
+                    "conversation history changed since rule evaluation; refresh the preview"
+                        .into(),
+                );
+            }
+            if let Some(reviewed) = &proposal.reviewed_group {
+                plan.blockers.extend(reviewed.blockers.iter().cloned());
+            }
+        }
         for trigger in &group.triggers {
             if let Some(reviewed) = &trigger.reviewed_group {
                 if reviewed.members.keys().any(|path| {
-                    !proposals
-                        .iter()
-                        .any(|p| &p.path == path && operation(p) == plan.operation)
+                    !proposals.iter().any(|p| {
+                        operation(p) == plan.operation
+                            && (&p.path == path
+                                || p.source
+                                    .as_ref()
+                                    .is_some_and(|source| source.owned_paths.contains(path)))
+                    })
                 }) {
                     plan.blockers.push(
                         "required members were unmarked; select the complete reviewed group".into(),

@@ -152,6 +152,7 @@ pub struct SessionFile {
     pub companion_paths: Vec<PathBuf>,
     pub source_signature: u64,
     pub antigravity_metadata: Option<AntigravitySessionMetadata>,
+    pub conversation: Option<std::sync::Arc<crate::conversation::ConversationSource>>,
 }
 
 impl SessionFile {
@@ -320,6 +321,7 @@ fn scan_directory<P: ScanProgressObserver>(
             companion_paths: Vec::new(),
             source_signature: 0,
             antigravity_metadata: None,
+            conversation: None,
         });
         progress.on_discovered(output.len());
     }
@@ -445,6 +447,7 @@ fn build_antigravity_session_file(
         companion_paths,
         source_signature,
         antigravity_metadata: Some(session_metadata),
+        conversation: None,
     })
 }
 
@@ -696,6 +699,7 @@ fn scan_trash_root<P: ScanProgressObserver>(
             companion_paths: Vec::new(),
             source_signature: 0,
             antigravity_metadata: None,
+            conversation: None,
         });
         progress.on_discovered(output.len());
     }

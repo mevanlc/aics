@@ -37,7 +37,10 @@ pub fn parse_session_file(agent: Agent, path: impl AsRef<Path>) -> Result<Option
 pub fn parse_scanned_session_file(file: &SessionFile) -> Result<Option<Session>> {
     match file.agent {
         Agent::Claude => parse_claude_session_file(&file.path),
-        Agent::Codex => parse_codex_session_file(&file.path),
+        Agent::Codex => match &file.conversation {
+            Some(source) => source.parse(),
+            None => parse_codex_session_file(&file.path),
+        },
         Agent::Antigravity => antigravity::parse_antigravity_session(file),
     }
 }

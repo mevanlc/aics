@@ -35,13 +35,13 @@ interface AicsRuleSession {
   /** Git branch, or an empty string when unavailable. */
   branch: string;
 
-  /** Path of the normal or trashed JSONL session file being evaluated. */
+  /** Path of the normal or trashed session's selected JSONL rollout. */
   path: string;
 
   /** Last-modified time as Unix seconds. */
   modifiedTs: number;
 
-  /** Number of source JSONL lines. */
+  /** Number of JSONL lines in the reconstructed conversation. */
   lines: number;
 
   /** Whether the session is original, trimmed, continued, or a sub-agent. */

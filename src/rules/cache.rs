@@ -13,7 +13,7 @@ use super::RawRuleOutcome;
 use crate::index::StoredSession;
 use crate::scan::SessionFile;
 
-const RULES_CACHE_FORMAT_VERSION: u32 = 6;
+const RULES_CACHE_FORMAT_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct ContentFingerprint {
@@ -294,6 +294,16 @@ pub(super) fn fingerprint_file(path: &Path) -> Result<ContentFingerprint> {
 }
 
 pub(super) fn fingerprint_session(file: &SessionFile) -> Result<ContentFingerprint> {
+    if let Some(source) = &file.conversation {
+        // The catalog signature covers every source stamp, selected rollout,
+        // cutoff and resolution status, including sources owned by other threads.
+        return Ok(ContentFingerprint {
+            byte_len: file.size,
+            modified_ns: modified_ns(file.modified),
+            crc32: crc32fast::hash(&source.signature.to_be_bytes()),
+            source_signature: source.signature,
+        });
+    }
     let mut hasher = Hasher::new();
     let mut byte_len = 0_u64;
     for path in file.source_paths() {
@@ -413,6 +423,7 @@ mod tests {
             companion_paths: Vec::new(),
             source_signature: 0,
             antigravity_metadata: None,
+            conversation: None,
         })
     }
 
@@ -656,7 +667,7 @@ mod tests {
             json: true,
             scope: Scope::Global,
             filters: SearchFilters::default(),
-            supersession: BTreeMap::new(),
+            supersession: Default::default(),
         };
 
         let filtered = run_rules(&roots, &options)?;
@@ -714,7 +725,7 @@ mod tests {
             json: true,
             scope: Scope::Global,
             filters: SearchFilters::default(),
-            supersession: BTreeMap::new(),
+            supersession: Default::default(),
         };
 
         let first = run_rules(&roots, &options)?;

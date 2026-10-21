@@ -887,6 +887,8 @@ mod tests {
                 trashed: false,
                 original_path: None,
                 superseded_by: None,
+                history: None,
+                source: None,
             },
             snippet_html: String::new(),
             score: 0.0,

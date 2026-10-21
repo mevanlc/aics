@@ -264,6 +264,7 @@ pub fn parse_antigravity_session_file(path: impl AsRef<Path>) -> Result<Option<S
         companion_paths: companions,
         source_signature: 0,
         antigravity_metadata: None,
+        conversation: None,
     };
     parse_antigravity_session(&file)
 }
@@ -409,6 +410,7 @@ pub fn parse_antigravity_session(file: &SessionFile) -> Result<Option<Session>> 
         cells: builder.cells,
         session_info: Some(session_info),
         lineage: SessionLineage::default(),
+        history: None,
     }))
 }
 

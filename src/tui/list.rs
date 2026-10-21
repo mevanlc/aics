@@ -242,6 +242,20 @@ fn render_item(
     if hit.is_live {
         meta_suffix.push_str(" · live");
     }
+    if let Some(history) = hit
+        .session
+        .history
+        .as_ref()
+        .filter(|history| !history.is_complete())
+    {
+        meta_suffix.push_str(
+            if history.status == crate::conversation::HistoryStatus::Ambiguous {
+                " · history unresolved"
+            } else {
+                " · history incomplete"
+            },
+        );
+    }
     if let Some(info) = hit.session.session_info.as_ref() {
         if let Some(model) = info.model.as_deref().filter(|s| !s.is_empty()) {
             meta_suffix.push_str(" · ");
@@ -772,6 +786,8 @@ mod tests {
                 trashed: false,
                 original_path: None,
                 superseded_by: None,
+                history: None,
+                source: None,
             },
             snippet_html: String::new(),
             score: 0.0,
@@ -829,6 +845,8 @@ mod tests {
                 trashed: false,
                 original_path: None,
                 superseded_by: None,
+                history: None,
+                source: None,
             },
             snippet_html: String::new(),
             score: 0.0,

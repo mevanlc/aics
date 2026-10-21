@@ -19,7 +19,7 @@ use aics::index::{
 use aics::live::LiveSessionTracker;
 use aics::logging::{LoggingHandle, LoggingMode};
 use aics::manpage::render_manpage;
-use aics::parse::{parse_session_file, Agent};
+use aics::parse::Agent;
 use aics::rules::{
     default_rules_path, print_report, run_rules_with_progress, write_default_rules_dts,
     RuleSelection, RulesMode, RulesOptions, RulesProgress,
@@ -519,7 +519,7 @@ fn main() -> Result<()> {
             json: cli.json,
             scope: rules_scope.clone(),
             filters: rules_filters.clone(),
-            supersession: manager.supersession_map()?,
+            supersession: manager.supersession_snapshot()?,
         };
         let report = if let Some(draw_target) =
             progress_draw_target(cli.progress, cli.stdout_reserved())
@@ -584,7 +584,7 @@ fn main() -> Result<()> {
                 json: false,
                 scope: Scope::Global,
                 filters: SearchFilters::default(),
-                supersession: manager.supersession_map()?,
+                supersession: manager.supersession_snapshot()?,
             };
             let report = if let Some(draw_target) =
                 progress_draw_target(cli.progress, cli.stdout_reserved())
@@ -698,7 +698,7 @@ fn export_sessions(
 
     for hit in hits {
         let source = hit.session.file_path.as_path();
-        let session = match parse_session_file(hit.session.agent, source) {
+        let session = match hit.session.parse() {
             Ok(Some(session)) => session,
             Ok(None) => {
                 skipped += 1;

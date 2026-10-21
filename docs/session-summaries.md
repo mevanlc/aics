@@ -38,6 +38,12 @@ Summary jobs run in the background so the TUI remains usable. Jobs are processed
 serially. If you try to quit while summaries are running, AICS warns that
 quitting will discard the in-flight work.
 
+For a paginated Codex conversation, AICS streams the complete bounded history
+into a temporary JSONL input for the summarizer. `{{jsonl_path}}` refers to that
+input; `{{jsonl_dir}}` continues to refer to the original session directory. The
+sidecar stays beside the selected source rollout. Incomplete histories and
+sources that change during generation fail the job; temporary inputs are removed.
+
 ## Command templates
 
 The `Ctrl+T` template picker can build a Bash or Zsh command for Claude Code or
@@ -97,6 +103,11 @@ The fingerprint contains the source's non-empty line count and SHA-256 hash of
 its last non-empty line. A matching fingerprint is shown as **FRESH**. If the
 session changes, the existing summary remains visible but is marked **STALE**;
 AICS does not regenerate it automatically.
+
+Logical Codex summaries instead fingerprint the reconstructed line count and a
+SHA-256 digest of the complete source signature, including inherited files,
+cutoffs, and selected rollout. Existing sidecars are preserved and can become
+stale after upgrading to conversation-aware history.
 
 ## Display and snippet behavior
 

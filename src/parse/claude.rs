@@ -370,6 +370,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
             own_semantic_event_count,
             ..SessionLineage::default()
         },
+        history: None,
     }))
 }
 

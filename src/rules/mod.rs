@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -194,7 +194,7 @@ pub struct RulesOptions {
     pub json: bool,
     pub scope: Scope,
     pub filters: SearchFilters,
-    pub supersession: BTreeMap<PathBuf, String>,
+    pub supersession: crate::index::SupersessionSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,6 +258,10 @@ pub struct RuleDecision {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RuleProposal {
+    #[serde(skip)]
+    pub source: Option<std::sync::Arc<crate::conversation::ConversationSource>>,
+    #[serde(skip)]
+    pub keeper_source: Option<std::sync::Arc<crate::conversation::ConversationSource>>,
     #[serde(
         rename = "dependency_group",
         skip_serializing_if = "Option::is_none",
@@ -389,7 +393,25 @@ where
     });
     let rules_must_be_validated = cache.as_ref().is_none_or(|cache| !cache.was_reused());
     let phase_start = std::time::Instant::now();
-    let files = scan_session_files(roots)?;
+    let (files, _) =
+        crate::conversation::logical_files(roots, scan_session_files(roots)?, &Default::default())?;
+    let supersession = options.supersession.current(&files);
+    let by_id = files
+        .iter()
+        .filter_map(|file| {
+            file.conversation
+                .as_ref()
+                .map(|source| ((file.agent, source.thread_id.as_str()), source))
+        })
+        .collect::<HashMap<_, _>>();
+    let keeper_sources = files
+        .iter()
+        .filter_map(|file| {
+            let keeper = supersession.get(&file.path)?;
+            let source = by_id.get(&(file.agent, keeper.as_str()))?;
+            Some((file.path.clone(), (*source).clone()))
+        })
+        .collect::<HashMap<_, _>>();
     debug!(
         "rules: scanned {} files in {:?}",
         files.len(),
@@ -412,6 +434,18 @@ where
     let mut jobs = Vec::new();
 
     for (file_index, file) in files.iter().enumerate() {
+        if let Some(source) = file
+            .conversation
+            .as_ref()
+            .filter(|source| !source.history.is_complete())
+        {
+            report.processing_skips.push(history_skip(
+                file,
+                source.history.notice().unwrap_or_default(),
+            ));
+            mark_completed();
+            continue;
+        }
         if !file_matches_filters(file, &options.filters) {
             mark_completed();
             continue;
@@ -423,7 +457,7 @@ where
             mark_completed();
             continue;
         }
-        let superseded_by = options.supersession.get(&file.path).map(String::as_str);
+        let superseded_by = supersession.get(&file.path).map(String::as_str);
         let lookup = cache
             .as_ref()
             .map(|cache| cache.lookup(file, superseded_by));
@@ -530,6 +564,27 @@ where
             continue;
         };
         let file = &files[file_index];
+        if keeper_sources
+            .get(&file.path)
+            .is_some_and(|source| !source.is_current())
+        {
+            report.processing_skips.push(history_skip(
+                file,
+                "supersession changed while rules were evaluated".into(),
+            ));
+            continue;
+        }
+        if file
+            .conversation
+            .as_ref()
+            .is_some_and(|source| !source.is_current())
+        {
+            report.processing_skips.push(history_skip(
+                file,
+                "history changed while rules were evaluated".into(),
+            ));
+            continue;
+        }
         if let Some(skip) = result.processing_skip {
             report.processing_skips.push(skip);
             continue;
@@ -545,7 +600,7 @@ where
         if let (true, Some(cache), Some(fingerprint)) =
             (cacheable, cache.as_mut(), result.cache_fingerprint)
         {
-            let superseded_by = options.supersession.get(&file.path).map(String::as_str);
+            let superseded_by = supersession.get(&file.path).map(String::as_str);
             cache.insert(&file.path, fingerprint, superseded_by, result.determination);
         }
     }
@@ -558,6 +613,11 @@ where
     }
 
     report.preview_matches = dedupe_preview_matches(std::mem::take(&mut report.preview_matches));
+    for matched in &mut report.preview_matches {
+        for proposal in &mut matched.proposals {
+            proposal.keeper_source = keeper_sources.get(&proposal.path).cloned();
+        }
+    }
     report.proposals = report
         .preview_matches
         .iter()
@@ -566,7 +626,7 @@ where
 
     let phase_start = std::time::Instant::now();
     let mut graphs = lifecycle::DependencyGraphs::default();
-    lifecycle::expand_preview(roots, &mut report, &mut graphs);
+    lifecycle::expand_preview(roots, &files, &mut report, &mut graphs);
     debug!(
         "rules: planned dependency groups for {} proposals in {:?}",
         report.proposals.len(),
@@ -718,6 +778,17 @@ fn evaluate_rule_file(
 ) -> CompletedRuleFile {
     let determination = match parse_scanned_session_file(file) {
         Ok(Some(session)) => {
+            if let Some(history) = session
+                .history
+                .as_ref()
+                .filter(|history| !history.is_complete())
+            {
+                return CompletedRuleFile {
+                    determination: CachedDetermination::Ignored,
+                    cache_fingerprint: None,
+                    processing_skip: Some(history_skip(file, history.notice().unwrap_or_default())),
+                };
+            }
             let stored = stored_rule_session(&session, file, superseded_by);
             if !session_matches_scope(scope, &stored)
                 || !session_matches_filters(&stored, file, filters)
@@ -1184,6 +1255,8 @@ fn collect_outcomes(
         match outcome.action.as_deref() {
             Some("trash") => {
                 let proposal = RuleProposal {
+                    source: file.conversation.clone(),
+                    keeper_source: None,
                     reviewed_group: None,
                     dependency_policy: outcome.dependency_policy,
                     included_by: None,
@@ -1202,6 +1275,8 @@ fn collect_outcomes(
             }
             Some("untrash") => {
                 let proposal = RuleProposal {
+                    source: file.conversation.clone(),
+                    keeper_source: None,
                     reviewed_group: None,
                     dependency_policy: outcome.dependency_policy,
                     included_by: None,
@@ -1232,7 +1307,11 @@ fn collect_outcomes(
         report.preview_matches.push(RulePreviewMatch {
             proposals,
             decisions,
-            hit: rule_search_hit(session.clone()),
+            hit: {
+                let mut session = session.clone();
+                session.source.clone_from(&file.conversation);
+                rule_search_hit(session)
+            },
         });
     }
 }
@@ -1257,6 +1336,19 @@ fn collect_rule_decision(
     });
 }
 
+fn history_skip(file: &SessionFile, reason: String) -> RuleProcessingSkip {
+    RuleProcessingSkip {
+        agent: file.agent,
+        session_id: file
+            .conversation
+            .as_ref()
+            .map(|source| source.thread_id.clone()),
+        path: file.path.clone(),
+        reason,
+        indeterminate: true,
+    }
+}
+
 fn stored_rule_session(
     session: &Session,
     file: &SessionFile,
@@ -1266,6 +1358,7 @@ fn stored_rule_session(
     stored.trashed = file.trashed;
     stored.original_path = file.original_path.clone();
     stored.superseded_by = superseded_by.map(str::to_owned);
+    stored.source.clone_from(&file.conversation);
     stored
 }
 
@@ -2034,6 +2127,7 @@ mod tests {
             cells,
             session_info: None,
             lineage: Default::default(),
+            history: None,
         }
     }
 

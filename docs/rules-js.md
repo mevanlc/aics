@@ -122,6 +122,14 @@ the session has been superseded by fork succession or equivalent-family
 collapse. Optional string properties on `session`, including `supersededBy`, are
 empty strings when their values are unavailable.
 
+Paginated Codex conversations are evaluated once using their complete inherited
+transcript. Their own physical pages belong to the logical selection; dependency
+policies still control expansion into other conversations. Incomplete or
+unresolved histories are skipped with a processing reason. Source changes or a
+new Codex rollout selection invalidate cached results and pending actions.
+`supersededBy` describes search visibility, not whether the underlying files can
+be removed independently; lifecycle checks still protect required history.
+
 ## Transcript access
 
 Large transcript fields are fetched from Rust only when a rule calls one of the

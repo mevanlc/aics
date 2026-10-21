@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -81,7 +80,7 @@ impl Fixtures {
                 json: true,
                 scope: Scope::Global,
                 filters: SearchFilters::default(),
-                supersession: BTreeMap::new(),
+                supersession: Default::default(),
             },
             claude,
             codex,
@@ -451,6 +450,8 @@ fn active_session_prevents_restoring_its_trashed_copy_for_each_provider() -> Res
         let antigravity = HeldLock::new(&fixtures.antigravity_lock());
         let proposal = RuleProposal {
             reviewed_group: None,
+            source: None,
+            keeper_source: None,
             dependency_policy: aics::lifecycle::DependencyPolicy::Skip,
             included_by: None,
             rule: "restore".to_owned(),
