@@ -337,7 +337,7 @@ fn render_item(
         let branch = if branch.is_empty() {
             branch
         } else {
-            format!("git: {branch}")
+            format!("⎇ {branch}")
         };
         lines.push(
             title_branch_line(title, &branch, item_width, metadata_fg)
@@ -655,15 +655,15 @@ mod tests {
         let title = Line::styled("Named 界界 e\u{301} session", style);
         for width in 0..80 {
             let line =
-                super::title_branch_line(title.clone(), "git: feature/界界", width, Color::Gray);
+                super::title_branch_line(title.clone(), "⎇ feature/界界", width, Color::Gray);
             assert_eq!(line.width(), width + 1);
             for span in &line.spans[1..line.spans.len() - 2] {
                 assert_eq!(line.style.patch(span.style), style);
             }
         }
-        let line = super::title_branch_line(title, "git: main", 50, Color::Gray);
+        let line = super::title_branch_line(title, "⎇ main", 50, Color::Gray);
         assert!(line.to_string().starts_with(" Named 界界 e\u{301} session"));
-        assert!(line.to_string().ends_with("git: main"));
+        assert!(line.to_string().ends_with("⎇ main"));
     }
 
     fn plain_snippet(text: &str) -> Line<'static> {

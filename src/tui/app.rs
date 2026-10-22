@@ -7457,7 +7457,7 @@ mod tests {
             .iter()
             .position(|row| row.contains("Card title 5"))
             .unwrap();
-        assert!(rows[title_row].contains("git: main"));
+        assert!(rows[title_row].contains("⎇ main"));
         assert!(rows[title_row + 1].contains("Snippet body 5"));
         for offset in [0, 1] {
             assert_eq!(
