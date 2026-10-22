@@ -369,6 +369,85 @@ pub struct ProjectionProvenance {
 }
 
 impl SearchProjection {
+    /// Readable session text in transcript order, restricted to visible source
+    /// ranges. Reuse stored provenance so list previews need no transcript I/O.
+    pub(crate) fn preview_text(
+        &self,
+        options: DisplayOptions,
+        opening: &str,
+        max_chars: usize,
+    ) -> String {
+        let mut visible = BTreeMap::<&SourceId, Vec<Range<usize>>>::new();
+        for field in default_search_field_names(VisibilitySearch::Visible, options) {
+            for value in self.fields.get(field).into_iter().flatten() {
+                for origin in &value.origins {
+                    if origin.source.source.block != SourceBlock::Title {
+                        visible
+                            .entry(&origin.source.source)
+                            .or_default()
+                            .push(origin.source.range.clone());
+                    }
+                }
+            }
+        }
+        let mut result = String::new();
+        let mut remaining = max_chars;
+        let mut whitespace = true;
+        for value in self.fields.get("content").into_iter().flatten() {
+            let start = value.text.find(opening).unwrap_or(0);
+            let mut ranges = Vec::<Range<usize>>::new();
+            for origin in &value.origins {
+                for allowed in visible.get(&origin.source.source).into_iter().flatten() {
+                    let start = origin.source.range.start.max(allowed.start);
+                    let end = origin.source.range.end.min(allowed.end);
+                    if start < end {
+                        ranges.push(if origin.range.len() == origin.source.range.len() {
+                            origin.range.start + start - origin.source.range.start
+                                ..origin.range.start + end - origin.source.range.start
+                        } else {
+                            origin.range.clone()
+                        });
+                    }
+                }
+            }
+            ranges.sort_by_key(|range| (range.start, range.end));
+            let mut merged = Vec::<Range<usize>>::new();
+            for range in ranges {
+                if let Some(previous) = merged
+                    .last_mut()
+                    .filter(|previous| previous.end >= range.start)
+                {
+                    previous.end = previous.end.max(range.end);
+                } else {
+                    merged.push(range);
+                }
+            }
+            for range in merged {
+                if range.end <= start {
+                    continue;
+                }
+                if let Some(text) = value.text.get(range.start.max(start)..range.end) {
+                    for ch in std::iter::once(' ').chain(text.chars()) {
+                        if ch.is_whitespace() && whitespace {
+                            continue;
+                        }
+                        if remaining == 0 {
+                            if !ch.is_whitespace() {
+                                result.push('…');
+                                return result;
+                            }
+                            continue;
+                        }
+                        whitespace = ch.is_whitespace();
+                        result.push(if whitespace { ' ' } else { ch });
+                        remaining -= 1;
+                    }
+                }
+            }
+        }
+        result.trim_end().to_owned()
+    }
+
     pub fn from_session(session: &Session) -> Self {
         let mut result = Self::default();
         if let Some(title) = &session.custom_title {

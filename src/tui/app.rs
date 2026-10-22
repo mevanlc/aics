@@ -400,6 +400,7 @@ struct SearchCommand {
     request_id: u64,
     request: SearchRequest,
     display_options: DisplayOptions,
+    snippets: crate::index::reader::SnippetOptions,
     viewer_check: Option<PathBuf>,
 }
 
@@ -471,6 +472,8 @@ pub struct App {
     next_search_id: u64,
     latest_search_id: Option<u64>,
     search_in_flight: bool,
+    requested_snippet_chars: usize,
+    snippet_refresh_request: Option<u64>,
     should_quit: bool,
     preview_visible: bool,
     preview_width_pct: u16,
@@ -572,6 +575,8 @@ impl App {
             next_search_id: 0,
             latest_search_id: None,
             search_in_flight: false,
+            requested_snippet_chars: 0,
+            snippet_refresh_request: None,
             should_quit: false,
             preview_visible: settings.show_preview,
             preview_width_pct: settings
@@ -656,6 +661,8 @@ impl App {
         install_panic_hook();
         let run_result = (|| -> Result<AppExit> {
             self.init_history();
+            let size = terminal.size()?;
+            self.last_frame_area = Rect::new(0, 0, size.width, size.height);
             self.dispatch_search()?;
             let mut needs_redraw = true;
 
@@ -696,7 +703,11 @@ impl App {
                                 self.handle_mouse(mouse)?;
                                 needs_redraw = true;
                             }
-                            Event::Resize(_, _) => needs_redraw = true,
+                            Event::Resize(width, height) => {
+                                self.last_frame_area = Rect::new(0, 0, width, height);
+                                self.refresh_snippets_if_needed();
+                                needs_redraw = true;
+                            }
                             _ => {}
                         }
                         if !event::poll(std::time::Duration::ZERO)? {
@@ -2071,9 +2082,14 @@ impl App {
 
     fn dispatch_search(&mut self) -> Result<()> {
         let request_id = self.next_search_id;
+        if self.query.value() != self.committed_query {
+            self.snippet_refresh_request = None;
+        }
         self.next_search_id = self.next_search_id.saturating_add(1);
         self.committed_query = self.query.value().to_owned();
-        self.preview_active_match = None;
+        if self.snippet_refresh_request != Some(request_id) {
+            self.preview_active_match = None;
+        }
 
         if let Some((id, _)) = self.pending_viewer_filter_check.as_mut() {
             *id = request_id;
@@ -2093,6 +2109,8 @@ impl App {
             self.results.len(),
             self.hidden_deleted_paths.len()
         );
+        let snippets = self.snippet_options();
+        self.requested_snippet_chars = snippets.max_chars;
         let Some(worker) = self.worker.as_ref() else {
             return Err(anyhow::anyhow!("search worker is unavailable"));
         };
@@ -2109,6 +2127,7 @@ impl App {
                     filters: self.filters.clone(),
                 },
                 display_options: self.display_options,
+                snippets,
                 viewer_check: self
                     .pending_viewer_filter_check
                     .as_ref()
@@ -2121,6 +2140,40 @@ impl App {
         self.pending_search = false;
         self.last_edit_at = None;
         Ok(())
+    }
+
+    fn snippet_options(&self) -> crate::index::reader::SnippetOptions {
+        let area = if self.last_frame_area.width == 0 {
+            Rect::new(0, 0, 120, 40)
+        } else {
+            self.last_frame_area
+        };
+        let width = layout::split(area, self.preview_width_pct, self.preview_visible)
+            .list
+            .width
+            .saturating_sub(4) as usize;
+        // Overfetch relative to terminal cells to allow for word boundaries,
+        // combining characters, and the optional title prefix.
+        let max_chars = width
+            .saturating_mul(self.settings.snippet_line_count.min(area.height as usize))
+            .saturating_mul(4);
+        crate::index::reader::SnippetOptions {
+            max_chars,
+            extend_preview: true,
+            display_options: self.display_options,
+        }
+    }
+
+    fn refresh_snippets_if_needed(&mut self) {
+        if self.rules_preview.is_none()
+            && self.snippet_options().max_chars > self.requested_snippet_chars
+        {
+            if !self.pending_search {
+                self.snippet_refresh_request = Some(self.next_search_id);
+            }
+            self.pending_search = true;
+            self.last_edit_at.get_or_insert_with(Instant::now);
+        }
     }
 
     fn apply_rules_preview_filter(&mut self, request_id: u64) {
@@ -2256,7 +2309,11 @@ impl App {
                                     .map(|hit| hit.session.file_path.display().to_string())
                                     .unwrap_or_else(|| "<none>".to_owned())
                             );
-                            self.preview_render_cache = None;
+                            let snippet_refresh =
+                                self.snippet_refresh_request == Some(response.request_id);
+                            if !snippet_refresh {
+                                self.preview_render_cache = None;
+                            }
                             if self.results.is_empty() {
                                 self.selected = 0;
                                 self.list_offset = 0;
@@ -2265,7 +2322,10 @@ impl App {
                                     self.selected.min(self.results.len().saturating_sub(1));
                                 self.ensure_selection_visible();
                             }
-                            self.preview_scroll = 0;
+                            if !snippet_refresh {
+                                self.preview_scroll = 0;
+                            }
+                            self.snippet_refresh_request = None;
                         }
                         Err(error) => {
                             debug!(
@@ -2494,6 +2554,7 @@ impl App {
     }
 
     fn trigger_search_now(&mut self) -> Result<()> {
+        self.snippet_refresh_request = None;
         self.pending_search = false;
         self.last_edit_at = None;
         self.dispatch_search()
@@ -2538,6 +2599,7 @@ impl App {
         self.settings.display_options = self.display_options;
         self.theme = Theme::from_name(new_settings.theme);
         self.preview_render_cache = None;
+        self.refresh_snippets_if_needed();
         if let Err(err) = Settings::save_patch(&patch) {
             self.statusline = Some(statusline::Entry::failed(format!(
                 "settings error: {err:#}"
@@ -3164,6 +3226,7 @@ impl App {
     fn toggle_preview(&mut self) {
         self.preview_visible = !self.preview_visible;
         self.preview_render_cache = None;
+        self.refresh_snippets_if_needed();
         self.save_layout_prefs();
     }
 
@@ -3379,6 +3442,7 @@ impl App {
 
     fn set_preview_width_pct(&mut self, width_pct: u16) {
         self.preview_width_pct = width_pct.clamp(PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX);
+        self.refresh_snippets_if_needed();
     }
 
     fn save_layout_prefs(&mut self) {
@@ -4028,9 +4092,11 @@ fn search_worker_loop(
             command.request.sort,
             command.request.limit
         );
-        let result = match search_engine
-            .search_with_display_options(&command.request, command.display_options)
-        {
+        let result = match search_engine.search_with_snippet_options(
+            &command.request,
+            command.display_options,
+            command.snippets,
+        ) {
             Ok(results) => {
                 debug!(
                     "search_worker_loop completed request id={} results={} first_result={}",
@@ -7266,6 +7332,71 @@ mod tests {
             .unwrap()
             .body = "alpha stale summary".into();
         assert!(highlighted_text(&app.list_snippet_line(&hit, &theme)).is_empty());
+    }
+
+    #[test]
+    fn refreshing_snippet_space_preserves_preview_reading_position() {
+        let (mut app, sender) = test_app_with_response_sender();
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("session.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let hit = sample_hit_with_path(Agent::Claude, path);
+        app.results = vec![hit.clone()];
+        app.pending_search = false;
+        app.last_edit_at = None;
+        app.preview_scroll = 42;
+        app.preview_active_match = Some(2);
+        app.requested_snippet_chars = 0;
+        app.refresh_snippets_if_needed();
+        app.dispatch_search().unwrap();
+        let id = app.latest_search_id.unwrap();
+        assert_eq!(app.preview_active_match, Some(2));
+        sender
+            .send(SearchResponse {
+                request_id: id,
+                result: Ok(vec![hit]),
+                viewer_matches: None,
+            })
+            .unwrap();
+        assert!(app.collect_search_responses().unwrap());
+        assert_eq!(app.preview_scroll, 42);
+        assert_eq!(app.preview_active_match, Some(2));
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn snippet_budget_tracks_row_count_and_list_width() {
+        let mut app = test_app();
+        app.last_frame_area = Rect::new(0, 0, 120, 30);
+        app.preview_visible = true;
+        app.settings.snippet_line_count = 3;
+        let initial = app.snippet_options().max_chars;
+        app.requested_snippet_chars = initial;
+        app.pending_search = false;
+        app.last_edit_at = None;
+        let mut settings = app.settings.clone();
+        settings.snippet_line_count = 6;
+        app.apply_settings(settings).unwrap();
+        assert_eq!(app.snippet_options().max_chars, initial * 2);
+        assert!(app.pending_search);
+        app.requested_snippet_chars = app.snippet_options().max_chars;
+        app.pending_search = false;
+        app.last_edit_at = None;
+        app.toggle_preview();
+        assert!(app.snippet_options().max_chars > app.requested_snippet_chars);
+        assert!(app.pending_search);
+        app.requested_snippet_chars = app.snippet_options().max_chars;
+        app.pending_search = false;
+        app.toggle_preview();
+        assert!(
+            !app.pending_search,
+            "shrinking a card reuses the larger excerpt"
+        );
+        app.last_frame_area = Rect::new(0, 0, 240, 40);
+        app.refresh_snippets_if_needed();
+        assert!(app.pending_search);
+        app.settings.snippet_line_count = 0;
+        assert_eq!(app.snippet_options().max_chars, 0);
     }
 
     #[test]

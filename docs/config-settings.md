@@ -33,7 +33,11 @@ stderr and in the TUI status line.
 - `show_preview`: whether the preview panel is visible
 - `preview_width_pct`: the preview panel's percentage width
 - `session_separator`: separator shown between session messages
-- `snippet_line_count`: number of lines shown in session-card snippets
+- `snippet_line_count`: number of lines shown in session-card snippets. The TUI
+  requests enough text for the card width and line count, refreshing excerpts
+  when more space becomes available. With no search query, previews continue
+  beyond a short opening request into later visible messages. Long words and
+  URLs wrap across rows rather than stopping the snippet early.
 - `two_line_topbar`: show session titles and recorded Git branches in a second
   card header row; default `false`, toggled and saved with `Ctrl+O`. The snippet
   keeps its configured line count and omits the title prefix in this view.

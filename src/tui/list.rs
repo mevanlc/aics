@@ -3,6 +3,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState};
 use ratatui::Frame;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::index::SearchHit;
@@ -535,84 +536,62 @@ fn wrap_line(line: Line<'static>, width: usize, max_lines: usize) -> Vec<Line<'s
     if width == 0 || max_lines == 0 {
         return Vec::new();
     }
-
-    let mut rows = vec![Vec::<Span<'static>>::new()];
-    let mut row_widths = vec![0usize];
-    let mut row_index = 0usize;
+    // Normalize whitespace before wrapping and bound the work to what a card
+    // could display, rather than laying out an entire summary on every draw.
+    let glyph_budget = width.saturating_mul(max_lines).saturating_add(1);
+    let mut normalized = Line::default().style(line.style);
+    let mut glyphs = 0;
+    let mut whitespace = true;
     let mut truncated = false;
-
-    for span in line.spans {
-        for (segment, is_whitespace) in split_segments(span.content.as_ref()) {
-            if is_whitespace && row_widths[row_index] == 0 {
+    'spans: for span in line.spans {
+        for glyph in span.content.graphemes(true) {
+            let is_whitespace = glyph.chars().all(char::is_whitespace);
+            if is_whitespace && whitespace {
                 continue;
             }
-
-            let segment_width = UnicodeWidthStr::width(segment.as_str());
-            if row_widths[row_index] + segment_width <= width {
-                rows[row_index].push(Span::styled(segment, span.style));
-                row_widths[row_index] += segment_width;
-                continue;
-            }
-
-            if row_index + 1 >= max_lines {
+            if glyphs >= glyph_budget {
+                if is_whitespace {
+                    continue;
+                }
                 truncated = true;
-                break;
+                break 'spans;
             }
-
-            row_index += 1;
-            rows.push(Vec::new());
-            row_widths.push(0);
-            if is_whitespace {
-                continue;
+            let glyph = if is_whitespace { " " } else { glyph };
+            glyphs += usize::from(Span::raw(glyph).width() > 0);
+            if let Some(previous) = normalized
+                .spans
+                .last_mut()
+                .filter(|previous| previous.style == span.style)
+            {
+                previous.content.to_mut().push_str(glyph);
+            } else {
+                normalized
+                    .spans
+                    .push(Span::styled(glyph.to_owned(), span.style));
             }
-
-            if segment_width > width {
-                rows[row_index].push(Span::styled(
-                    truncate_with_ellipsis(&segment, width),
-                    span.style,
-                ));
-                row_widths[row_index] = width;
-                truncated = true;
-                break;
-            }
-
-            rows[row_index].push(Span::styled(segment, span.style));
-            row_widths[row_index] = segment_width;
-        }
-
-        if truncated {
-            break;
+            whitespace = is_whitespace;
         }
     }
-
+    let mut rows = crate::tui::text_layout::LayoutDocument::new(
+        &ratatui::text::Text::from(normalized),
+        width.min(u16::MAX as usize) as u16,
+    )
+    .text
+    .lines;
+    truncated |= rows.len() > max_lines;
+    rows.truncate(max_lines);
     if truncated {
-        append_ellipsis(&mut rows, &mut row_widths, width);
-    }
-
-    rows.into_iter().map(Line::from).collect()
-}
-
-fn split_segments(value: &str) -> Vec<(String, bool)> {
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut current_is_whitespace = None;
-
-    for ch in value.chars() {
-        let is_whitespace = ch.is_whitespace();
-        if current_is_whitespace.is_some_and(|state| state != is_whitespace) && !current.is_empty()
-        {
-            segments.push((current.clone(), current_is_whitespace.unwrap_or(false)));
-            current.clear();
+        let mut row_widths = rows.iter().map(Line::width).collect::<Vec<_>>();
+        let mut spans = rows
+            .iter_mut()
+            .map(|row| std::mem::take(&mut row.spans))
+            .collect::<Vec<_>>();
+        append_ellipsis(&mut spans, &mut row_widths, width);
+        for (row, spans) in rows.iter_mut().zip(spans) {
+            row.spans = spans;
         }
-        current.push(ch);
-        current_is_whitespace = Some(is_whitespace);
     }
-
-    if !current.is_empty() {
-        segments.push((current, current_is_whitespace.unwrap_or(false)));
-    }
-
-    segments
+    rows
 }
 
 fn append_ellipsis(rows: &mut [Vec<Span<'static>>], row_widths: &mut [usize], width: usize) {
@@ -629,17 +608,16 @@ fn append_ellipsis(rows: &mut [Vec<Span<'static>>], row_widths: &mut [usize], wi
         };
         let next = truncate_plain(
             last_span.content.as_ref(),
-            UnicodeWidthStr::width(last_span.content.as_ref()).saturating_sub(1),
+            last_span.width().saturating_sub(1),
         );
         if next.is_empty() {
             let removed = last_row.pop().expect("last span should exist");
-            *last_width =
-                last_width.saturating_sub(UnicodeWidthStr::width(removed.content.as_ref()));
+            *last_width = last_width.saturating_sub(removed.width());
             continue;
         }
-        *last_width = last_width.saturating_sub(UnicodeWidthStr::width(last_span.content.as_ref()));
+        *last_width = last_width.saturating_sub(last_span.width());
         *last_span = Span::styled(next, last_span.style);
-        *last_width += UnicodeWidthStr::width(last_span.content.as_ref());
+        *last_width += last_span.width();
     }
 
     if *last_width < width {
@@ -733,6 +711,34 @@ mod tests {
 
         assert!(decision.ends_with('…'));
         assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn long_tokens_fill_available_rows_and_continue_into_following_text() {
+        let url = format!("https://example.com/{}", "long-path-".repeat(10));
+        let highlight = Style::default().bg(Color::Blue);
+        let line = Line::from(vec![
+            ratatui::text::Span::raw("start "),
+            ratatui::text::Span::styled(url.clone(), highlight),
+            ratatui::text::Span::raw("\n\n after the URL with 界界 and e\u{301}."),
+        ]);
+        let short = wrap_line(line.clone(), 24, 4);
+        assert_eq!(short.len(), 4);
+        assert!(short.last().unwrap().to_string().ends_with('…'));
+        assert!(short
+            .iter()
+            .all(|row| row.width() <= 24 && !row.to_string().trim().is_empty()));
+        let full = wrap_line(line, 24, 12);
+        let joined = full.iter().map(ToString::to_string).collect::<String>();
+        assert!(joined.contains(&url));
+        assert!(joined.contains("after the URL"));
+        assert!(joined.contains("e\u{301}"));
+        assert!(!joined.contains('…'));
+        assert!(full
+            .iter()
+            .flat_map(|line| &line.spans)
+            .filter(|span| span.content.contains("long-path"))
+            .all(|span| span.style.bg == Some(Color::Blue)));
     }
 
     #[test]

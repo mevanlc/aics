@@ -12,6 +12,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Native Claude Code autosummaries and Codex rollout summaries in previews and summary snippets
 - Incremental indexing with parallel reading of new or changed sessions on startup
 - Interactive TUI with session list, snippet preview, and scrollable full-session viewer
+- Session-card snippets adapt to their width and configured line count, with longer no-query previews continuing into later visible messages
 - Toggle two-line card topbars with `Ctrl+O` to show session titles and recorded Git branches above the snippets
 - Native session names centered in the preview border, or the session-list border when preview is hidden
 - Filter modal: search content (Visible / All / Hidden), scope, agent, date range, minimum length, session kind (original / trimmed / rollover / sub-agent), live, superseded, and trashed sessions

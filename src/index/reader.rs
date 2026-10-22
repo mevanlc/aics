@@ -205,6 +205,23 @@ const MAX_EMPTY_QUERY_CANDIDATES: usize = 5_000;
 const MAX_QUERY_CANDIDATES: usize = 2_000;
 const SNIPPET_MAX_CHARS: usize = 240;
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SnippetOptions {
+    pub max_chars: usize,
+    pub extend_preview: bool,
+    pub display_options: DisplayOptions,
+}
+
+impl Default for SnippetOptions {
+    fn default() -> Self {
+        Self {
+            max_chars: SNIPPET_MAX_CHARS,
+            extend_preview: false,
+            display_options: DisplayOptions::SHOW_ALL,
+        }
+    }
+}
+
 pub struct SearchEngine {
     index: Index,
     reader: IndexReader,
@@ -289,6 +306,15 @@ impl SearchEngine {
         request: &SearchRequest,
         display_options: DisplayOptions,
     ) -> Result<Vec<SearchHit>> {
+        self.search_with_snippet_options(request, display_options, SnippetOptions::default())
+    }
+
+    pub(crate) fn search_with_snippet_options(
+        &self,
+        request: &SearchRequest,
+        display_options: DisplayOptions,
+        snippets: SnippetOptions,
+    ) -> Result<Vec<SearchHit>> {
         // Keep long-lived readers in sync with in-process index mutations such as delete actions.
         self.reader
             .reload()
@@ -307,7 +333,14 @@ impl SearchEngine {
         let mut session_cache = HashMap::new();
 
         if query_text.is_empty() {
-            return self.search_recent(&searcher, request, limit, &live_ids, &mut session_cache);
+            return self.search_recent(
+                &searcher,
+                request,
+                limit,
+                &live_ids,
+                &mut session_cache,
+                snippets,
+            );
         }
 
         if matches!(request.sort, SortMode::Time) {
@@ -320,6 +353,7 @@ impl SearchEngine {
                 display_options,
                 &live_ids,
                 &mut session_cache,
+                snippets,
             );
         }
 
@@ -358,6 +392,7 @@ impl SearchEngine {
                 &live_ids,
                 &mut session_cache,
                 &mut candidates,
+                snippets,
             )?;
             if batch_size == 0 || docs_len < batch_size {
                 break;
@@ -383,6 +418,7 @@ impl SearchEngine {
         limit: usize,
         live_ids: &LiveSessionSnapshot,
         session_cache: &mut HashMap<DocAddress, StoredSession>,
+        snippets: SnippetOptions,
     ) -> Result<Vec<SearchHit>> {
         let modified_ts_field = self.fields.schema.get_field_name(self.fields.modified_ts);
         let candidate_limit = candidate_limit(request, true);
@@ -410,14 +446,15 @@ impl SearchEngine {
                 }) {
                     continue;
                 }
-                let session = self.load_session(searcher, address, session_cache)?;
+                let document = searcher.doc::<TantivyDocument>(address)?;
+                let session = self.session_from_doc(address, &document, session_cache)?;
                 let is_live = live_ids.is_live(session.agent, &session.session_id);
                 if !matches_request(request, &session, is_live) {
                     continue;
                 }
 
                 hits.push(SearchHit {
-                    snippet_html: fallback_snippet(&session, ""),
+                    snippet_html: preview_snippet(&document, &self.fields, &session, snippets),
                     score: session.modified_ts as f32,
                     session,
                     is_live,
@@ -496,6 +533,7 @@ impl SearchEngine {
         display_options: DisplayOptions,
         live_ids: &LiveSessionSnapshot,
         session_cache: &mut HashMap<DocAddress, StoredSession>,
+        snippets: SnippetOptions,
     ) -> Result<Vec<SearchHit>> {
         let (query_parser, default_snippet_fields) =
             self.query_parser(visibility_search, display_options);
@@ -532,8 +570,13 @@ impl SearchEngine {
                     continue;
                 }
 
-                let snippet_html =
-                    build_snippet_html(&snippet_generators, &document, &self.fields, &session);
+                let snippet_html = build_snippet_html(
+                    &snippet_generators,
+                    &document,
+                    &self.fields,
+                    &session,
+                    snippets,
+                );
                 hits.push(SearchHit {
                     snippet_html,
                     score: session.modified_ts as f32,
@@ -576,6 +619,7 @@ impl SearchEngine {
         live_ids: &LiveSessionSnapshot,
         session_cache: &mut HashMap<DocAddress, StoredSession>,
         hits: &mut Vec<SearchCandidate>,
+        snippets: SnippetOptions,
     ) -> Result<()> {
         for (score, address) in docs {
             let document = searcher.doc::<TantivyDocument>(address)?;
@@ -585,8 +629,13 @@ impl SearchEngine {
                 continue;
             }
 
-            let snippet_html =
-                build_snippet_html(snippet_generators, &document, &self.fields, &session);
+            let snippet_html = build_snippet_html(
+                snippet_generators,
+                &document,
+                &self.fields,
+                &session,
+                snippets,
+            );
             hits.push(SearchCandidate {
                 score: score * recency_boost(session.modified_ts),
                 session,
@@ -608,22 +657,6 @@ impl SearchEngine {
                 is_live: candidate.is_live,
             })
             .collect()
-    }
-
-    fn load_session(
-        &self,
-        searcher: &tantivy::Searcher,
-        address: DocAddress,
-        session_cache: &mut HashMap<DocAddress, StoredSession>,
-    ) -> Result<StoredSession> {
-        if let Some(session) = session_cache.get(&address).cloned() {
-            return Ok(session);
-        }
-
-        let document = searcher.doc::<TantivyDocument>(address)?;
-        let session = stored_session_from_document(&document, self.fields.session_json)?;
-        session_cache.insert(address, session.clone());
-        Ok(session)
     }
 
     fn session_from_doc(
@@ -1035,7 +1068,47 @@ fn build_snippet_html(
     document: &TantivyDocument,
     fields: &IndexSchema,
     session: &StoredSession,
+    snippets: SnippetOptions,
 ) -> String {
+    if snippets.max_chars == 0 {
+        return String::new();
+    }
+    let projection = snippet_projection(document, fields);
+    let (_, matches) = plan.field_matches(&projection);
+    let Some(first) = matches.first() else {
+        return preview_snippet(document, fields, session, snippets);
+    };
+    let text = &projection.fields[&first.field][first.value].text;
+    let before = text[..first.range.start]
+        .char_indices()
+        .rev()
+        .nth(60)
+        .map_or(0, |(index, _)| index);
+    let end = before + snippet_end(&text[before..], snippets.max_chars);
+    let ranges = matches
+        .iter()
+        .filter(|matched| matched.field == first.field && matched.value == first.value)
+        .filter_map(|matched| {
+            let start = matched.range.start.max(before);
+            let end = matched.range.end.min(end);
+            (start < end).then_some(start - before..end - before)
+        })
+        .collect::<Vec<_>>();
+    let mut result = String::new();
+    if before > 0 {
+        result.push('…');
+    }
+    result.push_str(&emphasize_ranges(&text[before..end], &ranges));
+    if end < text.len() {
+        result.push('…');
+    }
+    result
+}
+
+fn snippet_projection(
+    document: &TantivyDocument,
+    fields: &IndexSchema,
+) -> crate::search_projection::SearchProjection {
     let text_fields = fields
         .schema
         .fields()
@@ -1060,40 +1133,40 @@ fn build_snippet_html(
         .and_then(|value| value.as_str())
         .and_then(|json| serde_json::from_str(json).ok())
         .unwrap_or_default();
-    let projection =
-        crate::search_projection::SearchProjection::from_stored_fields(text_fields, provenance);
-    let (_, matches) = plan.field_matches(&projection);
-    let Some(first) = matches.first() else {
-        return fallback_snippet(session, "");
-    };
-    let text = &projection.fields[&first.field][first.value].text;
-    let before = text[..first.range.start]
-        .char_indices()
-        .rev()
-        .nth(60)
-        .map_or(0, |(index, _)| index);
-    let end = text[before..]
-        .char_indices()
-        .nth(SNIPPET_MAX_CHARS)
-        .map_or(text.len(), |(index, _)| before + index);
-    let ranges = matches
-        .iter()
-        .filter(|matched| matched.field == first.field && matched.value == first.value)
-        .filter_map(|matched| {
-            let start = matched.range.start.max(before);
-            let end = matched.range.end.min(end);
-            (start < end).then_some(start - before..end - before)
-        })
-        .collect::<Vec<_>>();
-    let mut result = String::new();
-    if before > 0 {
-        result.push('…');
+    crate::search_projection::SearchProjection::from_stored_fields(text_fields, provenance)
+}
+
+// Count whitespace runs as one character, as the card's wrapping does.
+fn snippet_end(text: &str, max_chars: usize) -> usize {
+    let mut remaining = max_chars;
+    let mut whitespace = true;
+    for (index, ch) in text.char_indices() {
+        if !ch.is_whitespace() || !whitespace {
+            if remaining == 0 {
+                return index;
+            }
+            remaining -= 1;
+        }
+        whitespace = ch.is_whitespace();
     }
-    result.push_str(&emphasize_ranges(&text[before..end], &ranges));
-    if end < text.len() {
-        result.push('…');
+    text.len()
+}
+
+fn preview_snippet(
+    document: &TantivyDocument,
+    fields: &IndexSchema,
+    session: &StoredSession,
+    snippets: SnippetOptions,
+) -> String {
+    let opening = fallback_snippet(session, "");
+    if !snippets.extend_preview {
+        return opening;
     }
-    result
+    if snippets.max_chars == 0 {
+        return String::new();
+    }
+    let projection = snippet_projection(document, fields);
+    projection.preview_text(snippets.display_options, &opening, snippets.max_chars)
 }
 
 fn emphasize_ranges(text: &str, ranges: &[std::ops::Range<usize>]) -> String {
@@ -1245,6 +1318,158 @@ mod tests {
     }
 
     #[test]
+    fn search_snippets_expand_to_the_requested_budget_without_changing_the_anchor(
+    ) -> anyhow::Result<()> {
+        let schema = crate::index::schema::IndexSchema::new();
+        let mut document = tantivy::TantivyDocument::default();
+        document.add_text(
+            schema.content,
+            format!(
+                "{} needle {} tailmarker",
+                "before ".repeat(40),
+                "context ".repeat(100)
+            ),
+        );
+        let session = stub_session("/repo", None);
+        let plan = crate::search_query::QueryPlan::compile(
+            "needle",
+            crate::search_query::VisibilitySearch::All,
+            crate::settings::DisplayOptions::SHOW_ALL,
+        )?;
+        let small = super::build_snippet_html(
+            &plan,
+            &document,
+            &schema,
+            &session,
+            super::SnippetOptions::default(),
+        );
+        let large = super::build_snippet_html(
+            &plan,
+            &document,
+            &schema,
+            &session,
+            super::SnippetOptions {
+                max_chars: 1200,
+                ..Default::default()
+            },
+        );
+        assert!(small.contains("<b>needle</b>"));
+        assert!(large.contains("<b>needle</b>"));
+        assert!(large.starts_with(small.trim_end_matches('…')));
+        assert!(!small.contains("tailmarker"));
+        assert!(large.ends_with("tailmarker"));
+        assert!(super::build_snippet_html(
+            &plan,
+            &document,
+            &schema,
+            &session,
+            super::SnippetOptions {
+                max_chars: 0,
+                ..Default::default()
+            }
+        )
+        .is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn extended_preview_uses_later_visible_messages_from_stored_text() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("preview.jsonl");
+        let records = [
+            serde_json::json!({"type":"user","sessionId":"preview","message":{"role":"user","content":"Short opening request."}}),
+            serde_json::json!({"type":"assistant","sessionId":"preview","message":{"role":"assistant","content":[{"type":"thinking","thinking":"HIDDEN_THINKING"},{"type":"text","text":format!("first answer {}", "useful context ".repeat(25))}]}}),
+            serde_json::json!({"type":"user","sessionId":"preview","message":{"role":"user","content":"Later user followup."}}),
+            serde_json::json!({"type":"assistant","sessionId":"preview","message":{"role":"assistant","content":"Later assistant answer."}}),
+        ];
+        std::fs::write(
+            &path,
+            records
+                .iter()
+                .map(|value| format!("{value}\n"))
+                .collect::<String>(),
+        )?;
+        let mut session = crate::parse::parse_claude_session_file(&path)?.unwrap();
+        session.custom_title = Some("TITLE_EXCLUDED".into());
+        let projection = crate::search_projection::SearchProjection::from_session(&session);
+        let schema = crate::index::schema::IndexSchema::new();
+        let mut document = tantivy::TantivyDocument::default();
+        for (name, values) in &projection.fields {
+            if let Ok(field) = schema.schema.get_field(name) {
+                for value in values {
+                    document.add_text(field, &value.text);
+                }
+            }
+        }
+        document.add_text(
+            schema.search_provenance,
+            serde_json::to_string(&projection.provenance())?,
+        );
+        let stored = crate::index::StoredSession::from(&session);
+        std::fs::remove_file(&path)?;
+        let options = super::SnippetOptions {
+            max_chars: 1000,
+            extend_preview: true,
+            display_options: crate::settings::DisplayOptions::default(),
+        };
+        let preview = super::preview_snippet(&document, &schema, &stored, options);
+        assert!(preview.starts_with("Short opening request. first answer"));
+        assert!(preview.len() > 240);
+        assert!(preview.ends_with("Later user followup. Later assistant answer."));
+        assert!(!preview.contains("HIDDEN_THINKING"));
+        assert!(!preview.contains("TITLE_EXCLUDED"));
+        let short = super::preview_snippet(
+            &document,
+            &schema,
+            &stored,
+            super::SnippetOptions {
+                max_chars: 80,
+                ..options
+            },
+        );
+        assert!(short.ends_with('…'));
+        assert!(!short.contains("Later user"));
+        let users_only = super::preview_snippet(
+            &document,
+            &schema,
+            &stored,
+            super::SnippetOptions {
+                display_options: crate::settings::DisplayOptions {
+                    hide_agent_replies: true,
+                    ..options.display_options
+                },
+                ..options
+            },
+        );
+        assert_eq!(users_only, "Short opening request. Later user followup.");
+        let agents_only = super::preview_snippet(
+            &document,
+            &schema,
+            &stored,
+            super::SnippetOptions {
+                display_options: crate::settings::DisplayOptions {
+                    hide_user_messages: true,
+                    ..options.display_options
+                },
+                ..options
+            },
+        );
+        assert!(!agents_only.contains("Short opening"));
+        assert!(!agents_only.contains("Later user"));
+        assert!(agents_only.contains("Later assistant answer."));
+        assert_eq!(
+            super::preview_snippet(
+                &document,
+                &schema,
+                &stored,
+                super::SnippetOptions::default()
+            ),
+            "Short opening request."
+        );
+        Ok(())
+    }
+
+    #[test]
     fn indexed_snippets_use_positive_field_phrase_and_regex_occurrences() -> anyhow::Result<()> {
         let schema = crate::index::schema::IndexSchema::new();
         let mut document = tantivy::TantivyDocument::default();
@@ -1259,7 +1484,11 @@ mod tests {
                 crate::settings::DisplayOptions::SHOW_ALL,
             )?;
             Ok(super::build_snippet_html(
-                &plan, &document, &schema, &session,
+                &plan,
+                &document,
+                &schema,
+                &session,
+                super::SnippetOptions::default(),
             ))
         };
         assert_eq!(
@@ -1359,6 +1588,7 @@ mod tests {
             request.limit,
             &crate::live::LiveSessionSnapshot::default(),
             &mut loaded,
+            super::SnippetOptions::default(),
         )?;
         assert_eq!(
             hits.iter()
