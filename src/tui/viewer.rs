@@ -176,9 +176,9 @@ impl ViewerState {
         KeymapHint::new("↑↓/Pg", "scroll"),
         KeymapHint::new("⇧↑↓/^⇧↑↓", "message/user"),
         KeymapHint::new("^N/^P", "matches"),
-        KeymapHint::new("Tab/^F", "focus"),
+        KeymapHint::new("Tab", "focus"),
         KeymapHint::new("Alt+R/I", "regex/case"),
-        KeymapHint::new("^⇧F", "filters"),
+        KeymapHint::new("^F", "filters"),
         KeymapHint::new("^/⇧Click", "select"),
         KeymapHint::new("Alt+C", "copy"),
         KeymapHint::new("Esc", "close"),
@@ -217,10 +217,6 @@ impl ViewerState {
 
     pub fn find_query(&self) -> &str {
         self.find.value()
-    }
-
-    pub(crate) fn search_is_focused(&self) -> bool {
-        self.input_focus == ViewerInputFocus::Search
     }
 
     pub(crate) fn set_search_options(&mut self, visibility: VisibilitySearch, find_jump: bool) {
@@ -275,10 +271,6 @@ impl ViewerState {
                 };
                 ViewerOutcome::Stay
             }
-            KeyCode::Char('f') if key.modifiers == KeyModifiers::CONTROL => {
-                self.input_focus = ViewerInputFocus::Find;
-                ViewerOutcome::Stay
-            }
             KeyCode::Char('r')
                 if key.modifiers == KeyModifiers::ALT
                     && self.input_focus == ViewerInputFocus::Find =>
@@ -297,23 +289,6 @@ impl ViewerState {
                 if let Some(session) = session {
                     self.render_cache(area, session, summary, theme, theme_name, display_options);
                 }
-                ViewerOutcome::Stay
-            }
-            KeyCode::Enter if self.input_focus == ViewerInputFocus::Find => {
-                let direction = if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    MatchDirection::Previous
-                } else {
-                    MatchDirection::Next
-                };
-                self.jump_to_match(
-                    direction,
-                    area,
-                    session,
-                    summary,
-                    theme,
-                    theme_name,
-                    display_options,
-                );
                 ViewerOutcome::Stay
             }
             KeyCode::Char('c') if key.modifiers == KeyModifiers::ALT => {
@@ -1802,7 +1777,7 @@ mod tests {
         let viewer = ViewerState::with_search("alpha");
         assert_eq!(viewer.search_query(), "alpha");
         assert_eq!(viewer.find_query(), "");
-        assert!(!viewer.search_is_focused());
+        assert_eq!(viewer.input_focus, super::ViewerInputFocus::Find);
         let (wide, _) = super::viewer_inputs(Rect::new(0, 0, 80, 30));
         assert_eq!(wide[0].y, wide[1].y);
         let (narrow, _) = super::viewer_inputs(Rect::new(0, 0, 79, 30));
@@ -1853,7 +1828,7 @@ mod tests {
         assert_eq!(viewer.active_find, None);
         for expected in [Some(0), Some(1), Some(2), Some(0)] {
             viewer.handle_key(
-                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
                 area,
                 Some(&session),
                 None,
@@ -1864,7 +1839,7 @@ mod tests {
             assert_eq!(viewer.active_find, expected);
         }
         viewer.handle_key(
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
             area,
             Some(&session),
             None,
@@ -1873,6 +1848,16 @@ mod tests {
             DisplayOptions::SHOW_ALL,
         );
         assert_eq!(viewer.active_find, Some(2));
+        viewer.handle_key(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            area,
+            Some(&session),
+            None,
+            &Theme::default(),
+            ThemeName::default(),
+            DisplayOptions::SHOW_ALL,
+        );
+        assert_eq!(viewer.active_find, Some(0));
         viewer.find_regex = true;
         viewer.find = Input::default().with_value("[".to_owned());
         refresh_viewer(&mut viewer, &session, area, DisplayOptions::SHOW_ALL);
@@ -1892,7 +1877,7 @@ mod tests {
         assert_eq!(viewer.scroll, 3);
         assert_eq!(viewer.active_find, None);
         viewer.handle_key(
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
             area,
             Some(&session),
             None,
@@ -1973,9 +1958,9 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             },
         );
-        assert!(viewer.search_is_focused());
+        assert_eq!(viewer.input_focus, super::ViewerInputFocus::Search);
         viewer.handle_key(
-            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
             area,
             Some(&session),
             None,
@@ -1983,7 +1968,7 @@ mod tests {
             ThemeName::default(),
             DisplayOptions::SHOW_ALL,
         );
-        assert!(!viewer.search_is_focused());
+        assert_eq!(viewer.input_focus, super::ViewerInputFocus::Find);
         viewer.handle_key(
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT),
             area,
@@ -3360,9 +3345,9 @@ mod tests {
         assert!(!keys.contains(&"/"));
         assert!(!keys.contains(&"n/p"));
         assert!(keys.contains(&"^N/^P"));
-        assert!(keys.contains(&"Tab/^F"));
+        assert!(keys.contains(&"Tab"));
         assert!(keys.contains(&"Alt+R/I"));
-        assert!(keys.contains(&"^⇧F"));
+        assert!(keys.contains(&"^F"));
     }
 
     #[test]

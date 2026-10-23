@@ -106,8 +106,7 @@ process the complete required group. Use **Enter → g** to review related sessi
 | `PgUp` / `PgDn` | Preview/viewer page scroll |
 | `Home` / `End` | Preview/viewer jump to beginning/end |
 | `Esc` | Cancel / close modal / go back |
-| `^F` | Edit filters in the session list; focus Find in the viewer |
-| `^Shift+F` | Edit filters in the viewer |
+| `^F` | Edit filters |
 | `^S` | Edit Settings |
 | `^R` | Recall search history |
 | `^O` | Toggle two-line session-card topbars |

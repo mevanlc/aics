@@ -92,15 +92,13 @@ find text or noninteractive commands. `^R` does nothing on the main screen when
 | `^Shift+↑` / `^Shift+↓` | Jump to the previous or next user message |
 | `^N` / `^P` | Jump to the next or previous occurrence for the focused box |
 | `^U` / `^E` | Use readline-style editing in the focused box |
-| `^F` | Focus Find |
-| `^Shift+F` | Open filters and display options |
+| `^F` | Open filters and display options |
 | `Alt+R` in Find | Toggle substring/regex mode |
 | `Alt+I` in Find | Toggle case sensitivity |
 | Click Find's Substring/Regex label | Toggle substring/regex mode |
 | Click Find's Ignore case/Case label | Toggle case sensitivity |
-| `^T` or Search `Enter` → `d` | Move the current session to AICS trash, including the complete local Antigravity bundle |
-| `⏎` in Search | Open the current session's actions menu |
-| `⏎` / `Shift+⏎` in Find | Next/previous Find occurrence |
+| `^T` or `Enter` → `d` | Move the current session to AICS trash, including the complete local Antigravity bundle |
+| `⏎` | Open the current session's actions menu |
 | `^L` | Open contextual help on the Viewer tab |
 | `Esc` | Close the viewer |
 | Mouse wheel | Scroll the conversation |

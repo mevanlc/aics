@@ -1634,12 +1634,13 @@ impl App {
             return Ok(());
         }
 
-        if self.dependency_before_viewer.is_none()
-            && matches!(self.overlay, Overlay::Viewer(_))
-            && key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
-            && matches!(key.code, KeyCode::Char('f' | 'F'))
+        if matches!(self.overlay, Overlay::Viewer(_))
+            && key.modifiers == KeyModifiers::CONTROL
+            && key.code == KeyCode::Char('f')
         {
-            self.open_filters();
+            if self.dependency_before_viewer.is_none() {
+                self.open_filters();
+            }
             return Ok(());
         }
 
@@ -1659,7 +1660,7 @@ impl App {
         }
 
         if self.dependency_before_viewer.is_none()
-            && matches!(&self.overlay, Overlay::Viewer(state) if state.search_is_focused())
+            && matches!(self.overlay, Overlay::Viewer(_))
             && key.code == KeyCode::Enter
             && key.modifiers.is_empty()
         {
@@ -6148,38 +6149,33 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_f_focuses_viewer_find_and_enter_keeps_viewer_open() {
+    fn tab_refocuses_viewer_find_without_editing_queries() {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude)];
         app.committed_query = "alpha".into();
         app.open_viewer();
         app.handle_key(crossterm_key(KeyCode::Tab)).unwrap();
-        app.handle_key(crossterm_key_mods(
-            KeyCode::Char('f'),
-            KeyModifiers::CONTROL,
-        ))
-        .unwrap();
+        app.handle_key(crossterm_key(KeyCode::Tab)).unwrap();
         app.handle_key(crossterm_key(KeyCode::Char('x'))).unwrap();
-        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
         match &app.overlay {
             super::Overlay::Viewer(viewer) => {
                 assert_eq!(viewer.find_query(), "x");
                 assert_eq!(viewer.search_query(), "alpha");
             }
-            _ => panic!("Find should keep the viewer open"),
+            _ => panic!("typing in Find should keep the viewer open"),
         }
         assert_eq!(app.committed_query, "alpha");
     }
 
     #[test]
-    fn ctrl_shift_f_opens_filters_over_viewer_and_restores_viewer() {
+    fn ctrl_f_opens_filters_over_viewer_and_restores_viewer() {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude)];
         app.open_viewer();
 
         app.handle_key(crossterm_key_mods(
             KeyCode::Char('f'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL,
         ))
         .unwrap();
         assert!(matches!(app.overlay, super::Overlay::Filters(_, Some(_))));
@@ -6198,7 +6194,7 @@ mod tests {
 
         app.handle_key(crossterm_key_mods(
             KeyCode::Char('f'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL,
         ))
         .unwrap();
         app.handle_key(crossterm_key(KeyCode::Down)).unwrap();
@@ -6218,14 +6214,17 @@ mod tests {
     }
 
     #[test]
-    fn enter_in_viewer_opens_actions_overlay() {
+    fn enter_in_viewer_opens_actions_overlay_from_either_box() {
         let mut app = test_app();
         app.results = vec![sample_hit(Agent::Claude)];
         app.open_viewer();
-        app.handle_key(crossterm_key(KeyCode::Tab)).unwrap();
 
         app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
+        assert!(matches!(app.overlay, super::Overlay::Actions(_)));
 
+        app.handle_key(crossterm_key(KeyCode::Esc)).unwrap();
+        app.handle_key(crossterm_key(KeyCode::Tab)).unwrap();
+        app.handle_key(crossterm_key(KeyCode::Enter)).unwrap();
         assert!(matches!(app.overlay, super::Overlay::Actions(_)));
     }
 
