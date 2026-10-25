@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use chrono::{Local, NaiveDate, TimeZone, Utc};
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use log::warn;
 use ratatui::style::Color;
@@ -48,19 +48,20 @@ fn clap_styles() -> Styles {
     about = "Search local Claude Code, Codex CLI, and Antigravity session history",
     styles = clap_styles(),
     next_line_help = true,
-    before_long_help = "NOTE FOR AI AGENTS & SCRIPTS:\n  `aics` launches an interactive TUI by default. In non-interactive contexts\n  or shell pipelines, you MUST pass `--json` (streaming JSONL hits) or\n  `--export <DIR>` (Markdown files); otherwise aics will exit with an error.\n",
+    before_long_help = "NOTE FOR AI AGENTS & SCRIPTS:\n  `aics` launches an interactive TUI by default. In non-interactive contexts\n  or shell pipelines, you MUST pass `--json` (compact JSONL hits; default limit: 20) or\n  `--export <DIR>` (Markdown files); otherwise aics will exit with an error.\n",
     after_help = "Use 'aics --help' for full help, side-effect notes, and examples.\nUse 'aics --manpage' for the comprehensive Markdown manual.",
-    after_long_help = "Examples:\n  aics deploy\n      Search sessions for the current directory and open the TUI.\n\n  aics -g --agent claude --after 2026-03-01 deploy\n      Search all Claude sessions after 2026-03-01.\n\n  aics --json -g --sort-by relevance \"vector db\"\n      Print matching sessions as JSONL instead of launching the TUI.\n\n  aics -g --export ./transcripts \"vector db\"\n      Write every matching session to ./transcripts as Markdown.\n\nDate filters:\n  --after and --before accept YYYY-MM-DD or RFC3339 timestamps.\n\nScope:\n  By default, searches are scoped to the current directory.\n  Use --global to search everything, --no-global to override a saved global startup scope,\n  or --dir PATH[:BRANCH] to target a project.\n\nFull manual:\n  Run `aics --manpage` to view the comprehensive Markdown reference manual."
+    after_long_help = "Examples:\n  aics deploy\n      Search sessions for the current directory and open the TUI.\n\n  aics -g --agent claude --after 2026-03-01 deploy\n      Search all Claude sessions after 2026-03-01.\n\n  aics --json -g --sort-by relevance \"vector db\"\n      Print matching sessions as JSONL instead of launching the TUI.\n\n  aics -g --export ./transcripts \"vector db\"\n      Write every matching session to ./transcripts as Markdown.\n\nDate filters:\n  --after and --before accept YYYY-MM-DD or RFC3339 timestamps.\n\nScope:\n  By default, searches are scoped to the current directory.\n  Use --global to search everything, --no-global to override a saved global startup scope,\n  or --dir PATH[:BRANCH] to target a project.\n\nFull manual:\n  Run `aics --manpage` to view the comprehensive Markdown reference manual.\n  Run `aics --print-skill` for the embedded agent guide."
 )]
 struct Cli {
     // === Non-Interactive / Scripting (No TUI) ===
     #[arg(
         long = "json",
         help_heading = "Non-Interactive / Scripting (No TUI)",
-        help = "Print JSONL hits or rule records to stdout",
-        long_help = "[Read-only] Print JSONL hits or rule records to stdout instead of launching the interactive TUI"
+        value_enum, num_args = 0..=1, default_missing_value = "compact", require_equals = true,
+        help = "Print compact JSONL hits (20 by default); =full for unabridged records",
+        long_help = "[Read-only] Print compact JSONL search hits (default limit: 20). Use --json=full for unabridged hit records, -n to expand the limit, and --print-skill for agent guidance. Ordinary JSON searches do not apply startup rules or recover lifecycle operations."
     )]
-    json: bool,
+    json: Option<CliJson>,
     #[arg(
         long = "export",
         value_name = "DIR",
@@ -112,6 +113,12 @@ struct Cli {
     )]
     dir: Option<String>,
     #[arg(
+        long,
+        help_heading = "Search Scope & Target",
+        help = "Match directory scope case-sensitively (default: case-insensitive)"
+    )]
+    case_sensitive_dir: bool,
+    #[arg(
         long = "branch",
         help_heading = "Search Scope & Target",
         help = "Limit results to a branch name; conflicts with a different branch embedded in --dir"
@@ -155,10 +162,9 @@ struct Cli {
         short = 'n',
         long = "num-results",
         help_heading = "Search Filters (Read-Only)",
-        default_value_t = 2000,
-        help = "Maximum number of results to load into the TUI or emit as JSONL"
+        help = "Maximum results: JSON defaults to 20; TUI/export to 2000"
     )]
-    num_results: usize,
+    num_results: Option<usize>,
     #[arg(
         long = "live",
         help_heading = "Search Filters (Read-Only)",
@@ -219,9 +225,19 @@ struct Cli {
         help_heading = "Result Ordering & Display",
         value_enum,
         help = "Hide a transcript part (repeatable)",
-        long_help = "Hide a transcript part; repeatable. Adds to saved display options in the TUI, and is the only thing hidden from an export"
+        long_help = "Hide a transcript part; repeatable. Overrides the fixed JSON preset, saved TUI display options, or all-visible export baseline. Last --show/--hide for each item wins."
     )]
     hide: Vec<CliHideItem>,
+    #[arg(
+        long,
+        value_enum,
+        value_name = "ITEM",
+        help_heading = "Result Ordering & Display",
+        help = "Show a transcript part (repeatable; last --show/--hide wins)"
+    )]
+    show: Vec<CliHideItem>,
+    #[arg(skip)]
+    visibility_overrides: Vec<(CliHideItem, bool)>,
 
     // === JavaScript Rules & Automation ===
     #[arg(
@@ -307,6 +323,12 @@ struct Cli {
     )]
     manpage: bool,
     #[arg(
+        long,
+        help_heading = "Information & Utilities",
+        help = "Print the embedded SKILL.md for agent CLI use and exit"
+    )]
+    print_skill: bool,
+    #[arg(
         long = "print-palettes",
         help_heading = "Information & Utilities",
         help = "Print built-in theme palettes as ANSI color cards and exit"
@@ -319,6 +341,12 @@ struct Cli {
         long_help = "Optional search query to run immediately or prefill in the TUI"
     )]
     query: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliJson {
+    Compact,
+    Full,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -370,17 +398,21 @@ impl CliHideItem {
     /// composes the same way against an all-visible export baseline and against
     /// the saved display options the TUI starts from.
     fn apply(self, options: &mut DisplayOptions) {
+        self.set(options, true);
+    }
+
+    fn set(self, options: &mut DisplayOptions, hidden: bool) {
         match self {
-            Self::ProjectDocsAutodump => options.hide_project_docs_autodump = true,
-            Self::SkillTextInjection => options.hide_skill_text_injection = true,
-            Self::ToolCalls => options.hide_tool_calls = true,
-            Self::ToolResults => options.hide_tool_results = true,
-            Self::UserToolCalls => options.hide_user_tool_calls = true,
-            Self::UserToolResults => options.hide_user_tool_results = true,
-            Self::AgentReplies => options.hide_agent_replies = true,
-            Self::AgentThinking => options.hide_agent_thinking = true,
-            Self::UserMessages => options.hide_user_messages = true,
-            Self::InternalContext => options.hide_internal_context = true,
+            Self::ProjectDocsAutodump => options.hide_project_docs_autodump = hidden,
+            Self::SkillTextInjection => options.hide_skill_text_injection = hidden,
+            Self::ToolCalls => options.hide_tool_calls = hidden,
+            Self::ToolResults => options.hide_tool_results = hidden,
+            Self::UserToolCalls => options.hide_user_tool_calls = hidden,
+            Self::UserToolResults => options.hide_user_tool_results = hidden,
+            Self::AgentReplies => options.hide_agent_replies = hidden,
+            Self::AgentThinking => options.hide_agent_thinking = hidden,
+            Self::UserMessages => options.hide_user_messages = hidden,
+            Self::InternalContext => options.hide_internal_context = hidden,
         }
     }
 }
@@ -423,8 +455,18 @@ impl From<CliSupersededFilter> for SupersededFilter {
 }
 
 impl Cli {
+    fn display_options(&self, base: DisplayOptions) -> DisplayOptions {
+        if self.visibility_overrides.is_empty() {
+            return hidden_from(base, &self.hide);
+        }
+        let mut options = base;
+        for &(item, hidden) in &self.visibility_overrides {
+            item.set(&mut options, hidden);
+        }
+        options
+    }
     fn will_enter_tui(&self) -> bool {
-        !self.json
+        self.json.is_none()
             && self.export.is_none()
             && !self.apply_rules
             && !self.benchmark_rules
@@ -432,11 +474,12 @@ impl Cli {
             && !self.delete_index
             && !self.print_palettes
             && !self.manpage
+            && !self.print_skill
     }
 
     /// Modes that own stdout, so progress bars and other chatter must not go there.
     fn stdout_reserved(&self) -> bool {
-        self.json || self.export.is_some()
+        self.json.is_some() || self.export.is_some()
     }
 
     fn logging_mode(&self) -> LoggingMode {
@@ -449,7 +492,28 @@ impl Cli {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    // Combine both option streams in their actual argv order.
+    let mut ordered = Vec::new();
+    for (name, hidden) in [("hide", true), ("show", false)] {
+        if let Some(indices) = matches.indices_of(name) {
+            ordered.extend(
+                indices
+                    .zip(matches.get_many::<CliHideItem>(name).into_iter().flatten())
+                    .map(|(index, item)| (index, *item, hidden)),
+            );
+        }
+    }
+    ordered.sort_by_key(|entry| entry.0);
+    cli.visibility_overrides = ordered
+        .into_iter()
+        .map(|(_, item, hidden)| (item, hidden))
+        .collect();
+    if cli.print_skill {
+        print!("{}", aics::manpage::render_skill());
+        return Ok(());
+    }
     let logging = aics::logging::init(cli.logging_mode())?;
     if cli.print_palettes {
         print!("{}", render_palettes());
@@ -469,7 +533,9 @@ fn main() -> Result<()> {
         cli.codex_home.as_deref(),
         cli.antigravity_home.as_deref(),
     )?;
-    aics::lifecycle::recover(&resolved_paths.roots)?;
+    if cli.json.is_none() || cli.apply_rules {
+        aics::lifecycle::recover(&resolved_paths.roots)?;
+    }
     let index_paths = aics::index::IndexPaths::discover_for_roots(&resolved_paths.roots)?;
     let rules_cache_path = index_paths.cache_root.join("rules-cache.json");
     let startup_rules_cache_path = index_paths.cache_root.join("startup-rules-cache.json");
@@ -488,13 +554,13 @@ fn main() -> Result<()> {
     let sync_outcome =
         if let Some(draw_target) = progress_draw_target(cli.progress, cli.stdout_reserved()) {
             let mut progress = StartupProgress::new(draw_target);
-            let outcome = manager.sync_with_roots_and_progress(
+            let outcome = manager.sync_with_roots_best_effort_and_progress(
                 &resolved_paths.roots,
                 cli.rebuild_index,
                 |event| progress.update(event),
             );
             progress.finish();
-            SyncOutcome::Completed(outcome?)
+            outcome?
         } else {
             manager.sync_with_roots_best_effort(&resolved_paths.roots, cli.rebuild_index)?
         };
@@ -516,7 +582,7 @@ fn main() -> Result<()> {
                 .then_some(rules_cache_path.clone()),
             mode,
             selection: RuleSelection::All,
-            json: cli.json,
+            json: cli.json.is_some(),
             scope: rules_scope.clone(),
             filters: rules_filters.clone(),
             supersession: manager.supersession_snapshot()?,
@@ -536,7 +602,7 @@ fn main() -> Result<()> {
         if cli.benchmark_rules {
             return Ok(());
         }
-        if mode == RulesMode::Preview && !cli.json {
+        if mode == RulesMode::Preview && cli.json.is_none() {
             let initial_request = SearchRequest {
                 visibility_search: settings
                     .default_filter
@@ -560,14 +626,14 @@ fn main() -> Result<()> {
             );
         }
 
-        print_report(&report, cli.json, mode)?;
+        print_report(&report, cli.json.is_some(), mode)?;
         if mode == RulesMode::Apply && !report.applied.is_empty() {
             manager.sync_with_roots_best_effort(&resolved_paths.roots, false)?;
         }
         return Ok(());
     }
 
-    if !cli.no_apply_rules {
+    if !cli.no_apply_rules && cli.json.is_none() {
         let rules_path = match cli.rules.clone() {
             Some(path) => Some(path),
             None => {
@@ -648,10 +714,19 @@ fn main() -> Result<()> {
         resolved_paths.roots.live_sessions.clone(),
     ))?;
 
-    if cli.json {
-        let display_options = hidden_from(DisplayOptions::SHOW_ALL, &cli.hide);
-        for hit in search_engine.search_with_display_options(&request, display_options)? {
-            println!("{}", serde_json::to_string(&hit)?);
+    if let Some(format) = cli.json {
+        let display_options = cli.display_options(aics::cli_output::DISCOVERY_DISPLAY);
+        match format {
+            CliJson::Compact => {
+                for hit in search_engine.search_discovery(&request, display_options)? {
+                    println!("{}", serde_json::to_string(&hit)?);
+                }
+            }
+            CliJson::Full => {
+                for hit in search_engine.search_with_display_options(&request, display_options)? {
+                    println!("{}", serde_json::to_string(&hit)?);
+                }
+            }
         }
         return Ok(());
     }
@@ -661,7 +736,7 @@ fn main() -> Result<()> {
     // likewise start from an all-visible baseline rather than saved display
     // options, so only an explicit `--hide` removes anything.
     if let Some(export_dir) = cli.export.as_deref() {
-        let display_options = hidden_from(DisplayOptions::SHOW_ALL, &cli.hide);
+        let display_options = cli.display_options(DisplayOptions::SHOW_ALL);
         return export_sessions(
             search_engine.search_with_display_options(&request, display_options)?,
             export_dir,
@@ -672,7 +747,7 @@ fn main() -> Result<()> {
     let mut request = request;
     apply_default_filter_to_request(&mut request, &cli, settings.default_filter.as_ref());
     let mut settings = settings;
-    settings.display_options = hidden_from(settings.display_options, &cli.hide);
+    settings.display_options = cli.display_options(settings.display_options);
 
     run_app(
         manager,
@@ -762,10 +837,11 @@ fn validate_terminal_mode(cli: &Cli) -> Result<()> {
     }
 
     if !cli.delete_index
-        && !cli.json
+        && cli.json.is_none()
         && cli.export.is_none()
         && rules_mode(cli).is_none()
         && !cli.manpage
+        && !cli.print_skill
         && !cli.print_palettes
         && !cli.write_rules_dts
         && !std::io::stdout().is_terminal()
@@ -911,6 +987,11 @@ fn rules_processing_style() -> ProgressStyle {
 
 fn build_request(cli: &Cli) -> Result<SearchRequest> {
     let (scope, dir_branch) = scope_from_cli(cli)?;
+    let scope = if cli.case_sensitive_dir {
+        scope.case_sensitive()
+    } else {
+        scope
+    };
     let branch = match (cli.branch.clone(), dir_branch) {
         (Some(from_flag), Some(from_dir)) if from_flag != from_dir => {
             bail!("--branch conflicts with the branch embedded in --dir")
@@ -920,10 +1001,17 @@ fn build_request(cli: &Cli) -> Result<SearchRequest> {
     };
 
     Ok(SearchRequest {
-        visibility_search: aics::search_query::VisibilitySearch::All,
+        visibility_search: if cli.json.is_some() {
+            aics::search_query::VisibilitySearch::Visible
+        } else {
+            aics::search_query::VisibilitySearch::All
+        },
         query: cli.query.clone().unwrap_or_default(),
         scope,
-        limit: cli.num_results.max(1),
+        limit: cli
+            .num_results
+            .unwrap_or(if cli.json.is_some() { 20 } else { 2000 })
+            .max(1),
         sort: cli.sort_by.unwrap_or(CliSort::Time).into(),
         filters: SearchFilters {
             agent: cli.agent.as_deref().and_then(parse_agent_arg),
@@ -1443,7 +1531,8 @@ mod tests {
         );
 
         match scope {
-            Scope::CurrentDir(original, canonical) => {
+            Scope::CurrentDir(original, canonical)
+            | Scope::CurrentDirSensitive(original, canonical) => {
                 assert_eq!(original, logical_cwd);
                 assert_eq!(canonical, Some(physical_cwd.canonicalize().unwrap()));
             }
@@ -1462,7 +1551,9 @@ mod tests {
         let scope = scope_for_current_dir(physical_cwd.clone(), Some(stale_pwd.into_os_string()));
 
         match scope {
-            Scope::CurrentDir(original, _) => assert_eq!(original, physical_cwd),
+            Scope::CurrentDir(original, _) | Scope::CurrentDirSensitive(original, _) => {
+                assert_eq!(original, physical_cwd)
+            }
             Scope::Global => panic!("expected current-directory scope"),
         }
     }
@@ -1727,7 +1818,7 @@ mod tests {
             "deploy",
         ]);
 
-        let options = hidden_from(DisplayOptions::SHOW_ALL, &cli.hide);
+        let options = cli.display_options(DisplayOptions::SHOW_ALL);
 
         assert!(options.hide_tool_results);
         assert!(options.hide_agent_replies);
@@ -1786,7 +1877,7 @@ mod tests {
             "internal-context",
         ]);
 
-        let options = hidden_from(DisplayOptions::SHOW_ALL, &cli.hide);
+        let options = cli.display_options(DisplayOptions::SHOW_ALL);
 
         assert!(options.hide_project_docs_autodump);
         assert!(options.hide_skill_text_injection);
@@ -1895,7 +1986,7 @@ mod tests {
 
         // Long help (--help) includes the full agent note, side-effect annotations, and examples
         assert!(long_help.contains("NOTE FOR AI AGENTS & SCRIPTS:"));
-        assert!(long_help.contains("[Read-only] Print JSONL hits"));
+        assert!(long_help.contains("[Read-only] Print compact JSONL search hits"));
         assert!(long_help.contains("[Side-effect: writes files]"));
         assert!(long_help.contains("[Side-effect: mutates session files]"));
         assert!(long_help.contains("[Side-effect: re-indexes cache]"));

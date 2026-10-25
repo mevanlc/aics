@@ -115,6 +115,8 @@ fn sync_best_effort_reports_busy_when_writer_lock_is_held() -> Result<()> {
 
     let outcome = manager.sync_with_roots_best_effort(&roots, false)?;
     assert!(matches!(outcome, SyncOutcome::Busy));
+    let outcome = manager.sync_with_roots_best_effort_and_progress(&roots, false, |_| {})?;
+    assert!(matches!(outcome, SyncOutcome::Busy));
     Ok(())
 }
 

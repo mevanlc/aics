@@ -37,7 +37,7 @@ fn json_mode_emits_valid_jsonl_hits() -> Result<()> {
         value["session"]["session_id"],
         "c0d1e2f3-a4b5-4c6d-8e7f-9a0b1c2d3e4f"
     );
-    assert!(value["snippet_html"]
+    assert!(value["snippet"]
         .as_str()
         .is_some_and(|snippet| !snippet.is_empty()));
     Ok(())
@@ -82,7 +82,7 @@ fn json_mode_accepts_sort_by_relevance() -> Result<()> {
     assert!(value["session"]["first_user_msg_content"]
         .as_str()
         .is_some_and(|text| text.contains("Express server")));
-    assert!(value["snippet_html"]
+    assert!(value["snippet"]
         .as_str()
         .is_some_and(|snippet| snippet.contains("Express")));
     Ok(())

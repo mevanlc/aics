@@ -132,6 +132,14 @@ impl TrashStore {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
 
+        let entries = self.snapshot()?;
+        write_metadata(&self.paths.metadata_file, &entries)?;
+        Ok(entries)
+    }
+
+    /// Reconcile the catalog in memory. Callers refreshing an index hold the
+    /// shared lifecycle guard; discovery never rewrites the user's trash data.
+    pub fn snapshot(&self) -> Result<Vec<TrashEntry>> {
         let mut by_name = BTreeMap::new();
         for entry in read_metadata(&self.paths.metadata_file)? {
             by_name.insert(entry.nm.clone(), entry);
@@ -149,9 +157,7 @@ impl TrashStore {
             });
         }
 
-        let entries = by_name.into_values().collect::<Vec<_>>();
-        write_metadata(&self.paths.metadata_file, &entries)?;
-        Ok(entries)
+        Ok(by_name.into_values().collect())
     }
 
     pub fn trash_session(

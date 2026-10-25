@@ -530,9 +530,7 @@ impl App {
         roots: SessionRoots,
     ) -> Self {
         let local_scope = match &initial_request.scope {
-            Scope::CurrentDir(path, canonical) => {
-                Scope::CurrentDir(path.clone(), canonical.clone())
-            }
+            Scope::CurrentDir(..) | Scope::CurrentDirSensitive(..) => initial_request.scope.clone(),
             Scope::Global => env::current_dir()
                 .map(Scope::current_dir)
                 .unwrap_or(Scope::Global),
@@ -733,7 +731,7 @@ impl App {
         }
         match &self.scope {
             Scope::Global => "Global".to_owned(),
-            Scope::CurrentDir(path, _) => path
+            Scope::CurrentDir(path, _) | Scope::CurrentDirSensitive(path, _) => path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .map(ToOwned::to_owned)
@@ -2162,6 +2160,7 @@ impl App {
             max_chars,
             extend_preview: true,
             display_options: self.display_options,
+            plain_text: false,
         }
     }
 
@@ -2927,7 +2926,7 @@ impl App {
     fn toggle_scope(&mut self) -> Result<()> {
         self.scope = match &self.scope {
             Scope::Global => self.local_scope.clone(),
-            Scope::CurrentDir(..) => Scope::Global,
+            Scope::CurrentDir(..) | Scope::CurrentDirSensitive(..) => Scope::Global,
         };
         self.trigger_search_now()
     }
@@ -3506,7 +3505,7 @@ impl App {
     fn local_scope_label(&self) -> String {
         match &self.local_scope {
             Scope::Global => "Global".to_owned(),
-            Scope::CurrentDir(path, _) => path
+            Scope::CurrentDir(path, _) | Scope::CurrentDirSensitive(path, _) => path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .map(ToOwned::to_owned)
@@ -4207,32 +4206,7 @@ fn rules_preview_hit_matches(
 }
 
 fn rules_preview_scope_matches(scope: &Scope, session: &crate::index::StoredSession) -> bool {
-    match scope {
-        Scope::Global => true,
-        Scope::CurrentDir(original, canonical) => {
-            let stored = [Some(session.project.as_str()), session.cwd.as_deref()];
-            let original = original.to_string_lossy();
-            stored.iter().flatten().any(|candidate| {
-                preview_paths_equal(&original, candidate)
-                    || canonical.as_ref().is_some_and(|canonical| {
-                        preview_paths_equal(&canonical.to_string_lossy(), candidate)
-                    })
-            })
-        }
-    }
-}
-
-fn preview_paths_equal(a: &str, b: &str) -> bool {
-    if cfg!(windows) {
-        let normalize = |path: &str| {
-            path.replace('\\', "/")
-                .trim_end_matches('/')
-                .to_ascii_lowercase()
-        };
-        normalize(a) == normalize(b)
-    } else {
-        Path::new(a) == Path::new(b)
-    }
+    scope.matches(session)
 }
 
 fn rules_preview_search_text(matched: &RulePreviewMatch) -> String {
@@ -5913,7 +5887,9 @@ mod tests {
         app.pending_search = false;
         app.last_edit_at = Some(std::time::Instant::now());
         let (expected_local_path, expected_local_canonical) = match &app.local_scope {
-            Scope::CurrentDir(path, canonical) => (path.clone(), canonical.clone()),
+            Scope::CurrentDir(path, canonical) | Scope::CurrentDirSensitive(path, canonical) => {
+                (path.clone(), canonical.clone())
+            }
             Scope::Global => panic!("test app should have a local cwd scope"),
         };
 
@@ -5924,7 +5900,7 @@ mod tests {
         .unwrap();
 
         match &app.scope {
-            Scope::CurrentDir(path, canonical) => {
+            Scope::CurrentDir(path, canonical) | Scope::CurrentDirSensitive(path, canonical) => {
                 assert_eq!(path, &expected_local_path);
                 assert_eq!(canonical, &expected_local_canonical);
             }

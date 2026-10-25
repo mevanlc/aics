@@ -2,7 +2,7 @@
 
 `aics` (AI Chat Search) is a cross-platform Rust TUI for searching local Claude Code, Codex CLI, and Antigravity CLI chat session history.
 
-It builds a local Tantivy index over your session JSONL files and gives you an interactive terminal UI with full-text search, live previews, filters, and a markdown-rendered session viewer. It can also emit JSONL results for scripting, manage supported session files, resume sessions, attach an AI-generated summary to sessions, and more.
+It builds a local Tantivy index over your session JSONL files and gives you an interactive terminal UI with full-text search, live previews, filters, and a markdown-rendered session viewer. It can also emit compact JSONL results for scripting, manage supported session files, resume sessions, attach an AI-generated summary to sessions, and more.
 
 ## Features
 
@@ -25,11 +25,12 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Multiple themes (lazygit, aics, sunset, late), configurable via settings modal
 - Configurable Claude, Codex, and Antigravity launch commands so `aics` can hand off to resume a session
 - AICS trash, restore, and permanent deletion for session files and complete Antigravity bundles, with recorded trash reasons
-- `--json` mode for scripting, and `--export DIR` to batch-export matching sessions as Markdown
+- Compact `--json` discovery (20 results by default), `--json=full` metadata, and `--export DIR` Markdown transcripts
+- Embedded agent guidance through `--print-skill`, with no skill installation required
 - Dependency-aware session removal and restore, with related-session review and per-rule skip/include policies
 - JavaScript rules for previewing or applying batch session cleanup actions
 - Cross-platform: Windows, macOS, Linux, Android (Termux), FreeBSD, and NetBSD
-  (path matching handles symlinks and Windows case-insensitivity)
+  (directory scope handles symlinks and defaults to case-insensitive matching)
 
 ## Install
 
@@ -60,10 +61,13 @@ aics
 # Search globally with an initial query
 aics -g "vector db"
 
-# Emit relevance-sorted JSONL instead of opening the TUI
+# Emit up to 20 compact relevance-sorted JSONL hits
 aics --json -g --sort-by relevance "vector db"
 
-# Export every matching session to a directory as Markdown
+# Read the embedded agent guide
+aics --print-skill
+
+# Export matching sessions to a directory as Markdown
 aics -g --export ./transcripts "vector db"
 
 # Include superseded sources and equivalent fork duplicates hidden by default
@@ -81,7 +85,11 @@ full reference manual.
 Interactive searches default to **Visible** content, following the `^F`
 Visibility toggles. Choose **Search content** in `^F` and use `^S` to save a
 preference. Add `all:`, `visible:`, or `hidden:` to a query for a temporary
-override. JSON/export searches default to All and ignore saved filters.
+override. JSON searches use a fixed visibility preset: conversation and tool calls are visible;
+injections, thinking, and tool results are hidden. They default to Visible searches
+and 20 hits, ignore saved TUI filters, and skip automatic startup cleanup. Use
+`--show`/`--hide` to adjust visibility or `all:` to broaden a query. Exports default
+to All, retain their archival behavior, and ignore saved filters.
 
 [See command-line usage, filters, modes, and the complete flag reference.](docs/command-line.md)
 

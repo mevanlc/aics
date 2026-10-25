@@ -28,6 +28,7 @@ pub enum Scope {
     /// The original path plus an optional canonical form (when it differs).
     /// Both are precomputed so `matches_scope` does no filesystem I/O.
     CurrentDir(PathBuf, Option<PathBuf>),
+    CurrentDirSensitive(PathBuf, Option<PathBuf>),
 }
 
 impl Scope {
@@ -35,6 +36,46 @@ impl Scope {
         let canonical = path.canonicalize().ok().filter(|c| c != &path);
         Self::CurrentDir(path, canonical)
     }
+
+    pub fn case_sensitive(self) -> Self {
+        match self {
+            Self::CurrentDir(path, canonical) => {
+                let canonical = canonical.filter(|_| exact_path_spelling(&path));
+                Self::CurrentDirSensitive(path, canonical)
+            }
+            scope => scope,
+        }
+    }
+
+    pub fn matches(&self, session: &StoredSession) -> bool {
+        matches_scope(self, session)
+    }
+}
+
+/// Canonical aliases may resolve symlinks, but strict scope must not silently
+/// repair the caller's letter case on a case-insensitive filesystem.
+fn exact_path_spelling(path: &Path) -> bool {
+    let mut parent = PathBuf::new();
+    for component in path.components() {
+        if let std::path::Component::Normal(name) = component {
+            let directory = if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                &parent
+            };
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                return false;
+            };
+            if !entries
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name() == name)
+            {
+                return false;
+            }
+        }
+        parent.push(component.as_os_str());
+    }
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -199,10 +240,7 @@ struct SearchCandidate {
     snippet_html: String,
 }
 
-const MIN_CANDIDATES: usize = 32;
 const PAGE_SIZE: usize = 128;
-const MAX_EMPTY_QUERY_CANDIDATES: usize = 5_000;
-const MAX_QUERY_CANDIDATES: usize = 2_000;
 const SNIPPET_MAX_CHARS: usize = 240;
 
 #[derive(Debug, Clone, Copy)]
@@ -210,6 +248,7 @@ pub(crate) struct SnippetOptions {
     pub max_chars: usize,
     pub extend_preview: bool,
     pub display_options: DisplayOptions,
+    pub plain_text: bool,
 }
 
 impl Default for SnippetOptions {
@@ -218,6 +257,7 @@ impl Default for SnippetOptions {
             max_chars: SNIPPET_MAX_CHARS,
             extend_preview: false,
             display_options: DisplayOptions::SHOW_ALL,
+            plain_text: false,
         }
     }
 }
@@ -306,7 +346,35 @@ impl SearchEngine {
         request: &SearchRequest,
         display_options: DisplayOptions,
     ) -> Result<Vec<SearchHit>> {
-        self.search_with_snippet_options(request, display_options, SnippetOptions::default())
+        self.search_with_snippet_options(
+            request,
+            display_options,
+            SnippetOptions {
+                display_options,
+                ..SnippetOptions::default()
+            },
+        )
+    }
+
+    pub fn search_discovery(
+        &self,
+        request: &SearchRequest,
+        display_options: DisplayOptions,
+    ) -> Result<Vec<crate::cli_output::DiscoveryHit>> {
+        let hits = self.search_with_snippet_options(
+            request,
+            display_options,
+            SnippetOptions {
+                max_chars: 512,
+                extend_preview: true,
+                display_options,
+                plain_text: true,
+            },
+        )?;
+        Ok(hits
+            .into_iter()
+            .map(|hit| crate::cli_output::DiscoveryHit::new(hit, display_options))
+            .collect())
     }
 
     pub(crate) fn search_with_snippet_options(
@@ -363,12 +431,13 @@ impl SearchEngine {
             parse_query_with_aliases(&query_parser, query_text, &default_snippet_fields);
         let final_query =
             build_phrase_boosted_query(&query_parser, query_text, base_query, has_non_bare_syntax);
+        let final_query = self.scoped_query(&searcher, &request.scope, final_query)?;
         let snippet_generators =
             QueryPlan::compile(query_text, visibility_search, display_options)?;
 
         let mut candidates = Vec::new();
         let mut offset = 0usize;
-        let candidate_limit = candidate_limit(request, false);
+        let candidate_limit = searcher.num_docs() as usize;
 
         while candidates.len() < limit && offset < candidate_limit {
             let batch_size = PAGE_SIZE.min(candidate_limit.saturating_sub(offset));
@@ -421,15 +490,15 @@ impl SearchEngine {
         snippets: SnippetOptions,
     ) -> Result<Vec<SearchHit>> {
         let modified_ts_field = self.fields.schema.get_field_name(self.fields.modified_ts);
-        let candidate_limit = candidate_limit(request, true);
-        let scope_candidates = self.recent_scope_candidates(searcher, &request.scope)?;
+        let candidate_limit = searcher.num_docs() as usize;
+        let query = self.scoped_query(searcher, &request.scope, Box::new(AllQuery))?;
         let mut hits = Vec::with_capacity(limit);
         let mut offset = 0usize;
 
         while hits.len() < limit && offset < candidate_limit {
             let batch_size = PAGE_SIZE.min(candidate_limit.saturating_sub(offset));
             let docs = searcher.search(
-                &AllQuery,
+                &*query,
                 &TopDocs::with_limit(batch_size)
                     .and_offset(offset)
                     .order_by_u64_field(modified_ts_field, Order::Desc),
@@ -441,11 +510,6 @@ impl SearchEngine {
             let docs_len = docs.len();
             offset += docs_len;
             for (_, address) in docs {
-                if scope_candidates.as_ref().is_some_and(|segments| {
-                    !segments[address.segment_ord as usize][address.doc_id as usize]
-                }) {
-                    continue;
-                }
                 let document = searcher.doc::<TantivyDocument>(address)?;
                 let session = self.session_from_doc(address, &document, session_cache)?;
                 let is_live = live_ids.is_live(session.agent, &session.session_id);
@@ -482,7 +546,9 @@ impl SearchEngine {
         searcher: &tantivy::Searcher,
         scope: &Scope,
     ) -> Result<Option<Vec<Vec<bool>>>> {
-        let Scope::CurrentDir(original, canonical) = scope else {
+        let (Scope::CurrentDir(original, canonical)
+        | Scope::CurrentDirSensitive(original, canonical)) = scope
+        else {
             return Ok(None);
         };
         // Match the working_dir tokenizer's separator and case normalization.
@@ -522,6 +588,35 @@ impl SearchEngine {
         Ok(Some(candidates))
     }
 
+    fn scoped_query(
+        &self,
+        searcher: &tantivy::Searcher,
+        scope: &Scope,
+        base: Box<dyn Query>,
+    ) -> Result<Box<dyn Query>> {
+        let Some(masks) = self.recent_scope_candidates(searcher, scope)? else {
+            return Ok(base);
+        };
+        let segments = searcher
+            .segment_readers()
+            .iter()
+            .zip(masks)
+            .map(|(segment, mask)| {
+                (
+                    segment.segment_id().uuid_string(),
+                    mask.into_iter()
+                        .enumerate()
+                        .filter_map(|(doc, matched)| matched.then_some(doc as u32))
+                        .collect(),
+                )
+            })
+            .collect();
+        Ok(Box::new(BooleanQuery::intersection(vec![
+            base,
+            Box::new(DirectoryQuery(segments)),
+        ])))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn search_by_time(
         &self,
@@ -541,10 +636,11 @@ impl SearchEngine {
             parse_query_with_aliases(&query_parser, query_text, &default_snippet_fields);
         let final_query =
             build_phrase_boosted_query(&query_parser, query_text, base_query, has_non_bare_syntax);
+        let final_query = self.scoped_query(searcher, &request.scope, final_query)?;
         let snippet_generators =
             QueryPlan::compile(query_text, visibility_search, display_options)?;
         let modified_ts_field = self.fields.schema.get_field_name(self.fields.modified_ts);
-        let candidate_limit = candidate_limit(request, false);
+        let candidate_limit = searcher.num_docs() as usize;
 
         let mut hits = Vec::with_capacity(limit);
         let mut offset = 0usize;
@@ -674,24 +770,75 @@ impl SearchEngine {
     }
 }
 
-fn candidate_limit(request: &SearchRequest, empty_query: bool) -> usize {
-    let multiplier = match (&request.scope, empty_query) {
-        (Scope::Global, true) => 4,
-        (Scope::CurrentDir(..), true) => 8,
-        (Scope::Global, false) => 6,
-        (Scope::CurrentDir(..), false) => 10,
-    };
-    let ceiling = if empty_query {
-        MAX_EMPTY_QUERY_CANDIDATES
-    } else {
-        MAX_QUERY_CANDIDATES
-    };
+/// A postings-derived restriction applied before TopDocs, without adding score.
+#[derive(Debug, Clone)]
+struct DirectoryQuery(HashMap<String, Vec<u32>>);
 
-    request
-        .limit
-        .max(1)
-        .saturating_mul(multiplier)
-        .clamp(MIN_CANDIDATES, ceiling)
+struct DirectoryDocSet {
+    docs: Vec<u32>,
+    cursor: usize,
+}
+
+impl DocSet for DirectoryDocSet {
+    fn advance(&mut self) -> u32 {
+        self.cursor = (self.cursor + 1).min(self.docs.len());
+        self.doc()
+    }
+    fn doc(&self) -> u32 {
+        self.docs.get(self.cursor).copied().unwrap_or(TERMINATED)
+    }
+    fn size_hint(&self) -> u32 {
+        self.docs.len() as u32
+    }
+    fn seek(&mut self, target: u32) -> u32 {
+        self.cursor += self.docs[self.cursor..].partition_point(|&doc| doc < target);
+        self.doc()
+    }
+}
+
+impl Query for DirectoryQuery {
+    fn weight(
+        &self,
+        _: tantivy::query::EnableScoring<'_>,
+    ) -> tantivy::Result<Box<dyn tantivy::query::Weight>> {
+        Ok(Box::new(self.clone()))
+    }
+}
+
+impl tantivy::query::Weight for DirectoryQuery {
+    fn scorer(
+        &self,
+        reader: &tantivy::SegmentReader,
+        _: f32,
+    ) -> tantivy::Result<Box<dyn tantivy::query::Scorer>> {
+        let docs = self
+            .0
+            .get(&reader.segment_id().uuid_string())
+            .cloned()
+            .unwrap_or_default();
+        Ok(Box::new(tantivy::query::ConstScorer::new(
+            DirectoryDocSet { docs, cursor: 0 },
+            0.0,
+        )))
+    }
+
+    fn explain(
+        &self,
+        reader: &tantivy::SegmentReader,
+        doc: u32,
+    ) -> tantivy::Result<tantivy::query::Explanation> {
+        if self
+            .0
+            .get(&reader.segment_id().uuid_string())
+            .is_some_and(|docs| docs.binary_search(&doc).is_ok())
+        {
+            Ok(tantivy::query::Explanation::new("directory scope", 0.0))
+        } else {
+            Err(tantivy::TantivyError::InvalidArgument(
+                "document outside directory scope".into(),
+            ))
+        }
+    }
 }
 
 fn build_phrase_boosted_query(
@@ -950,7 +1097,8 @@ fn stored_session_from_document(
 fn matches_scope(scope: &Scope, session: &StoredSession) -> bool {
     match scope {
         Scope::Global => true,
-        Scope::CurrentDir(original, canonical) => {
+        Scope::CurrentDir(original, canonical)
+        | Scope::CurrentDirSensitive(original, canonical) => {
             let stored = [Some(session.project.as_str()), session.cwd.as_deref()];
 
             // Check the original path first; then the canonical form if present.
@@ -958,24 +1106,40 @@ fn matches_scope(scope: &Scope, session: &StoredSession) -> bool {
             // recorded the symlink path, and also matches sessions that
             // recorded the resolved real path.
             let original_str = original.to_string_lossy();
+            let equal = |a: &str, b: &str| {
+                paths_equal_with_case(a, b, matches!(scope, Scope::CurrentDirSensitive(..)))
+            };
             stored.iter().flatten().any(|s| {
-                paths_equal(&original_str, s)
+                equal(&original_str, s)
                     || canonical
                         .as_ref()
-                        .is_some_and(|c| paths_equal(&c.to_string_lossy(), s))
+                        .is_some_and(|c| equal(&c.to_string_lossy(), s))
             })
         }
     }
 }
 
 fn paths_equal(a: &str, b: &str) -> bool {
-    if cfg!(windows) {
-        paths_equal_windows(a, b)
-    } else {
-        // `Path` equality compares by components, so trailing separators
-        // (e.g. Claude Code sometimes records `cwd` as `/foo/bar/`) are ignored.
-        Path::new(a) == Path::new(b)
+    paths_equal_with_case(a, b, false)
+}
+
+fn paths_equal_with_case(a: &str, b: &str, sensitive: bool) -> bool {
+    if cfg!(windows) && !sensitive {
+        return paths_equal_windows(a, b);
     }
+    let normalize = |p: &str| {
+        let p = if cfg!(windows) {
+            p.replace('\\', "/")
+        } else {
+            p.to_owned()
+        };
+        if sensitive {
+            p
+        } else {
+            p.chars().flat_map(char::to_lowercase).collect()
+        }
+    };
+    Path::new(&normalize(a)) == Path::new(&normalize(b))
 }
 
 /// Normalize and compare two paths using Windows rules: case-insensitive,
@@ -984,7 +1148,10 @@ fn paths_equal(a: &str, b: &str) -> bool {
 fn paths_equal_windows(a: &str, b: &str) -> bool {
     fn normalize(p: &str) -> String {
         let s = p.replace('\\', "/");
-        s.trim_end_matches('/').to_ascii_lowercase()
+        s.trim_end_matches('/')
+            .chars()
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
     }
     normalize(a) == normalize(b)
 }
@@ -1098,11 +1265,19 @@ fn build_snippet_html(
     if before > 0 {
         result.push('…');
     }
-    result.push_str(&emphasize_ranges(&text[before..end], &ranges));
+    if snippets.plain_text {
+        result.push_str(&text[before..end]);
+    } else {
+        result.push_str(&emphasize_ranges(&text[before..end], &ranges));
+    }
     if end < text.len() {
         result.push('…');
     }
-    result
+    if snippets.plain_text {
+        crate::cli_output::compact_text(&result, snippets.max_chars)
+    } else {
+        result
+    }
 }
 
 fn snippet_projection(
@@ -1411,6 +1586,7 @@ mod tests {
             max_chars: 1000,
             extend_preview: true,
             display_options: crate::settings::DisplayOptions::default(),
+            plain_text: false,
         };
         let preview = super::preview_snippet(&document, &schema, &stored, options);
         assert!(preview.starts_with("Short opening request. first answer"));

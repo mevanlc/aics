@@ -166,7 +166,7 @@ suffix instead of overwriting an existing file.
 ## Startup rules
 
 Set `config.applyAtStartup` to `true` to apply a rule automatically during
-ordinary startup, including JSON search startup:
+TUI and export startup. Ordinary JSON searches skip startup rules:
 
 ```js
 rule("trash startup noise", { applyAtStartup: true }, ({ session }) => {

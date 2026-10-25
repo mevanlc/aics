@@ -309,9 +309,9 @@ impl IndexManager {
         };
         let metadata_json = serde_json::to_string_pretty(&metadata)
             .context("failed to serialize profile metadata")?;
-        fs::write(&self.paths.profile_file, metadata_json)
+        crate::cache_io::atomic_write(&self.paths.profile_file, metadata_json)
             .with_context(|| format!("failed to write {}", self.paths.profile_file.display()))?;
-        fs::write(
+        crate::cache_io::atomic_write(
             &self.paths.hashed_input_file,
             resolved.roots.profile_hash_input(),
         )
@@ -325,6 +325,7 @@ impl IndexManager {
     }
 
     pub fn delete_index(&self) -> Result<()> {
+        let _maintenance = self.maintenance_guard(false)?;
         if self.paths.index_dir.exists() {
             fs::remove_dir_all(&self.paths.index_dir)
                 .with_context(|| format!("failed to remove {}", self.paths.index_dir.display()))?;
@@ -374,6 +375,15 @@ impl IndexManager {
         self.sync_with_roots_best_effort_impl(roots, rebuild, &mut progress)
     }
 
+    pub fn sync_with_roots_best_effort_and_progress<F: FnMut(SyncProgress)>(
+        &self,
+        roots: &SessionRoots,
+        rebuild: bool,
+        mut progress: F,
+    ) -> Result<SyncOutcome> {
+        self.sync_with_roots_best_effort_impl(roots, rebuild, &mut progress)
+    }
+
     fn sync_with_roots_best_effort_impl<P: SyncProgressObserver>(
         &self,
         roots: &SessionRoots,
@@ -382,11 +392,20 @@ impl IndexManager {
     ) -> Result<SyncOutcome> {
         match self.sync_with_roots_impl(roots, rebuild, progress) {
             Ok(stats) => Ok(SyncOutcome::Completed(stats)),
-            Err(error) if !rebuild && is_lock_busy_error(&error) => {
-                warn!(
-                    "index sync skipped because another aics process holds the writer lock; \
-                     using the current on-disk snapshot"
-                );
+            Err(error)
+                if !rebuild
+                    && (is_lock_busy_error(&error)
+                        || error.is::<crate::lifecycle::RecoveryRequired>()) =>
+            {
+                if !self.has_committed_snapshot()? {
+                    if error.is::<crate::lifecycle::RecoveryRequired>() {
+                        return Err(error);
+                    }
+                    return self
+                        .sync_with_roots_locked(roots, false, progress, true)
+                        .map(SyncOutcome::Completed);
+                }
+                warn!("index refresh deferred ({error:#}); using the last committed snapshot");
                 Ok(SyncOutcome::Busy)
             }
             Err(error) => Err(error),
@@ -404,6 +423,44 @@ impl IndexManager {
         rebuild: bool,
         progress: &mut P,
     ) -> Result<SyncStats> {
+        self.sync_with_roots_locked(roots, rebuild, progress, false)
+    }
+
+    fn has_committed_snapshot(&self) -> Result<bool> {
+        if !self.paths.state_file.exists()
+            || load_state(&self.paths.state_file)?.format_version != INDEX_FORMAT_VERSION
+        {
+            return Ok(false);
+        }
+        self.open_search_engine()?;
+        Ok(true)
+    }
+
+    fn maintenance_guard(&self, wait: bool) -> Result<fs::File> {
+        fs::create_dir_all(&self.paths.cache_root)?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.paths.cache_root.join("maintenance.lock"))?;
+        if wait {
+            file.lock()?;
+        } else {
+            file.try_lock()?;
+        }
+        Ok(file)
+    }
+
+    fn sync_with_roots_locked<P: SyncProgressObserver>(
+        &self,
+        roots: &SessionRoots,
+        rebuild: bool,
+        progress: &mut P,
+        wait: bool,
+    ) -> Result<SyncStats> {
+        let _lifecycle_guard = crate::lifecycle::read_guard(roots, wait)?;
+        let _maintenance = self.maintenance_guard(wait)?;
         let started = Instant::now();
         progress.on_progress(SyncProgress::OpeningIndex);
         fs::create_dir_all(&self.paths.cache_root)
@@ -659,7 +716,6 @@ impl IndexManager {
             progress.on_progress(SyncProgress::Committing);
             writer.commit().context("failed to commit tantivy index")?;
         }
-        drop(writer);
         debug!(
             "index sync: committed index in {:?}",
             phase_started.elapsed()
@@ -668,6 +724,7 @@ impl IndexManager {
         phase_started = Instant::now();
         progress.on_progress(SyncProgress::SavingState);
         save_state(&self.paths.state_file, &next_state)?;
+        drop(writer);
         debug!("index sync: saved state in {:?}", phase_started.elapsed());
         info!(
             "indexed sessions: scanned={}, updated={}, skipped={}, removed={}, elapsed={:?}",
@@ -1519,7 +1576,7 @@ fn save_state(path: &Path, state: &IndexState) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let raw = serde_json::to_string_pretty(state).context("failed to serialize index state")?;
-    fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))?;
+    crate::cache_io::atomic_write(path, raw)?;
     Ok(())
 }
 
@@ -1560,6 +1617,9 @@ fn env_override(name: &str) -> Option<PathBuf> {
 fn is_lock_busy_error(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         matches!(
+            cause.downcast_ref::<std::fs::TryLockError>(),
+            Some(std::fs::TryLockError::WouldBlock)
+        ) || matches!(
             cause.downcast_ref::<TantivyError>(),
             Some(TantivyError::LockFailure(LockError::LockBusy, _))
         )

@@ -58,6 +58,45 @@ fn lock(roots: &SessionRoots) -> Result<(File, PathBuf)> {
     Ok((file, operations))
 }
 
+#[derive(Debug)]
+pub(crate) struct RecoveryRequired;
+
+impl std::fmt::Display for RecoveryRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an interrupted lifecycle operation awaits recovery; open the TUI to recover before refreshing the index")
+    }
+}
+impl std::error::Error for RecoveryRequired {}
+
+/// Readers share this guard while refreshing, and never recover source files.
+pub(crate) fn read_guard(roots: &SessionRoots, wait: bool) -> Result<Option<File>> {
+    let Some(paths) = &roots.trash else {
+        return Ok(None);
+    };
+    create_directories(&paths.data_root)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(paths.data_root.join("lifecycle.lock"))?;
+    if wait {
+        file.lock_shared()?;
+    } else {
+        file.try_lock_shared()?;
+    }
+    match fs::read_dir(paths.data_root.join("operations")) {
+        Ok(mut entries) => {
+            if entries.next().transpose()?.is_some() {
+                return Err(RecoveryRequired.into());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(Some(file))
+}
+
 fn guards(
     roots: &SessionRoots,
     plan: &LifecyclePlan,
@@ -86,8 +125,14 @@ pub fn recover(roots: &SessionRoots) -> Result<()> {
     let Some(paths) = &roots.trash else {
         return Ok(());
     };
-    if !paths.data_root.join("operations").exists() {
-        return Ok(());
+    match fs::read_dir(paths.data_root.join("operations")) {
+        Ok(mut entries) => {
+            if entries.next().transpose()?.is_none() {
+                return Ok(());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
     }
     let (_lock, operations) = lock(roots)?;
     recover_locked(roots, &operations)

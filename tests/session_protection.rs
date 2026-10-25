@@ -302,7 +302,7 @@ fn proposals_recheck_activity_and_preserve_files_and_trash_metadata() -> Result<
     let original_bytes = [&fixtures.claude, &fixtures.codex, &fixtures.antigravity]
         .map(|path| fs::read(path).unwrap());
     let metadata_path = &fixtures.roots.trash.as_ref().unwrap().metadata_file;
-    let metadata_before = fs::read(metadata_path)?;
+    let metadata_before = fs::read(metadata_path).ok();
     fixtures.marker(serde_json::json!({"pid":std::process::id(),"sessionId":ID}))?;
     fixtures.coordinate_codex()?;
     let codex = HeldLock::new(&fixtures.codex_lock());
@@ -319,7 +319,7 @@ fn proposals_recheck_activity_and_preserve_files_and_trash_metadata() -> Result<
     {
         assert_eq!(fs::read(path)?, bytes);
     }
-    assert_eq!(fs::read(metadata_path)?, metadata_before);
+    assert_eq!(fs::read(metadata_path).ok(), metadata_before);
     drop(codex);
     drop(antigravity);
     Ok(())

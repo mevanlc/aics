@@ -7,3 +7,7 @@
 pub fn render_manpage() -> &'static str {
     include_str!("../docs/command-line.md")
 }
+
+pub fn render_skill() -> &'static str {
+    include_str!("../devdocs/skills/aics-cli/SKILL.md")
+}

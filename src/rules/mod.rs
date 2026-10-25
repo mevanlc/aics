@@ -1471,20 +1471,8 @@ fn file_matches_filters(file: &SessionFile, filters: &SearchFilters) -> bool {
     true
 }
 
-fn session_matches_scope(scope: &Scope, session: &StoredSession) -> bool {
-    match scope {
-        Scope::Global => true,
-        Scope::CurrentDir(original, canonical) => {
-            let stored = [Some(session.project.as_str()), session.cwd.as_deref()];
-            let original = original.to_string_lossy();
-            stored.iter().flatten().any(|candidate| {
-                paths_equal(&original, candidate)
-                    || canonical
-                        .as_ref()
-                        .is_some_and(|path| paths_equal(&path.to_string_lossy(), candidate))
-            })
-        }
-    }
+fn session_matches_scope(scope: &Scope, session: &crate::index::StoredSession) -> bool {
+    scope.matches(session)
 }
 
 fn session_matches_filters(
@@ -1541,19 +1529,6 @@ fn allows_derivation(filters: &SearchFilters, derivation: DerivationType) -> boo
         DerivationType::Trimmed => filters.include_trimmed,
         DerivationType::Continued => filters.include_continued,
         DerivationType::SubAgent => filters.include_sub_agents,
-    }
-}
-
-fn paths_equal(a: &str, b: &str) -> bool {
-    if cfg!(windows) {
-        let normalize = |path: &str| {
-            path.replace('\\', "/")
-                .trim_end_matches('/')
-                .to_ascii_lowercase()
-        };
-        normalize(a) == normalize(b)
-    } else {
-        Path::new(a) == Path::new(b)
     }
 }
 

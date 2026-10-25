@@ -10,6 +10,7 @@ JSONL. Rules modes do not accept a text query.
 
 Run `aics -h` for a summary, `aics --help` for full command-line help, or
 `aics --manpage` to print this reference manual directly from the CLI.
+Use `aics --print-skill` for the embedded agent usage guide.
 
 ## Common examples
 
@@ -68,7 +69,8 @@ transcripts. Redirecting or piping without one of these flags is rejected.
 | `QUERY` | Optional initial search query |
 | `-g`, `--global` | Search all indexed sessions |
 | `--no-global` | Force project-local startup when the saved TUI default is global |
-| `--dir PATH[:BRANCH]` | Search a specific project directory, optionally limited to a branch |
+| `--dir PATH[:BRANCH]` | Search an exact project directory, case-insensitively, optionally limited to a branch |
+| `--case-sensitive-dir` | Compare explicit or current-directory scope case-sensitively |
 | `--branch BRANCH` | Limit results to a branch |
 | `--session SESSIONID` | Select one exact session ID |
 
@@ -86,7 +88,7 @@ indexed content.
 
 | Option | Meaning |
 | --- | --- |
-| `-n N`, `--num-results N` | Load or emit at most `N` results; default: `2000`, minimum effective value: `1` |
+| `-n N`, `--num-results N` | Load or emit at most `N` results; default: `20` for JSON and `2000` for TUI/export; minimum effective value: `1` |
 | `--agent AGENT` | Include only `claude`, `codex`, or `antigravity` sessions; `agy` is accepted as an Antigravity alias |
 | `--after DATE` | Include sessions on or after a date or timestamp |
 | `--before DATE` | Include sessions on or before a date or timestamp |
@@ -119,15 +121,16 @@ resolved by latest file modification time, then session ID. The default `no`
 hides these superseded sources and duplicates; use `--superseded yes` to review
 only them or `--superseded both` to show both logical conversation sets. Older
 physical pages remain accessible through related-session review. JSON results
-expose the retained keeper's session ID as `session.superseded_by`, and Codex
-history status and source paths as `session.history`.
+expose the retained keeper's session ID as `session.superseded_by`, and compact JSON
+exposes Codex history status as `session.history_status`. Full JSON includes
+status and source paths as `session.history`.
 
 ## Sorting and output
 
 | Option | Meaning |
 | --- | --- |
 | `--sort-by MODE` | Select `time` or `relevance` ordering; command-line default: `time` |
-| `--json` | Write one JSON search hit or rule record per line instead of opening the TUI |
+| `--json[=compact\|full]` | Write compact search hits (default) or unabridged hit records as JSONL; rules keep their own schema |
 | `--export DIR` | Write every matching session to `DIR` as Markdown instead of opening the TUI |
 | `--progress STREAM` | Select `none`, `stderr`, or `stdout`; default: `stderr` |
 
@@ -138,9 +141,38 @@ output; use the default stderr progress or `--progress none` in scripts.
 Outside rules mode, redirecting or piping a TUI invocation is rejected. Add
 `--json` or `--export` when non-interactive stdout is required.
 
-`--json` and `--export` change output mode but do not disable automatic rules
-configured with `applyAtStartup: true`. Add `--no-apply-rules` when a scripted
-search must not apply startup cleanup actions.
+Ordinary JSON searches skip automatic startup cleanup rules and lifecycle
+recovery; they may refresh the index cache. Explicit `--apply-rules --json`
+still applies rules. Exports retain automatic startup rules; use
+`--no-apply-rules` when exporting without cleanup actions.
+
+### Compact discovery records
+
+`--json` emits at most **20 hits** unless `-n` overrides the limit. Reaching the
+limit can mean more results exist. The compact `session` object contains identity,
+agent, project/cwd, branch, title, modification time, line count, source path,
+derivation, live-related metadata, trash/supersession status, `history_status`,
+and a first-user-message preview. Top-level fields are `snippet` (plain text),
+`score`, and `is_live`. Previews, snippets, and titles are capped at 512 Unicode
+characters with whitespace collapsed. Raw first/last-message fields, runtime
+metadata, and history manifests are omitted.
+
+JSON uses a fixed visibility preset independent of TUI settings: conversation
+and tool calls are visible; project instructions, skills, internal context,
+thinking, and tool results are hidden. Bare queries search Visible content.
+`all:`, `hidden:`, explicit fields, and `--show`/`--hide` provide overrides.
+
+`--json=full` retains the previous unabridged hit serialization, including
+`snippet_html`, raw first/last-message fields, and detailed history metadata.
+It uses the same search defaults and result limit as compact JSON. It is not
+a complete transcript, and raw metadata fields are not visibility-filtered.
+Use `--export` for selected full conversations.
+
+Concurrent searches use the last compatible committed index when refresh is
+busy. A cold start waits for the first completed build. Refresh is also deferred
+while a lifecycle operation is active or awaits recovery; without a compatible
+index, an abandoned operation requires recovery through the TUI. These notices
+go to stderr. Read-only trash discovery does not rewrite its metadata.
 
 ## Exporting sessions
 
@@ -193,7 +225,8 @@ defaults, so a scripted export selects exactly what its flags asked for. Use
 
 | Option | Meaning |
 | --- | --- |
-| `--hide ITEM` | Hide one transcript part; repeat the flag for more than one |
+| `--hide ITEM` | Hide one transcript part; repeat for more than one |
+| `--show ITEM` | Show one transcript part; last show/hide for each item wins |
 
 `ITEM` is one of `project-docs-autodump`, `skill-text-injection`, `tool-calls`,
 `tool-results`, `user-tool-calls`, `user-tool-results`, `agent-replies`,
@@ -209,9 +242,10 @@ aics -g --export ./transcripts --hide tool-calls --hide tool-results --hide agen
 aics --hide tool-results deploy
 ```
 
-`--hide` only ever turns hiding *on*; there is no CLI form that turns a hidden
-part back on. What that composes to depends on the baseline:
+`--show ITEM` turns visibility on. Both flags are repeatable; the last
+`--show` or `--hide` for an item wins. They compose against these baselines:
 
+- **JSON** starts from the fixed conversation-and-tool-calls preset.
 - An **export** starts from everything visible, so `--hide` names exactly what is
   missing from the files.
 - The **TUI** starts from the saved `display_options`, so `--hide` adds to them
@@ -295,19 +329,20 @@ Saved TUI defaults are applied when entering the TUI. JSON, export, and explicit
 rules modes use their command-line scope and filters instead.
 
 Saved `display_options` are likewise applied only when entering the TUI, where
-`--hide` adds to them. Exports start from everything visible and honor `--hide`
-alone.
+`--show`/`--hide` override them. JSON uses a fixed preset; exports start from
+everything visible. Both accept the same visibility overrides.
 
 ## Informational and exit-only options
 
 | Option | Meaning |
 | --- | --- |
 | `--manpage` | Print the comprehensive Markdown reference manual and exit |
+| `--print-skill` | Print the self-contained agent SKILL.md without initializing storage |
 | `--print-palettes` | Print built-in theme palettes as ANSI color cards and exit |
 | `-h`, `--help` | Print command-line help |
 | `-V`, `--version` | Print the AICS version |
 
-`--manpage`, `--write-rules-dts`, `--delete-index`, and `--print-palettes` exit without
+`--print-skill`, `--manpage`, `--write-rules-dts`, `--delete-index`, and `--print-palettes` exit without
 entering the TUI. `--rebuild-index` is different: it rebuilds and then continues
 with normal startup.
 

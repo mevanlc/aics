@@ -80,7 +80,7 @@ When database selection is unavailable, a unique terminal version can identify
 the conversation. Multiple candidates remain visible as unresolved versions;
 AICS never guesses the current version from file modification times. Missing or
 invalid history remains searchable with an incomplete-history notice and is
-excluded from supersession and automated cleanup. JSON results include
+excluded from supersession and automated cleanup. Compact JSON includes `session.history_status`; `--json=full` includes
 `session.history` with `status`, `issues`, `selected_rollout_id`, and `source_paths`.
 
 Search, previews, viewers, exports, summary inputs, and JavaScript rules use the
@@ -184,8 +184,9 @@ it returns to the selected mode; saving defaults while an override is active
 saves the selector's value. The selected row's help identifies an active override.
 These modes govern bare terms, not which transcript blocks the viewer displays.
 
-JSON/export searches default to All and ignore saved filter/display preferences.
-Use a query modifier with `--hide` to search visible or hidden content there.
+JSON searches default to Visible using a fixed conversation-and-tool-calls preset;
+exports default to All. Both ignore saved filter/display preferences. Use query
+modifiers and `--show`/`--hide` to adjust the searched content.
 The Search content selector is unavailable in rules preview, which uses a
 separate search over proposal metadata.
 
@@ -272,3 +273,9 @@ Tantivy syntax, and is not present in the preview. See the
 [viewer controls and jump preference](keybindings.md#session-viewer).
 
 [Back to the README.](../README.md#indexing)
+
+Directory scopes (`--dir` and the current directory) compare complete paths
+case-insensitively by default; `--case-sensitive-dir` selects strict comparison.
+Canonical aliases are preserved. The `wd:` modifier searches indexed component
+suffixes instead. Directory restrictions apply before ranking and result limits,
+so older sessions remain discoverable with small `-n` values.

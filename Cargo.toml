@@ -16,6 +16,7 @@ include = [
     "/docs/**",
     "/examples/**",
     "/devdocs/RELEASING.md",
+    "/devdocs/skills/aics-cli/SKILL.md",
     "/Cargo.toml",
     "/Cargo.lock",
     "/README.md",

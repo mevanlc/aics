@@ -18,6 +18,7 @@ use crate::trash::{TrashEntry, TrashReason};
 mod file_identity;
 mod transaction;
 pub use transaction::{execute, recover};
+pub(crate) use transaction::{read_guard, RecoveryRequired};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

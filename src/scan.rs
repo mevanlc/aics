@@ -627,7 +627,7 @@ fn scan_trash_root<P: ScanProgressObserver>(
     progress: &mut P,
 ) -> Result<()> {
     let store = TrashStore::new(paths.clone());
-    let entries = store.sync()?;
+    let entries = store.snapshot()?;
 
     for entry in entries {
         let Some(agent) = entry.agent() else {

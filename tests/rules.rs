@@ -293,7 +293,7 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
 }
 
 #[test]
-fn ordinary_json_startup_applies_only_rules_enabled_at_startup() -> Result<()> {
+fn ordinary_json_search_skips_default_and_custom_startup_rules() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
     let config_root = temp.path().join("config");
@@ -330,8 +330,7 @@ fn ordinary_json_startup_applies_only_rules_enabled_at_startup() -> Result<()> {
         .output()?;
     assert!(default_output.status.success(), "{default_output:#?}");
     let startup_caches = profile_startup_rules_caches(&cache_root)?;
-    assert_eq!(startup_caches.len(), 1);
-    let cached_default_rules = fs::read(&startup_caches[0])?;
+    assert!(startup_caches.is_empty());
 
     let output = Command::new(env!("CARGO_BIN_EXE_aics"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -351,11 +350,10 @@ fn ordinary_json_startup_applies_only_rules_enabled_at_startup() -> Result<()> {
         .output()?;
 
     assert!(output.status.success(), "{output:#?}");
-    assert!(!roots.claude_session.exists());
+    assert!(roots.claude_session.exists());
     assert!(roots.codex_session.exists());
-    assert!(fs::read_to_string(data_root.join("trash.jsonl"))?.contains("basic_session.jsonl"));
+    assert!(!data_root.join("trash.jsonl").exists());
     assert_eq!(profile_startup_rules_caches(&cache_root)?, startup_caches);
-    assert_eq!(fs::read(&startup_caches[0])?, cached_default_rules);
     assert!(profile_rules_caches(&cache_root)?.is_empty());
     Ok(())
 }
@@ -731,8 +729,8 @@ fn benchmark_rules_evaluates_without_output_or_applying_actions() -> Result<()> 
     assert!(output.stdout.is_empty(), "{output:#?}");
     assert!(output.stderr.is_empty(), "{output:#?}");
     assert!(roots.claude_session.exists());
-    assert_eq!(fs::read_to_string(data_root.join("trash.jsonl"))?, "");
-    assert_eq!(fs::read_dir(data_root.join("trash"))?.count(), 0);
+    assert!(!data_root.join("trash.jsonl").exists());
+    assert!(!data_root.join("trash").exists());
     assert!(profile_rules_caches(&cache_root)?.is_empty());
     Ok(())
 }
