@@ -82,6 +82,12 @@ context, such as environment blocks, keeps its existing visibility behavior.
 It also hides recognized Antigravity task polling reminders, server restart
 notices, and stop-hook feedback.
 
+Claude user messages marked `isCompactSummary: true` also follow **Internal
+Context**. The whole generated continuation summary is hidden, including its
+reminders and resume instructions. Showing it requires both Internal Context and
+User Messages to be on. Recognition uses source metadata; ordinary user messages
+quoting the same text remain visible.
+
 Complete `<oai-mem-citation>` footers at the end of assistant messages also follow
 **Internal Context**. Only the footer is hidden; the reply prose, heading, and
 timestamp remain visible. Showing the footer requires both Internal Context and

@@ -8139,6 +8139,7 @@ mod tests {
             messages: vec![
                 crate::parse::SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::User,
                     content: "first user".to_owned(),
                     timestamp: None,
@@ -8146,6 +8147,7 @@ mod tests {
                 },
                 crate::parse::SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::Assistant,
                     content: "first assistant".to_owned(),
                     timestamp: None,
@@ -8153,6 +8155,7 @@ mod tests {
                 },
                 crate::parse::SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::ToolCall,
                     content: "run tool".to_owned(),
                     timestamp: None,
@@ -8160,6 +8163,7 @@ mod tests {
                 },
                 crate::parse::SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::ToolResult,
                     content: "tool output".to_owned(),
                     timestamp: None,
@@ -8167,6 +8171,7 @@ mod tests {
                 },
                 crate::parse::SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::User,
                     content: "second user".to_owned(),
                     timestamp: None,
@@ -8174,6 +8179,7 @@ mod tests {
                 },
                 crate::parse::SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::Assistant,
                     content: "second assistant".to_owned(),
                     timestamp: None,

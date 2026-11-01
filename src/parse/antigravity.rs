@@ -63,12 +63,14 @@ impl SessionBuilder {
             timestamp,
             tool_name: None,
             antigravity_kind,
+            is_compact_summary: false,
         });
         self.cells.push(SessionCell::Message {
             role,
             content: content.clone(),
             timestamp,
             antigravity_kind,
+            is_compact_summary: false,
         });
         match role {
             MessageRole::User => {
@@ -134,6 +136,7 @@ impl SessionBuilder {
         }
         self.messages.push(SessionMessage {
             antigravity_kind: None,
+            is_compact_summary: false,
             role: MessageRole::ToolCall,
             content: summary.clone(),
             timestamp,
@@ -227,6 +230,7 @@ impl SessionBuilder {
         if !output.trim().is_empty() {
             self.messages.push(SessionMessage {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::ToolResult,
                 content: output.clone(),
                 timestamp,

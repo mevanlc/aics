@@ -51,7 +51,8 @@ impl DiscoveryHit {
         let session = hit.session;
         let first = strip_project_docs_autodump_preamble(&session.first_user_msg_content)
             .unwrap_or(&session.first_user_msg_content);
-        let first = visible_message_content(MessageRole::User, first, None, options).unwrap_or("");
+        let first =
+            visible_message_content(MessageRole::User, first, None, false, options).unwrap_or("");
         Self {
             session: DiscoverySession {
                 session_id: session.session_id,

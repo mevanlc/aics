@@ -77,9 +77,13 @@ pub fn message_visibility(
     role: MessageRole,
     content: &str,
     antigravity_kind: Option<AntigravityMessageKind>,
+    is_compact_summary: bool,
 ) -> VisibilityRequirement {
     use AntigravityMessageKind as Kind;
 
+    if role == MessageRole::User && is_compact_summary {
+        return VisibilityRequirement(USER | INTERNAL_CONTEXT);
+    }
     // Only the Antigravity parser supplies these annotations. Keep original roles
     // for display and rules, and never apply them to user-authored messages.
     if matches!(role, MessageRole::System | MessageRole::Summary) {
@@ -120,8 +124,16 @@ pub fn cell_visible(cell: &SessionCell, options: &DisplayOptions) -> bool {
             role,
             content,
             antigravity_kind,
+            is_compact_summary,
             ..
-        } => visible_message_content(*role, content, *antigravity_kind, *options).is_some(),
+        } => visible_message_content(
+            *role,
+            content,
+            *antigravity_kind,
+            *is_compact_summary,
+            *options,
+        )
+        .is_some(),
         SessionCell::Reasoning { .. } => !options.hide_agent_thinking,
         SessionCell::Exec { is_user: true, .. } => !options.hide_user_tool_calls,
         SessionCell::ToolCall { .. }
@@ -478,6 +490,7 @@ impl SearchProjection {
                     message.role,
                     &message.content,
                     message.antigravity_kind,
+                    message.is_compact_summary,
                 );
                 if let Some(source) = session.search_fields.tool_call_source_for_message(index) {
                     result.segment(
@@ -615,6 +628,7 @@ impl SearchProjection {
         role: MessageRole,
         content: &str,
         antigravity_kind: Option<AntigravityMessageKind>,
+        is_compact_summary: bool,
     ) {
         // Keep All's full source text and offsets intact; only visibility fields
         // are split when a message contains a generated citation footer.
@@ -623,7 +637,7 @@ impl SearchProjection {
             return;
         }
         self.append("content", &full);
-        for span in message_content_spans(role, content, antigravity_kind) {
+        for span in message_content_spans(role, content, antigravity_kind, is_compact_summary) {
             let text = &content[span.range.clone()];
             if text.trim().is_empty() {
                 continue;
@@ -679,9 +693,16 @@ impl SearchProjection {
                 role,
                 content,
                 antigravity_kind,
+                is_compact_summary,
                 ..
             } => {
-                self.message(block, *role, content, *antigravity_kind);
+                self.message(
+                    block,
+                    *role,
+                    content,
+                    *antigravity_kind,
+                    *is_compact_summary,
+                );
             }
             SessionCell::Reasoning { header, body, .. } => {
                 if let Some(header) = header {
@@ -850,12 +871,19 @@ impl SearchProjection {
         };
         if session.cells.is_empty() {
             for message in &session.messages {
-                visit(message.role, &message.content);
+                if !message.is_compact_summary {
+                    visit(message.role, &message.content);
+                }
             }
         } else {
             for cell in &session.cells {
                 match cell {
-                    SessionCell::Message { role, content, .. } => {
+                    SessionCell::Message {
+                        role,
+                        content,
+                        is_compact_summary: false,
+                        ..
+                    } => {
                         visit(*role, content);
                     }
                     SessionCell::Reasoning { header, body, .. } => {
@@ -1081,6 +1109,9 @@ fn semantic_candidates(field: &str, session: &Session) -> BTreeMap<String, Vec<P
     };
     if session.cells.is_empty() {
         for (index, item) in session.messages.iter().enumerate() {
+            if item.is_compact_summary {
+                continue;
+            }
             if item.role == MessageRole::Summary
                 && !session.search_fields.native_summaries.is_empty()
             {
@@ -1109,7 +1140,12 @@ fn semantic_candidates(field: &str, session: &Session) -> BTreeMap<String, Vec<P
         for (index, cell) in session.cells.iter().enumerate() {
             let block = SourceBlock::Cell(index);
             match cell {
-                SessionCell::Message { role, content, .. } => {
+                SessionCell::Message {
+                    role,
+                    content,
+                    is_compact_summary: false,
+                    ..
+                } => {
                     if *role != MessageRole::Summary
                         || session.search_fields.native_summaries.is_empty()
                     {
@@ -1445,6 +1481,7 @@ mod tests {
         session.cells = vec![
             SessionCell::Message {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::User,
                 content: "  userword  ".to_owned(),
                 timestamp: None,
@@ -1497,6 +1534,7 @@ mod tests {
         session.cells = vec![
             SessionCell::Message {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::User,
                 content: "/repo/needle needle".to_owned(),
                 timestamp: None,
@@ -1557,6 +1595,7 @@ mod tests {
         let mut session = session();
         session.cells.push(SessionCell::Message {
             antigravity_kind: None,
+            is_compact_summary: false,
             role: MessageRole::User,
             content: "alpha alpha **beta**".to_owned(),
             timestamp: None,

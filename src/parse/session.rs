@@ -143,6 +143,9 @@ pub struct SessionMessage {
     pub tool_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub antigravity_kind: Option<AntigravityMessageKind>,
+    /// Claude-generated continuation context, marked by `isCompactSummary`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_compact_summary: bool,
 }
 
 /// Status of a tool call — pending until paired with output, then completed/failed.
@@ -301,6 +304,8 @@ pub enum SessionCell {
         timestamp: Option<DateTime<Utc>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         antigravity_kind: Option<AntigravityMessageKind>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_compact_summary: bool,
     },
     Reasoning {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -919,7 +924,12 @@ pub fn push_cell_from_message(
         }
         MessageRole::User => {
             *last_tool_call_summary = None;
-            if let Some(exec_cell) = parse_user_shell_command(&message.content, message.timestamp) {
+            let exec_cell = if message.is_compact_summary {
+                None
+            } else {
+                parse_user_shell_command(&message.content, message.timestamp)
+            };
+            if let Some(exec_cell) = exec_cell {
                 cells.push(exec_cell);
             } else {
                 cells.push(SessionCell::Message {
@@ -927,6 +937,7 @@ pub fn push_cell_from_message(
                     content: message.content.clone(),
                     timestamp: message.timestamp,
                     antigravity_kind: message.antigravity_kind,
+                    is_compact_summary: message.is_compact_summary,
                 });
             }
         }
@@ -937,6 +948,7 @@ pub fn push_cell_from_message(
                 content: message.content.clone(),
                 timestamp: message.timestamp,
                 antigravity_kind: message.antigravity_kind,
+                is_compact_summary: message.is_compact_summary,
             });
         }
     }
@@ -959,7 +971,7 @@ pub fn last_message_fields(messages: &[SessionMessage]) -> (Option<MessageRole>,
 pub fn first_user_message(messages: &[SessionMessage]) -> String {
     messages
         .iter()
-        .find(|message| message.role == MessageRole::User)
+        .find(|message| message.role == MessageRole::User && !message.is_compact_summary)
         .map(|message| message.content.clone())
         .unwrap_or_default()
 }
@@ -992,19 +1004,31 @@ pub fn push_unique_message(
     content: impl Into<String>,
     timestamp: Option<DateTime<Utc>>,
 ) {
+    push_unique_message_with_context(messages, role, content, timestamp, false);
+}
+
+pub fn push_unique_message_with_context(
+    messages: &mut Vec<SessionMessage>,
+    role: MessageRole,
+    content: impl Into<String>,
+    timestamp: Option<DateTime<Utc>>,
+    is_compact_summary: bool,
+) {
     let Some(content) = nonempty_trimmed(content.into()) else {
         return;
     };
 
-    if messages
-        .last()
-        .is_some_and(|last| last.role == role && last.content == content)
-    {
+    if messages.last().is_some_and(|last| {
+        last.role == role
+            && last.content == content
+            && last.is_compact_summary == is_compact_summary
+    }) {
         return;
     }
 
     messages.push(SessionMessage {
         antigravity_kind: None,
+        is_compact_summary,
         role,
         content,
         timestamp,
@@ -1032,6 +1056,7 @@ pub fn push_tool_message(
 
     messages.push(SessionMessage {
         antigravity_kind: None,
+        is_compact_summary: false,
         role,
         content,
         timestamp,

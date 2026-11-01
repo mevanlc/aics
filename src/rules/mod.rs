@@ -2070,6 +2070,7 @@ mod tests {
     fn message(role: MessageRole, content: &str) -> SessionCell {
         SessionCell::Message {
             antigravity_kind: None,
+            is_compact_summary: false,
             role,
             content: content.to_owned(),
             timestamp: None,

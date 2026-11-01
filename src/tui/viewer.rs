@@ -2423,6 +2423,7 @@ mod tests {
             },
             SessionCell::Message {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::User,
                 content: "following message\n\n".repeat(30),
                 timestamp: None,
@@ -2505,6 +2506,7 @@ mod tests {
             }),
             SessionCell::Message {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::User,
                 content: "# Inside message\n\n**request**".into(),
                 timestamp: None,
@@ -3146,6 +3148,53 @@ mod tests {
     }
 
     #[test]
+    fn claude_compact_summary_visibility_refreshes_find_navigation_and_copy() {
+        crate::settings::isolate_config_root_for_tests();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sessions/claude/compact_summaries.jsonl");
+        let parsed = crate::parse::parse_claude_session_file(path)
+            .unwrap()
+            .unwrap();
+        let area = Rect::new(0, 0, 120, 40);
+        for message_only in [false, true] {
+            let mut session = parsed.clone();
+            if message_only {
+                session.cells.clear();
+            }
+            let mut viewer = selection_viewer(&session, area);
+            viewer.find = Input::default().with_value("CompactStringNeedle".to_owned());
+            viewer.search = Input::default().with_value("all: CompactStringNeedle".to_owned());
+            for hidden in [true, false, true] {
+                let options = DisplayOptions {
+                    hide_internal_context: hidden,
+                    ..DisplayOptions::SHOW_ALL
+                };
+                refresh_viewer(&mut viewer, &session, area, options);
+                let cache = viewer.render_cache.as_ref().unwrap();
+                let text = rendered_lines(&cache.text).join("\n");
+                assert_eq!(text.contains("CompactStringNeedle"), !hidden);
+                assert_eq!(text.contains("CompactArrayNeedle"), !hidden);
+                assert!(text.contains("QuotedContinuationNeedle"));
+                assert_eq!(cache.find_ranges.len(), usize::from(!hidden));
+                assert_eq!(cache.query_hidden, usize::from(hidden));
+                viewer.selected_blocks = cache.blocks.iter().map(|block| block.source.id).collect();
+                let (_, copied) = viewer.selected_markdown(&session, None, options);
+                assert_eq!(copied.contains("CompactStringNeedle"), !hidden);
+                assert!(copied.contains("PromptNeedle"));
+                let rows = collect_message_rows(
+                    &session,
+                    None,
+                    &Theme::default(),
+                    116,
+                    MessageJumpScope::UserOnly,
+                    options,
+                );
+                assert_eq!(rows.len(), if hidden { 4 } else { 6 });
+            }
+        }
+    }
+
+    #[test]
     fn internal_context_visibility_updates_viewer_and_message_navigation() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/sessions/codex/internal_context.jsonl");
@@ -3593,6 +3642,7 @@ mod tests {
             messages: vec![
                 SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::User,
                     content: "alpha beta gamma delta alpha".to_owned(),
                     timestamp: Some(Utc::now()),
@@ -3600,6 +3650,7 @@ mod tests {
                 },
                 SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::Assistant,
                     content: "omega alpha".to_owned(),
                     timestamp: Some(Utc::now()),
@@ -3643,12 +3694,14 @@ mod tests {
             cells: vec![
                 SessionCell::Message {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::User,
                     content: docs.to_owned(),
                     timestamp: Some(Utc::now()),
                 },
                 SessionCell::Message {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::User,
                     content: request.to_owned(),
                     timestamp: Some(Utc::now()),
@@ -3682,6 +3735,7 @@ mod tests {
             custom_title: Some("demo markdown".to_owned()),
             messages: vec![SessionMessage {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::Assistant,
                 content: "```rust\nfn alpha() {}\n```".to_owned(),
                 timestamp: Some(Utc::now()),
@@ -3731,6 +3785,7 @@ mod tests {
             messages: vec![
                 SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::User,
                     content: "first user".to_owned(),
                     timestamp: Some(Utc::now()),
@@ -3738,6 +3793,7 @@ mod tests {
                 },
                 SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::Assistant,
                     content: "first assistant".to_owned(),
                     timestamp: Some(Utc::now()),
@@ -3745,6 +3801,7 @@ mod tests {
                 },
                 SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::ToolCall,
                     content: "run tool".to_owned(),
                     timestamp: Some(Utc::now()),
@@ -3752,6 +3809,7 @@ mod tests {
                 },
                 SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::ToolResult,
                     content: "tool output".to_owned(),
                     timestamp: Some(Utc::now()),
@@ -3759,6 +3817,7 @@ mod tests {
                 },
                 SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::User,
                     content: "second user".to_owned(),
                     timestamp: Some(Utc::now()),
@@ -3766,6 +3825,7 @@ mod tests {
                 },
                 SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::Assistant,
                     content: "second assistant".to_owned(),
                     timestamp: Some(Utc::now()),
@@ -3806,6 +3866,7 @@ mod tests {
             messages: vec![
                 SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::User,
                     content: "This line wraps hard in the preview and viewer.".to_owned(),
                     timestamp: Some(Utc::now()),
@@ -3813,6 +3874,7 @@ mod tests {
                 },
                 SessionMessage {
                     antigravity_kind: None,
+                    is_compact_summary: false,
                     role: MessageRole::Assistant,
                     content: "Short reply".to_owned(),
                     timestamp: Some(Utc::now()),

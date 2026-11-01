@@ -18,8 +18,9 @@ pub fn message_content_spans(
     role: MessageRole,
     content: &str,
     antigravity_kind: Option<AntigravityMessageKind>,
+    is_compact_summary: bool,
 ) -> Vec<MessageContentSpan> {
-    let visibility = message_visibility(role, content, antigravity_kind);
+    let visibility = message_visibility(role, content, antigravity_kind, is_compact_summary);
     if role == MessageRole::Assistant {
         if let Some(footer) = memory_citation_footer_range(content) {
             let mut spans = Vec::with_capacity(2);
@@ -49,9 +50,11 @@ pub fn visible_message_content(
     role: MessageRole,
     content: &str,
     antigravity_kind: Option<AntigravityMessageKind>,
+    is_compact_summary: bool,
     options: DisplayOptions,
 ) -> Option<&str> {
-    if !message_visibility(role, content, antigravity_kind).is_visible(options) {
+    if !message_visibility(role, content, antigravity_kind, is_compact_summary).is_visible(options)
+    {
         return None;
     }
     let retained = if role == MessageRole::Assistant && options.hide_internal_context {
@@ -167,7 +170,7 @@ mod tests {
                 CITATION.replace("diagnostic provenance", "<opaque>")
             ),
         ] {
-            let spans = message_content_spans(MessageRole::Assistant, &body, None);
+            let spans = message_content_spans(MessageRole::Assistant, &body, None, false);
             assert_eq!(spans.len(), 2, "{body}");
             let reply = &spans[0];
             let footer = &spans[1];
@@ -176,7 +179,7 @@ mod tests {
             assert_eq!(footer.range.end, body.len());
             assert_eq!(
                 reply.visibility,
-                message_visibility(MessageRole::Assistant, &body, None)
+                message_visibility(MessageRole::Assistant, &body, None, false)
             );
             assert!(reply.visibility.is_visible(DisplayOptions::default()));
             assert!(!footer.visibility.is_visible(DisplayOptions::default()));
@@ -190,6 +193,7 @@ mod tests {
                     MessageRole::Assistant,
                     &body,
                     None,
+                    false,
                     DisplayOptions::default()
                 ),
                 Some(body[..footer.range.start].trim_end())
@@ -199,6 +203,7 @@ mod tests {
                     MessageRole::Assistant,
                     &body,
                     None,
+                    false,
                     DisplayOptions::SHOW_ALL
                 ),
                 Some(body.as_str())
@@ -239,13 +244,14 @@ mod tests {
                     MessageRole::Assistant,
                     &body,
                     None,
+                    false,
                     DisplayOptions::default()
                 ),
                 Some(body.as_str()),
                 "{body}"
             );
             assert_eq!(
-                message_content_spans(MessageRole::Assistant, &body, None).len(),
+                message_content_spans(MessageRole::Assistant, &body, None, false).len(),
                 1,
                 "{body}"
             );
@@ -258,12 +264,12 @@ mod tests {
             MessageRole::ToolResult,
         ] {
             assert_eq!(
-                message_content_spans(role, CITATION, None).len(),
+                message_content_spans(role, CITATION, None, false).len(),
                 1,
                 "{role:?}"
             );
             assert_eq!(
-                visible_message_content(role, CITATION, None, DisplayOptions::default()),
+                visible_message_content(role, CITATION, None, false, DisplayOptions::default()),
                 Some(CITATION),
                 "{role:?}"
             );
@@ -278,6 +284,7 @@ mod tests {
                     MessageRole::Assistant,
                     &content,
                     None,
+                    false,
                     DisplayOptions::default()
                 ),
                 None
@@ -287,6 +294,7 @@ mod tests {
                     MessageRole::Assistant,
                     &content,
                     None,
+                    false,
                     DisplayOptions::SHOW_ALL
                 ),
                 Some(content.as_str())

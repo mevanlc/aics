@@ -935,7 +935,7 @@ impl DisplayField {
             Self::AgentThinking => "Hide agent thinking and reasoning blocks from previews and viewers.",
             Self::UserMessages => "Hide user messages from previews and viewers.",
             Self::InternalContext => {
-                "Hide memory citation footers, internal/goal context, and Antigravity polling, restart, and hook notices. Reply text stays visible."
+                "Hide Claude continuation summaries, memory citation footers, internal/goal context, and Antigravity polling, restart, and hook notices. Reply text stays visible."
             }
         }
     }

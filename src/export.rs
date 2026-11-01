@@ -110,6 +110,7 @@ pub fn session_to_plain_text_with_options(
             message.role,
             &message.content,
             message.antigravity_kind,
+            message.is_compact_summary,
             display_options,
         ) else {
             continue;
@@ -392,6 +393,7 @@ fn push_message(output: &mut String, message: &SessionMessage, display_options: 
         message.role,
         &message.content,
         message.antigravity_kind,
+        message.is_compact_summary,
         display_options,
     ) else {
         return;
@@ -429,10 +431,15 @@ fn push_cell(
             content,
             timestamp,
             antigravity_kind,
+            is_compact_summary,
         } => {
-            let Some(content) =
-                visible_message_content(*role, content, *antigravity_kind, display_options)
-            else {
+            let Some(content) = visible_message_content(
+                *role,
+                content,
+                *antigravity_kind,
+                *is_compact_summary,
+                display_options,
+            ) else {
                 return;
             };
             push_heading(output, role.as_str(), *timestamp);
@@ -1240,6 +1247,7 @@ mod tests {
         session.messages = vec![
             SessionMessage {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::User,
                 content: "run the tests".to_owned(),
                 timestamp: None,
@@ -1247,6 +1255,7 @@ mod tests {
             },
             SessionMessage {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::Assistant,
                 content: "on it".to_owned(),
                 timestamp: None,
@@ -1254,6 +1263,7 @@ mod tests {
             },
             SessionMessage {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::ToolCall,
                 content: "cargo nextest run".to_owned(),
                 timestamp: None,
@@ -1261,6 +1271,7 @@ mod tests {
             },
             SessionMessage {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::ToolResult,
                 content: "all green".to_owned(),
                 timestamp: None,
@@ -1289,6 +1300,7 @@ mod tests {
         let mut session = sample_session();
         session.cells = vec![SessionCell::Message {
             antigravity_kind: None,
+            is_compact_summary: false,
             role: MessageRole::Assistant,
             content: "## Findings\n\n- one\n- two".to_owned(),
             timestamp: timestamp(12),
@@ -1455,6 +1467,7 @@ mod tests {
         session.messages = vec![
             SessionMessage {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::User,
                 content: "run the tests".to_owned(),
                 timestamp: timestamp(12),
@@ -1462,6 +1475,7 @@ mod tests {
             },
             SessionMessage {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::ToolResult,
                 content: "# not a heading".to_owned(),
                 timestamp: None,
@@ -1548,12 +1562,14 @@ mod tests {
         session.cells = vec![
             SessionCell::Message {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::User,
                 content: "run the tests".to_owned(),
                 timestamp: None,
             },
             SessionCell::Message {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::Assistant,
                 content: "on it".to_owned(),
                 timestamp: None,
@@ -1707,6 +1723,7 @@ mod tests {
         session.messages = vec![
             SessionMessage {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::User,
                 content: "run the tests".to_owned(),
                 timestamp: None,
@@ -1714,6 +1731,7 @@ mod tests {
             },
             SessionMessage {
                 antigravity_kind: None,
+                is_compact_summary: false,
                 role: MessageRole::ToolResult,
                 content: "all green".to_owned(),
                 timestamp: None,

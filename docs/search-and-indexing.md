@@ -203,6 +203,12 @@ or **User Messages** hides them. Internal Context is hidden by default. Use
 `hidden: "Continue working toward the active thread goal"` to find those messages
 while they are hidden, or `all:` to include them alongside visible content.
 
+Claude-generated continuation summaries marked `isCompactSummary: true` use the
+same Internal Context and User Messages visibility requirements. Visible search
+omits them by default; `hidden:` and `all:` can find them. They are excluded from
+the authored `user:` field. User-quoted examples without the source flag retain
+their ordinary User Messages visibility.
+
 Complete `<oai-mem-citation>` footers at the end of assistant messages follow
 **Internal Context**, independently of the preceding reply text. With Internal
 Context off and Agent Replies on, Visible searches the reply prose while Hidden

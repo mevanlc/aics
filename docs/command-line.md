@@ -258,7 +258,8 @@ invocations; `tool-results` also suppresses the stdout and stderr inside exec an
 patch blocks while leaving the invocations themselves in place.
 
 `internal-context` hides complete user-message `<codex_internal_context …>` and
-`<goal_context>` injections, plus recognized Antigravity polling reminders,
+`<goal_context>` injections, Claude continuation summaries marked
+`isCompactSummary: true`, plus recognized Antigravity polling reminders,
 restart notices, stop-hook feedback, and complete trailing `<oai-mem-citation>`
 footers in assistant messages. Hiding a citation footer preserves the reply
 text. Quoted/code examples, malformed wrappers, and citations followed by prose
