@@ -124,6 +124,7 @@ impl Member {
 pub struct DependencyGraph {
     pub members: BTreeMap<PathBuf, Member>,
     pub errors: Vec<String>,
+    member_errors: BTreeMap<PathBuf, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,27 +190,67 @@ pub(crate) fn resolved_path(path: &Path) -> PathBuf {
     }
 }
 
-fn walk(path: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+/// Walks active and archived session trees.
+///
+/// Codex rollouts can have cross-file storage dependencies (`history_base` and same-thread
+/// pages), so symlinks or unreadable directories in Codex roots must record global blockers.
+/// Claude sessions have no physical storage dependencies—full-tree discovery only populates
+/// optional `forkedFrom` context for related-session review—and Claude Code natively creates
+/// symlinked `subagents/agent-*.jsonl` transcripts, so symlinks and unrelated walk errors in
+/// Claude projects are skipped without poisoning unrelated operations.
+fn walk(path: &Path, agent: Agent, out: &mut Vec<PathBuf>, errors: &mut Vec<String>) {
+    let record_walk_error = |errors: &mut Vec<String>, message: String| {
+        if agent == Agent::Codex {
+            errors.push(message);
+        } else {
+            log::warn!("lifecycle discovery: {message}");
+        }
+    };
     let entries = match fs::read_dir(path) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).with_context(|| format!("cannot inspect {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            record_walk_error(errors, format!("cannot inspect {}: {e}", path.display()));
+            return;
+        }
     };
     for entry in entries {
-        let entry = entry?;
-        let kind = entry.file_type()?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                record_walk_error(errors, format!("cannot inspect {}: {e}", path.display()));
+                continue;
+            }
+        };
+        let entry_path = entry.path();
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(e) => {
+                record_walk_error(
+                    errors,
+                    format!("cannot inspect {}: {e}", entry_path.display()),
+                );
+                continue;
+            }
+        };
         if kind.is_symlink() {
-            bail!("cannot verify symlink {}", entry.path().display());
+            if agent == Agent::Codex {
+                errors.push(format!("cannot verify symlink {}", entry_path.display()));
+            }
+            continue;
         }
         if kind.is_dir() {
-            walk(&entry.path(), out)?;
-        } else if entry.file_name().to_string_lossy().ends_with(".jsonl")
-            || entry.file_name().to_string_lossy().ends_with(".jsonl.zst")
-        {
-            out.push(entry.path());
+            walk(&entry_path, agent, out, errors);
+        } else {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let is_session_name =
+                name.ends_with(".jsonl") || (agent == Agent::Codex && name.ends_with(".jsonl.zst"));
+            if is_session_name && (kind.is_file() || agent == Agent::Codex) {
+                out.push(entry_path);
+            }
         }
     }
-    Ok(())
 }
 
 /// Claude Code also writes files holding only file-history snapshots. The parser reports no
@@ -383,14 +424,10 @@ impl DependencyGraph {
             .map(|p| p.join("archived_sessions"));
         let mut files = Vec::new();
         if agent != Agent::Antigravity {
-            if let Err(e) = walk(root, &mut files) {
-                graph.errors.push(format!("{e:#}"));
-            }
+            walk(root, agent, &mut files, &mut graph.errors);
             if agent == Agent::Codex {
                 if let Some(p) = &archive {
-                    if let Err(e) = walk(p, &mut files) {
-                        graph.errors.push(format!("{e:#}"));
-                    }
+                    walk(p, agent, &mut files, &mut graph.errors);
                 }
             }
         }
@@ -402,7 +439,7 @@ impl DependencyGraph {
             })
             .collect::<Vec<_>>();
         for (path, member) in read_active_members(&files, agent) {
-            graph.insert(path, member);
+            graph.insert(path, agent, member);
         }
         if let Some(trash) = &roots.trash {
             match File::open(&trash.metadata_file) {
@@ -431,8 +468,14 @@ impl DependencyGraph {
                             )
                             .transcript;
                         }
-                        if path.try_exists()? {
-                            graph.add(&path, &original, agent, true, false);
+                        match path.try_exists() {
+                            Ok(true) => graph.add(&path, &original, agent, true, false),
+                            Ok(false) => {}
+                            Err(e) => graph.record_error(
+                                &path,
+                                agent,
+                                format!("cannot verify {}: {e}", path.display()),
+                            ),
                         }
                     }
                 }
@@ -443,14 +486,18 @@ impl DependencyGraph {
             }
         }
         for path in seeds {
-            if !graph.members.contains_key(path) {
+            if !graph.members.contains_key(path) && !graph.member_errors.contains_key(path) {
                 if path.starts_with(root) {
                     graph.add(path, path, agent, false, false);
                 } else {
-                    graph.errors.push(format!(
-                        "cannot resolve selected session {} in this provider home",
-                        path.display()
-                    ));
+                    graph.record_error(
+                        path,
+                        agent,
+                        format!(
+                            "cannot resolve selected session {} in this provider home",
+                            path.display()
+                        ),
+                    );
                 }
             }
         }
@@ -475,18 +522,33 @@ impl DependencyGraph {
         Ok(graph)
     }
 
-    fn add(&mut self, path: &Path, original: &Path, agent: Agent, trashed: bool, archived: bool) {
-        self.insert(path, metadata(path, original, agent, trashed, archived));
+    fn record_error(&mut self, path: &Path, agent: Agent, message: String) {
+        if agent == Agent::Codex {
+            self.errors.push(message);
+        } else {
+            log::debug!("lifecycle discovery: {message}");
+            self.member_errors.insert(path.into(), message);
+        }
     }
 
-    fn insert(&mut self, path: &Path, member: Result<Member>) {
+    fn add(&mut self, path: &Path, original: &Path, agent: Agent, trashed: bool, archived: bool) {
+        self.insert(
+            path,
+            agent,
+            metadata(path, original, agent, trashed, archived),
+        );
+    }
+
+    fn insert(&mut self, path: &Path, agent: Agent, member: Result<Member>) {
         match member {
             Ok(member) => {
                 self.members.insert(path.into(), member);
             }
-            Err(e) => self
-                .errors
-                .push(format!("cannot verify {}: {e:#}", path.display())),
+            Err(e) => self.record_error(
+                path,
+                agent,
+                format!("cannot verify {}: {e:#}", path.display()),
+            ),
         }
     }
 
@@ -541,7 +603,9 @@ impl DependencyGraph {
                 )),
                 None => plan
                     .blockers
-                    .push(format!("selected file is unavailable: {}", path.display())),
+                    .push(self.member_errors.get(path).cloned().unwrap_or_else(|| {
+                        format!("selected file is unavailable: {}", path.display())
+                    })),
             }
         }
         // Already-trashed intermediates still connect active descendants to

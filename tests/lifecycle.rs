@@ -506,3 +506,147 @@ fn removal_follows_active_descendants_through_a_previously_trashed_intermediate(
     assert!(f.trash_path(&b).exists());
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn claude_subagent_symlinks_and_unrelated_errors_do_not_block_claude_lifecycle() -> Result<()> {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    struct RestorePerms(Vec<(PathBuf, u32)>);
+    impl Drop for RestorePerms {
+        fn drop(&mut self) {
+            for (path, mode) in self.0.iter().rev() {
+                let _ = fs::set_permissions(path, fs::Permissions::from_mode(*mode));
+            }
+        }
+    }
+
+    let f = Fixture::new()?;
+    let proj_a = f.roots.claude_projects.join("-Users-test-proj-a");
+    let proj_b = f.roots.claude_projects.join("-Users-test-proj-b");
+    let origin_subagents = proj_b.join("origin/subagents");
+    let follower_subagents = proj_b.join("follower/subagents");
+    let dangling_subagents = proj_b.join("dangling/subagents");
+    let locked_dir = f.roots.claude_projects.join("-Users-test-locked");
+    fs::create_dir_all(&proj_a)?;
+    fs::create_dir_all(&origin_subagents)?;
+    fs::create_dir_all(&follower_subagents)?;
+    fs::create_dir_all(&dangling_subagents)?;
+    fs::create_dir_all(&locked_dir)?;
+
+    let write_claude = |path: &Path, id: &str, fork_of: Option<&str>| -> Result<()> {
+        let mut line = serde_json::json!({
+            "type": "user",
+            "sessionId": id,
+            "cwd": "/tmp/test",
+            "uuid": "u1",
+            "timestamp": "2026-09-30T11:55:37Z",
+            "message": {"role": "user", "content": "hello"}
+        });
+        if let Some(parent) = fork_of {
+            line["forkedFrom"] = serde_json::json!({"sessionId": parent, "messageUuid": "u1"});
+        }
+        fs::write(path, format!("{line}\n"))?;
+        Ok(())
+    };
+
+    let selected = proj_a.join("selected.jsonl");
+    let forked = proj_a.join("forked.jsonl");
+    write_claude(&selected, "selected", None)?;
+    write_claude(&forked, "forked", Some("selected"))?;
+
+    let real_subagent = origin_subagents.join("agent-shared.jsonl");
+    write_claude(&real_subagent, "agent-shared", None)?;
+    let symlinked_subagent = follower_subagents.join("agent-shared.jsonl");
+    symlink(&real_subagent, &symlinked_subagent)?;
+    let dangling_subagent = dangling_subagents.join("agent-missing.jsonl");
+    symlink(proj_b.join("missing.jsonl"), &dangling_subagent)?;
+
+    let unreadable = proj_b.join("unreadable.jsonl");
+    write_claude(&unreadable, "unreadable", None)?;
+    let hidden_in_locked = locked_dir.join("hidden.jsonl");
+    write_claude(&hidden_in_locked, "hidden", None)?;
+
+    let _restore = RestorePerms(vec![
+        (unreadable.clone(), 0o600),
+        (locked_dir.clone(), 0o700),
+    ]);
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000))?;
+    fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o000))?;
+
+    let graph =
+        DependencyGraph::discover(&f.roots, Agent::Claude, std::slice::from_ref(&selected))?;
+    assert!(graph.errors.is_empty(), "{:?}", graph.errors);
+    let related = graph
+        .related(&BTreeSet::from([selected.clone()]))
+        .into_iter()
+        .map(|m| m.path)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(related, BTreeSet::from([selected.clone(), forked]));
+
+    let delete_plan = graph.plan(BTreeSet::from([selected.clone()]), Operation::Delete);
+    assert!(
+        delete_plan.blockers.is_empty(),
+        "{:?}",
+        delete_plan.blockers
+    );
+    f.execute(&delete_plan)?;
+    assert!(!selected.exists());
+
+    // Selecting a symlink itself directly must still fail verification.
+    let symlink_plan = DependencyGraph::discover(
+        &f.roots,
+        Agent::Claude,
+        std::slice::from_ref(&symlinked_subagent),
+    )?
+    .plan(BTreeSet::from([symlinked_subagent]), Operation::Delete);
+    assert!(
+        symlink_plan
+            .blockers
+            .iter()
+            .any(|b| b.contains("not a regular session file")),
+        "{:?}",
+        symlink_plan.blockers
+    );
+
+    // If permissions are enforced (non-root), directly selecting unreadable targets still blocks.
+    if fs::File::open(&unreadable).is_err() {
+        for bad_seed in [&unreadable, &hidden_in_locked] {
+            let bad_plan =
+                DependencyGraph::discover(&f.roots, Agent::Claude, std::slice::from_ref(bad_seed))?
+                    .plan(BTreeSet::from([bad_seed.clone()]), Operation::Trash);
+            assert!(
+                bad_plan
+                    .blockers
+                    .iter()
+                    .any(|b| b.contains("cannot verify")),
+                "{:?}",
+                bad_plan.blockers
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_symlinks_still_block_codex_removal() -> Result<()> {
+    let f = Fixture::new()?;
+    let a = f.rollout("a", "a", None)?;
+    let b = f.rollout("b", "b", None)?;
+    let link = f.roots.codex_sessions.join("link.jsonl");
+    std::os::unix::fs::symlink(&b, &link)?;
+
+    let plan = f.plan(std::slice::from_ref(&a), Operation::Trash)?;
+    assert!(
+        plan.blockers
+            .iter()
+            .any(|s| s.contains("cannot verify symlink")),
+        "{:?}",
+        plan.blockers
+    );
+    assert!(f.execute(&plan).is_err());
+    assert!(a.exists());
+    Ok(())
+}
