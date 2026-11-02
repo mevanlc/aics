@@ -266,6 +266,11 @@ text. Quoted/code examples, malformed wrappers, and citations followed by prose
 remain visible. The TUI hides this generated content by default; complete
 exports include it unless `--hide internal-context` is specified.
 
+`tool-results` also hides Claude task notifications (user entries carrying
+`origin.kind: "task-notification"` or legacy complete `<task-notification>`
+envelopes). Pasted examples without task-notification provenance and messages
+with surrounding user prose remain under `user-messages`.
+
 For Antigravity, `project-docs-autodump` also hides injected directory rules,
 `tool-results` hides asynchronous task outcomes (including cancellations) and
 execution errors, and `agent-replies` hides worker messages and compaction

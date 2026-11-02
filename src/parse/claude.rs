@@ -11,10 +11,11 @@ use serde_json::Value;
 use super::search_fields::{authored_user_text, SessionSearchFields, ToolCallSource};
 use super::session::{
     earliest_timestamp, fallback_session_id, first_message_fields, first_user_message,
-    infer_derivation_type, last_message_fields, latest_timestamp, metadata_created,
-    metadata_modified, modified_ts, nonempty_trimmed, push_cell_from_message, push_tool_message,
-    push_unique_chunk, push_unique_message, push_unique_message_with_context, Agent, MessageRole,
-    Session, SessionCell, SessionInfo, SessionLineage,
+    infer_derivation_type, is_complete_claude_task_notification, last_message_fields,
+    latest_timestamp, metadata_created, metadata_modified, modified_ts, nonempty_trimmed,
+    push_cell_from_message, push_tool_message, push_unique_chunk, push_unique_message,
+    push_unique_message_with_context, Agent, MessageRole, Session, SessionCell, SessionInfo,
+    SessionLineage,
 };
 use super::tool_format;
 
@@ -176,16 +177,23 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
                     && value.get("isCompactSummary").and_then(Value::as_bool) == Some(true);
                 let tool_use_result = value.get("toolUseResult");
 
+                let blocks =
+                    extract_message_blocks(message.get("content"), tool_use_result, is_meta);
+                let is_task_notification = is_claude_task_notification_entry(
+                    &value,
+                    role,
+                    is_meta,
+                    is_compact_summary,
+                    &blocks,
+                );
+
                 capture_message_search_fields(
                     &mut search_fields,
                     role,
                     message.get("content"),
                     tool_use_result,
-                    is_meta || is_compact_summary,
+                    is_meta || is_compact_summary || is_task_notification,
                 );
-
-                let blocks =
-                    extract_message_blocks(message.get("content"), tool_use_result, is_meta);
 
                 contributed = !blocks.is_empty();
 
@@ -199,6 +207,7 @@ pub fn parse_claude_session_file(path: impl AsRef<Path>) -> Result<Option<Sessio
                                 text.clone(),
                                 entry_timestamp,
                                 is_compact_summary,
+                                is_task_notification,
                             );
                             if let Some(message) = messages.get(message_count_before) {
                                 push_cell_from_message(
@@ -521,6 +530,48 @@ fn extract_message_role(value: &Value) -> Option<MessageRole> {
 
 fn is_away_summary(value: &Value) -> bool {
     value.get("subtype").and_then(Value::as_str) == Some("away_summary")
+}
+
+fn is_claude_task_notification_entry(
+    value: &Value,
+    role: MessageRole,
+    is_meta: bool,
+    is_compact_summary: bool,
+    blocks: &[MessageBlock],
+) -> bool {
+    if role != MessageRole::User || is_meta || is_compact_summary || blocks.is_empty() {
+        return false;
+    }
+    if !blocks
+        .iter()
+        .all(|block| matches!(block, MessageBlock::Text(_)))
+    {
+        return false;
+    }
+
+    match value.get("origin") {
+        Some(Value::Object(origin)) => {
+            origin.get("kind").and_then(Value::as_str) == Some("task-notification")
+        }
+        Some(Value::Null) | None => {
+            if value
+                .get("turnOrigin")
+                .is_some_and(|v| !v.is_null() && v.as_str() != Some("task_notification"))
+                || value
+                    .get("promptSource")
+                    .is_some_and(|v| !v.is_null() && v.as_str() != Some("system"))
+            {
+                return false;
+            }
+            blocks.iter().all(|block| {
+                matches!(
+                    block,
+                    MessageBlock::Text(text) if is_complete_claude_task_notification(text)
+                )
+            })
+        }
+        Some(_) => false,
+    }
 }
 
 fn is_local_command_caveat_entry(value: &Value) -> bool {

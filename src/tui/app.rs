@@ -2467,30 +2467,8 @@ impl App {
             cache
                 .blocks
                 .iter()
-                .filter_map(|block| {
-                    let is_user = match block.id {
-                        crate::export::SessionBlockId::Message(index) => session
-                            .messages
-                            .get(index)
-                            .map(|message| message.role == crate::parse::MessageRole::User),
-                        crate::export::SessionBlockId::Cell(index) => {
-                            match session.cells.get(index) {
-                                Some(
-                                    crate::parse::SessionCell::SessionInfo(_)
-                                    | crate::parse::SessionCell::Metrics(_),
-                                )
-                                | None => None,
-                                Some(crate::parse::SessionCell::Message { role, .. }) => {
-                                    Some(*role == crate::parse::MessageRole::User)
-                                }
-                                Some(_) => Some(false),
-                            }
-                        }
-                        _ => None,
-                    }?;
-                    (scope == MessageJumpScope::Any || is_user)
-                        .then(|| cache.layout.rows_for_lines(block.lines.clone()).start)
-                })
+                .filter(|block| crate::tui::viewer::navigable_block(&session, block.id, scope))
+                .map(|block| cache.layout.rows_for_lines(block.lines.clone()).start)
                 .collect::<Vec<_>>()
         };
         if let Some(target) = message_row_for_scroll(&rows, self.preview_scroll, direction) {
@@ -8140,6 +8118,7 @@ mod tests {
                 crate::parse::SessionMessage {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::User,
                     content: "first user".to_owned(),
                     timestamp: None,
@@ -8148,6 +8127,7 @@ mod tests {
                 crate::parse::SessionMessage {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::Assistant,
                     content: "first assistant".to_owned(),
                     timestamp: None,
@@ -8156,6 +8136,7 @@ mod tests {
                 crate::parse::SessionMessage {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::ToolCall,
                     content: "run tool".to_owned(),
                     timestamp: None,
@@ -8164,6 +8145,7 @@ mod tests {
                 crate::parse::SessionMessage {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::ToolResult,
                     content: "tool output".to_owned(),
                     timestamp: None,
@@ -8172,6 +8154,7 @@ mod tests {
                 crate::parse::SessionMessage {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::User,
                     content: "second user".to_owned(),
                     timestamp: None,
@@ -8180,6 +8163,7 @@ mod tests {
                 crate::parse::SessionMessage {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::Assistant,
                     content: "second assistant".to_owned(),
                     timestamp: None,

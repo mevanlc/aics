@@ -1582,8 +1582,16 @@ impl RuleDetails {
         let cells = rule_cells(session);
         for (index, cell) in cells.iter().enumerate() {
             match cell {
-                SessionCell::Message { role, content, .. } => match role {
-                    MessageRole::User if is_contextual_user_message_content(*role, content) => {
+                SessionCell::Message {
+                    role,
+                    content,
+                    is_task_notification,
+                    ..
+                } => match role {
+                    MessageRole::User
+                        if *is_task_notification
+                            || is_contextual_user_message_content(*role, content) =>
+                    {
                         details.insert("contextual_user", index, "text", content);
                     }
                     MessageRole::User => details.insert("user", index, "text", content),
@@ -1818,9 +1826,13 @@ impl RuleTurns {
                     role,
                     content,
                     timestamp,
+                    is_task_notification,
                     ..
                 } => match role {
-                    MessageRole::User if is_contextual_user_message_content(*role, content) => {
+                    MessageRole::User
+                        if *is_task_notification
+                            || is_contextual_user_message_content(*role, content) =>
+                    {
                         turns
                             .contextual_user
                             .push(TextTurn::new(index, content, timestamp));
@@ -2071,6 +2083,7 @@ mod tests {
         SessionCell::Message {
             antigravity_kind: None,
             is_compact_summary: false,
+            is_task_notification: false,
             role,
             content: content.to_owned(),
             timestamp: None,
@@ -2559,5 +2572,48 @@ mod tests {
             Err(error) => error.to_string(),
         };
         assert!(error.contains("failed to load rules"));
+    }
+
+    #[test]
+    fn claude_task_notifications_route_to_contextual_user_turns_by_provenance() {
+        let xml = "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>TaskNoticeNeedle</summary>\n</task-notification>";
+        let session = session_with_cells(vec![
+            SessionCell::Message {
+                antigravity_kind: None,
+                is_compact_summary: false,
+                is_task_notification: true,
+                role: MessageRole::User,
+                content: xml.to_owned(),
+                timestamp: None,
+            },
+            SessionCell::Message {
+                antigravity_kind: None,
+                is_compact_summary: false,
+                is_task_notification: false,
+                role: MessageRole::User,
+                content: xml.to_owned(),
+                timestamp: None,
+            },
+        ]);
+        let turns = RuleTurns::from_session(&session);
+        let details = RuleDetails::from_session(&session);
+        assert_eq!(turns.contextual_user.len(), 1);
+        assert_eq!(turns.contextual_user[0].index, 0);
+        assert_eq!(turns.user.len(), 1);
+        assert_eq!(turns.user[0].index, 1);
+        assert_eq!(
+            details
+                .values
+                .get(&("contextual_user".to_owned(), 0, "text".to_owned()))
+                .map(String::as_str),
+            Some(xml)
+        );
+        assert_eq!(
+            details
+                .values
+                .get(&("user".to_owned(), 1, "text".to_owned()))
+                .map(String::as_str),
+            Some(xml)
+        );
     }
 }

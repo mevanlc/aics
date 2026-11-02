@@ -143,9 +143,9 @@ byte limit:
 - `turns.exec[n].stdout(limit)` and `turns.exec[n].stderr(limit)`
 - `turns.patches[n].files[m].content(limit)`
 
-`turns.user` excludes Codex contextual user fragments such as automatically
-injected AGENTS.md content. Those entries are exposed separately as
-`turns.contextualUser`.
+`turns.user` excludes Codex contextual user fragments (such as automatically
+injected AGENTS.md content) and Claude task-notification entries. Those entries
+are exposed separately as `turns.contextualUser`.
 
 ## Exporting rule data
 

@@ -363,6 +363,7 @@ fn should_hide_message(message: &SessionMessage, options: SessionRenderOptions) 
         &message.content,
         message.antigravity_kind,
         message.is_compact_summary,
+        message.is_task_notification,
         display_options,
     )
     .is_none()
@@ -1077,6 +1078,7 @@ fn render_message_into(
         &message.content,
         message.antigravity_kind,
         message.is_compact_summary,
+        message.is_task_notification,
         display_options,
     ) else {
         return Vec::new();
@@ -1157,6 +1159,7 @@ fn render_cell_into(
             timestamp,
             antigravity_kind,
             is_compact_summary,
+            is_task_notification,
         } => {
             if !crate::search_projection::cell_visible(cell, &display_options) {
                 return Vec::new();
@@ -1168,6 +1171,7 @@ fn render_cell_into(
                 tool_name: None,
                 antigravity_kind: *antigravity_kind,
                 is_compact_summary: *is_compact_summary,
+                is_task_notification: *is_task_notification,
             };
             let origins = render_message_into(
                 lines,
@@ -2786,6 +2790,7 @@ mod tests {
                 SessionCell::Message {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::User,
                     content: "same **same**".to_owned(),
                     timestamp: None,
@@ -2910,6 +2915,7 @@ mod tests {
                 SessionCell::Message {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::User,
                     content: "alpha **beta** [linked](https://sourceonly.invalid)\n\n界".to_owned(),
                     timestamp: None,
@@ -3008,6 +3014,7 @@ mod tests {
                 SessionCell::Message {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::User,
                     content: "rawneedle".to_owned(),
                     timestamp: None,
@@ -3262,6 +3269,7 @@ mod tests {
                 SessionCell::Message {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::User,
                     content: "same".to_owned(),
                     timestamp: None,
@@ -3269,6 +3277,7 @@ mod tests {
                 SessionCell::Message {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::User,
                     content: "same".to_owned(),
                     timestamp: None,
@@ -3834,6 +3843,7 @@ mod tests {
                 SessionCell::Message {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::User,
                     content: "# CLAUDE.md instructions for /tmp/demo\nUse cargo test.".to_owned(),
                     timestamp: None,
@@ -3841,6 +3851,7 @@ mod tests {
                 SessionCell::Message {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::User,
                     content:
                         "<INSTRUCTIONS># Using `lat` to examine files\nPrefer lat.\n</INSTRUCTIONS>"
@@ -3850,6 +3861,7 @@ mod tests {
                 SessionCell::Message {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::User,
                     content: "real request".to_owned(),
                     timestamp: None,
@@ -3894,6 +3906,7 @@ mod tests {
                 SessionCell::Message {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::User,
                     content: "$commit --all".to_owned(),
                     timestamp: None,
@@ -3901,6 +3914,7 @@ mod tests {
                 SessionCell::Message {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::User,
                     content: "<skill><name>commit</name>helper instructions</skill>".to_owned(),
                     timestamp: None,
@@ -4034,6 +4048,7 @@ mod tests {
                 SessionCell::Message {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::User,
                     content: "user text".to_owned(),
                     timestamp: None,
@@ -4041,6 +4056,7 @@ mod tests {
                 SessionCell::Message {
                     antigravity_kind: None,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     role: MessageRole::Assistant,
                     content: "agent text".to_owned(),
                     timestamp: None,
@@ -4220,6 +4236,7 @@ mod tests {
             vec![SessionCell::Message {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::User,
                 content: "hi".to_owned(),
                 timestamp: None,
@@ -4464,6 +4481,7 @@ mod tests {
             messages: vec![SessionMessage {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::Assistant,
                 content: "**alpha**\n\n- beta".to_owned(),
                 timestamp: Some(Utc::now()),
@@ -4531,6 +4549,7 @@ mod tests {
             messages: vec![SessionMessage {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::User,
                 content: "# Topic\n\nBody".to_owned(),
                 timestamp: Some(Utc.with_ymd_and_hms(2026, 4, 25, 10, 11, 12).unwrap()),
@@ -4582,6 +4601,7 @@ mod tests {
             messages: vec![SessionMessage {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::Assistant,
                 content: body.to_owned(),
                 timestamp: Some(Utc.with_ymd_and_hms(2026, 4, 27, 9, 0, 0).unwrap()),
@@ -4743,6 +4763,7 @@ mod tests {
             messages: vec![SessionMessage {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::Assistant,
                 content: "alpha".to_owned(),
                 timestamp: Some(Utc::now()),

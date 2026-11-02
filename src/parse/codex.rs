@@ -1135,6 +1135,7 @@ impl CodexCellBuilder {
         self.cells.push(SessionCell::Message {
             antigravity_kind: None,
             is_compact_summary: false,
+            is_task_notification: false,
             role,
             content: trimmed.to_owned(),
             timestamp,

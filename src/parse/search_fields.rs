@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 use url::Url;
 
-use super::session::Agent;
+use super::session::{strip_claude_task_notification_preamble, Agent};
 
 /// Search-only transcript facets produced while a source session is parsed.
 ///
@@ -186,6 +186,10 @@ fn strip_known_tag(text: &str) -> Option<&str> {
         let rest = &text[open_end + 1..];
         let end = find_ignore_ascii_case(rest, &close)?;
         return Some(&rest[end + close.len()..]);
+    }
+
+    if let Some(rest) = strip_claude_task_notification_preamble(text) {
+        return Some(rest);
     }
     None
 }

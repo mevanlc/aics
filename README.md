@@ -16,7 +16,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Toggle two-line card topbars with `Ctrl+O` to show session titles and recorded Git branches above the snippets
 - Native session names centered in the preview border, or the session-list border when preview is hidden
 - Filter modal: search content (Visible / All / Hidden), scope, agent, date range, minimum length, session kind (original / trimmed / rollover / sub-agent), live, superseded, and trashed sessions
-- Existing visibility toggles also cover Antigravity task outcomes, orchestration notices, directory rules, worker messages, and checkpoints
+- Existing visibility toggles also cover Claude task notifications and Antigravity task outcomes, orchestration notices, directory rules, worker messages, and checkpoints
 - Internal Context hides Claude continuation summaries and appended memory citation footers while preserving the reply text
 - Sort by time or text relevance
 - Markdown rendering with syntax highlighting and search-term highlighting in the viewer

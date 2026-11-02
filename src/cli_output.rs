@@ -5,7 +5,10 @@ use serde::Serialize;
 
 use crate::conversation::HistoryStatus;
 use crate::index::SearchHit;
-use crate::parse::{strip_project_docs_autodump_preamble, Agent, DerivationType, MessageRole};
+use crate::parse::{
+    strip_claude_task_notification_preamble, strip_project_docs_autodump_preamble, Agent,
+    DerivationType, MessageRole,
+};
 use crate::search_projection::visible_message_content;
 use crate::settings::DisplayOptions;
 
@@ -51,8 +54,9 @@ impl DiscoveryHit {
         let session = hit.session;
         let first = strip_project_docs_autodump_preamble(&session.first_user_msg_content)
             .unwrap_or(&session.first_user_msg_content);
-        let first =
-            visible_message_content(MessageRole::User, first, None, false, options).unwrap_or("");
+        let first = strip_claude_task_notification_preamble(first).unwrap_or(first);
+        let first = visible_message_content(MessageRole::User, first, None, false, false, options)
+            .unwrap_or("");
         Self {
             session: DiscoverySession {
                 session_id: session.session_id,

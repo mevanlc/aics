@@ -196,6 +196,7 @@ fn visibility_matches_preview_and_both_export_representations() -> Result<()> {
         "actual request",
         Some(Kind::HookFeedback),
         false,
+        false,
     )
     .is_visible(options_for(Kind::HookFeedback)));
     Ok(())
@@ -343,7 +344,7 @@ fn index_visibility_and_format_rebuild_preserve_search_semantics() -> Result<()>
     let rebuilt = manager.sync_with_roots(&roots, false)?;
     assert_eq!(rebuilt.updated, 1);
     let state: Value = serde_json::from_str(&fs::read_to_string(&paths.state_file)?)?;
-    assert_eq!(state["format_version"], 26);
+    assert_eq!(state["format_version"], 27);
     Ok(())
 }
 

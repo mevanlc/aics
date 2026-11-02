@@ -15,7 +15,10 @@ use tantivy::{
 use crate::index::schema::IndexSchema;
 use crate::index::writer::{IndexPaths, StoredSession};
 use crate::live::{LiveSessionSnapshot, LiveSessionTracker};
-use crate::parse::{strip_project_docs_autodump_preamble, Agent, DerivationType};
+use crate::parse::{
+    strip_claude_task_notification_preamble, strip_project_docs_autodump_preamble, Agent,
+    DerivationType,
+};
 use crate::search_query::{
     extract_highlight_terms, extract_visibility_search, has_explicit_boolean_operators, QueryPlan,
     VisibilitySearch,
@@ -1406,6 +1409,9 @@ fn strip_leading_global_boilerplate(mut text: &str) -> &str {
 
 fn strip_one_leading_boilerplate_block(text: &str) -> &str {
     if let Some(rest) = strip_project_docs_autodump_preamble(text) {
+        return rest;
+    }
+    if let Some(rest) = strip_claude_task_notification_preamble(text) {
         return rest;
     }
 

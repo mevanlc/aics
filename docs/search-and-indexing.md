@@ -203,6 +203,16 @@ or **User Messages** hides them. Internal Context is hidden by default. Use
 `hidden: "Continue working toward the active thread goal"` to find those messages
 while they are hidden, or `all:` to include them alongside visible content.
 
+Claude task-notification entries (`origin.kind: "task-notification"` and legacy
+complete `<task-notification>` user envelopes) follow **Tool Results**,
+independently of **User Messages** and **Internal Context**. They are visible by
+default in interactive searches, hidden by default in `--json` discovery (which
+starts with `tool-results` hidden; pass `--show tool-results`, `hidden:`, or
+`all:` to include them), and excluded from both `user:` and `toolresult:`
+explicit semantic fields. When a queued `<task-notification>` block precedes
+human prose in the same entry, the message remains a user message while `user:`
+indexes only the trailing authored text.
+
 Claude-generated continuation summaries marked `isCompactSummary: true` use the
 same Internal Context and User Messages visibility requirements. Visible search
 omits them by default; `hidden:` and `all:` can find them. They are excluded from

@@ -893,6 +893,7 @@ mod tests {
         crate::parse::SessionCell::Message {
             antigravity_kind: None,
             is_compact_summary: false,
+            is_task_notification: false,
             role,
             content: text.to_owned(),
             timestamp: None,

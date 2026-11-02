@@ -126,6 +126,64 @@ fn claude_compact_summaries_follow_internal_context_in_search_and_discovery() ->
 }
 
 #[test]
+fn claude_task_notifications_follow_tool_results_in_search_and_discovery() -> Result<()> {
+    let f = Fixture::new()?;
+    let projects = f.path("claude/projects/project");
+    fs::create_dir_all(&projects)?;
+    fs::write(
+        projects.join("task-notifications.jsonl"),
+        include_str!("fixtures/sessions/claude/task_notifications.jsonl"),
+    )?;
+    for needle in [
+        "OriginTaskNeedle",
+        "LegacyBashTaskNeedle",
+        "ArrayAgentTaskNeedle",
+        "MonitorEventTaskNeedle",
+        "OriginPlainFailureNeedle",
+    ] {
+        assert!(f.hits(&["-g", needle])?.is_empty(), "{needle}");
+        assert!(f.hits(&["-g", &format!("user:{needle}")])?.is_empty());
+        assert!(f.hits(&["-g", &format!("toolresult:{needle}")])?.is_empty());
+        for args in [
+            vec!["-g".to_owned(), format!("hidden: {needle}")],
+            vec!["-g".to_owned(), format!("all: {needle}")],
+            vec![
+                "-g".to_owned(),
+                "--show".to_owned(),
+                "tool-results".to_owned(),
+                needle.to_owned(),
+            ],
+        ] {
+            let hits = f.hits(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+            assert_eq!(hits.len(), 1, "{needle}: {args:?}");
+            assert!(hits[0]["snippet"].as_str().unwrap().contains(needle));
+        }
+    }
+    let hits = f.hits(&["-g"])?;
+    assert_eq!(hits.len(), 1);
+    assert_eq!(
+        hits[0]["session"]["first_user_msg_content"],
+        "Please inspect the incremental output. PromptNeedle."
+    );
+    let snippet = hits[0]["snippet"].as_str().unwrap();
+    for needle in [
+        "OriginTaskNeedle",
+        "LegacyBashTaskNeedle",
+        "ArrayAgentTaskNeedle",
+        "MonitorEventTaskNeedle",
+        "OriginPlainFailureNeedle",
+        "CompactTurnOriginNeedle",
+    ] {
+        assert!(!snippet.contains(needle), "{needle}");
+    }
+    assert_eq!(f.hits(&["-g", "HumanPastedTaskNeedle"])?.len(), 1);
+    assert_eq!(f.hits(&["-g", "user:HumanPastedTaskNeedle"])?.len(), 1);
+    assert!(f.hits(&["-g", "user:MixedTaskPreambleNeedle"])?.is_empty());
+    assert_eq!(f.hits(&["-g", "user:MixedHumanPromptNeedle"])?.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn compact_output_is_bounded_and_full_records_remain_available() -> Result<()> {
     let f = Fixture::new()?;
     f.session(

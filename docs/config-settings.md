@@ -82,7 +82,16 @@ context, such as environment blocks, keeps its existing visibility behavior.
 It also hides recognized Antigravity task polling reminders, server restart
 notices, and stop-hook feedback.
 
-Claude user messages marked `isCompactSummary: true` also follow **Internal
+Claude task-notification entries (`origin.kind: "task-notification"` and legacy
+user messages consisting entirely of complete `<task-notification>` envelopes
+plus optional output/transcript trailers) follow **Tool Results** (`4`),
+independently of **User Messages** and **Internal Context**. They remain visible
+by default in the TUI, are excluded from `first_user_msg_content` and `user:`
+search fields, and are skipped by `^⇧↑↓` user-prompt navigation while staying
+reachable via `⇧↑↓` when visible. Human-authored messages that quote or follow a
+`<task-notification>` block keep their ordinary **User Messages** visibility.
+
+Claude user messages marked `isCompactSummary: true` follow **Internal
 Context**. The whole generated continuation summary is hidden, including its
 reminders and resume instructions. Showing it requires both Internal Context and
 User Messages to be on. Recognition uses source metadata; ordinary user messages

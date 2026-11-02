@@ -146,6 +146,9 @@ pub struct SessionMessage {
     /// Claude-generated continuation context, marked by `isCompactSummary`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_compact_summary: bool,
+    /// Claude-generated background task or monitor notification.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_task_notification: bool,
 }
 
 /// Status of a tool call — pending until paired with output, then completed/failed.
@@ -306,6 +309,8 @@ pub enum SessionCell {
         antigravity_kind: Option<AntigravityMessageKind>,
         #[serde(default, skip_serializing_if = "is_false")]
         is_compact_summary: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_task_notification: bool,
     },
     Reasoning {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -708,6 +713,116 @@ fn extract_tag_content<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     Some(&text[start..start + close_pos])
 }
 
+fn extract_exact_tag_content<'a>(
+    text: &'a str,
+    open_tag: &str,
+    close_tag: &str,
+) -> Option<&'a str> {
+    let start = text.find(open_tag)? + open_tag.len();
+    let end = text[start..].find(close_tag)?;
+    Some(&text[start..start + end])
+}
+
+/// Strip one leading Claude `<task-notification>...</task-notification>` block
+/// (plus its optional single-line output/transcript trailer), returning the
+/// remaining slice if valid.
+pub fn strip_leading_claude_task_notification(text: &str) -> Option<&str> {
+    const OPEN: &str = "<task-notification>";
+    const CLOSE: &str = "</task-notification>";
+    const BANNER: &str = "[SYSTEM NOTIFICATION - NOT USER INPUT]";
+
+    let trimmed = text.trim_start();
+    let candidate = trimmed
+        .strip_prefix(BANNER)
+        .and_then(|after| {
+            let after = after.trim_start_matches([' ', '\t']);
+            after
+                .strip_prefix("\r\n")
+                .or_else(|| after.strip_prefix('\n'))
+        })
+        .unwrap_or(trimmed);
+    let after_open = candidate.trim_start().strip_prefix(OPEN)?;
+    let close_pos = after_open.find(CLOSE)?;
+    let inner = &after_open[..close_pos];
+
+    let task_id = extract_exact_tag_content(inner, "<task-id>", "</task-id>")?.trim();
+    if task_id.is_empty() || task_id.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let summary = extract_exact_tag_content(inner, "<summary>", "</summary>")?.trim();
+    if summary.is_empty() {
+        return None;
+    }
+    let has_payload = [
+        ("<status>", "</status>"),
+        ("<event>", "</event>"),
+        ("<result>", "</result>"),
+        ("<output-file>", "</output-file>"),
+    ]
+    .into_iter()
+    .any(|(open, close)| {
+        extract_exact_tag_content(inner, open, close).is_some_and(|value| !value.trim().is_empty())
+    });
+    if !has_payload {
+        return None;
+    }
+
+    let rest = &after_open[close_pos + CLOSE.len()..];
+    let after_spaces = rest.trim_start_matches([' ', '\t']);
+    let after_newline = after_spaces
+        .strip_prefix("\r\n")
+        .or_else(|| after_spaces.strip_prefix('\n'));
+    if let Some(after_newline) = after_newline {
+        let (first_line, remaining) = match after_newline.split_once('\n') {
+            Some((line, tail)) => (line.trim(), tail),
+            None => (after_newline.trim(), ""),
+        };
+        let has_trailer = [
+            "Read the output file to retrieve the result: ",
+            "Full transcript available at: ",
+        ]
+        .into_iter()
+        .any(|prefix| {
+            first_line
+                .strip_prefix(prefix)
+                .is_some_and(|path| !path.trim().is_empty())
+        });
+        if has_trailer {
+            return Some(remaining);
+        }
+    }
+
+    Some(rest)
+}
+
+/// Match user text consisting entirely of one or more complete Claude
+/// `<task-notification>` blocks (and their optional single-line trailers).
+pub fn is_complete_claude_task_notification(text: &str) -> bool {
+    let mut remaining = text.trim();
+    if remaining.is_empty() {
+        return false;
+    }
+    while !remaining.is_empty() {
+        let Some(rest) = strip_leading_claude_task_notification(remaining) else {
+            return false;
+        };
+        remaining = rest.trim();
+    }
+    true
+}
+
+/// Strip one or more leading Claude `<task-notification>` blocks only when
+/// followed by non-empty authored prose.
+pub fn strip_claude_task_notification_preamble(text: &str) -> Option<&str> {
+    let mut current = text;
+    let mut stripped_any = false;
+    while let Some(rest) = strip_leading_claude_task_notification(current) {
+        stripped_any = true;
+        current = rest;
+    }
+    (stripped_any && !current.trim().is_empty()).then_some(current)
+}
+
 fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
     haystack
         .to_ascii_lowercase()
@@ -924,7 +1039,7 @@ pub fn push_cell_from_message(
         }
         MessageRole::User => {
             *last_tool_call_summary = None;
-            let exec_cell = if message.is_compact_summary {
+            let exec_cell = if message.is_compact_summary || message.is_task_notification {
                 None
             } else {
                 parse_user_shell_command(&message.content, message.timestamp)
@@ -938,6 +1053,7 @@ pub fn push_cell_from_message(
                     timestamp: message.timestamp,
                     antigravity_kind: message.antigravity_kind,
                     is_compact_summary: message.is_compact_summary,
+                    is_task_notification: message.is_task_notification,
                 });
             }
         }
@@ -949,6 +1065,7 @@ pub fn push_cell_from_message(
                 timestamp: message.timestamp,
                 antigravity_kind: message.antigravity_kind,
                 is_compact_summary: message.is_compact_summary,
+                is_task_notification: message.is_task_notification,
             });
         }
     }
@@ -971,7 +1088,11 @@ pub fn last_message_fields(messages: &[SessionMessage]) -> (Option<MessageRole>,
 pub fn first_user_message(messages: &[SessionMessage]) -> String {
     messages
         .iter()
-        .find(|message| message.role == MessageRole::User && !message.is_compact_summary)
+        .find(|message| {
+            message.role == MessageRole::User
+                && !message.is_compact_summary
+                && !message.is_task_notification
+        })
         .map(|message| message.content.clone())
         .unwrap_or_default()
 }
@@ -1004,7 +1125,7 @@ pub fn push_unique_message(
     content: impl Into<String>,
     timestamp: Option<DateTime<Utc>>,
 ) {
-    push_unique_message_with_context(messages, role, content, timestamp, false);
+    push_unique_message_with_context(messages, role, content, timestamp, false, false);
 }
 
 pub fn push_unique_message_with_context(
@@ -1013,6 +1134,7 @@ pub fn push_unique_message_with_context(
     content: impl Into<String>,
     timestamp: Option<DateTime<Utc>>,
     is_compact_summary: bool,
+    is_task_notification: bool,
 ) {
     let Some(content) = nonempty_trimmed(content.into()) else {
         return;
@@ -1022,6 +1144,7 @@ pub fn push_unique_message_with_context(
         last.role == role
             && last.content == content
             && last.is_compact_summary == is_compact_summary
+            && last.is_task_notification == is_task_notification
     }) {
         return;
     }
@@ -1029,6 +1152,7 @@ pub fn push_unique_message_with_context(
     messages.push(SessionMessage {
         antigravity_kind: None,
         is_compact_summary,
+        is_task_notification,
         role,
         content,
         timestamp,
@@ -1057,6 +1181,7 @@ pub fn push_tool_message(
     messages.push(SessionMessage {
         antigravity_kind: None,
         is_compact_summary: false,
+        is_task_notification: false,
         role,
         content,
         timestamp,
@@ -1281,5 +1406,47 @@ zsh:1: command not found: vvv
             }
             _ => panic!("expected SessionCell::Exec"),
         }
+    }
+
+    #[test]
+    fn recognizes_complete_claude_task_notifications_and_strips_only_mixed_preambles() {
+        let bash = "<task-notification>\n<task-id>bldketidx</task-id>\n<tool-use-id>toolu_01N5p4</tool-use-id>\n<output-file>/tmp/bldketidx.output</output-file>\n<status>completed</status>\n<summary>Background command completed (exit code 0)</summary>\n</task-notification>\nRead the output file to retrieve the result: /tmp/bldketidx.output";
+        let agent = "<task-notification>\n<task-id>a123</task-id>\n<status>completed</status>\n<summary>Agent finished</summary>\n<result>Investigation complete.</result>\n</task-notification>\nFull transcript available at: /tmp/a123.output";
+        let monitor = "[SYSTEM NOTIFICATION - NOT USER INPUT]\n<task-notification>\n<task-id>m456</task-id>\n<summary>Monitor event</summary>\n<event>CI green</event>\n</task-notification>";
+        let batched = format!("{bash}\n{agent}\n");
+
+        for valid in [bash, agent, monitor, batched.as_str()] {
+            assert!(
+                super::is_complete_claude_task_notification(valid),
+                "{valid}"
+            );
+            assert_eq!(super::strip_claude_task_notification_preamble(valid), None);
+        }
+
+        for rejected in [
+            "",
+            "<task-notification></task-notification>",
+            "<task-notification><task-id>id with spaces</task-id><status>completed</status><summary>done</summary></task-notification>",
+            "<task-notification><task-id>b1</task-id><summary>missing payload tag</summary></task-notification>",
+            "<task-notification><task-id>b1</task-id><status>completed</status></task-notification>",
+            "Explain this:\n<task-notification><task-id>b1</task-id><status>completed</status><summary>done</summary></task-notification>",
+            "```xml\n<task-notification><task-id>b1</task-id><status>completed</status><summary>done</summary></task-notification>\n```",
+        ] {
+            assert!(
+                !super::is_complete_claude_task_notification(rejected),
+                "{rejected}"
+            );
+            assert_eq!(
+                super::strip_claude_task_notification_preamble(rejected),
+                None
+            );
+        }
+
+        let mixed = format!("{bash}\nits discovered by mdns i think");
+        assert!(!super::is_complete_claude_task_notification(&mixed));
+        assert_eq!(
+            super::strip_claude_task_notification_preamble(&mixed).map(str::trim),
+            Some("its discovered by mdns i think")
+        );
     }
 }

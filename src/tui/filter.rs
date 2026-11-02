@@ -928,7 +928,9 @@ impl DisplayField {
             }
             Self::SkillTextInjection => "Hide skill definition text injected into session context.",
             Self::ToolCalls => "Hide tool call request blocks from previews and viewers.",
-            Self::ToolResults => "Hide tool results, including Antigravity task outcomes and execution errors.",
+            Self::ToolResults => {
+                "Hide tool results, including Claude task notifications and Antigravity task outcomes and execution errors."
+            }
             Self::UserToolCalls => "Hide user shell command executions from previews and viewers.",
             Self::UserToolResults => "Hide user shell command outputs from previews and viewers.",
             Self::AgentReplies => "Hide agent messages, including Antigravity worker messages and checkpoints.",

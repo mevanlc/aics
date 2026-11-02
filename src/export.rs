@@ -111,6 +111,7 @@ pub fn session_to_plain_text_with_options(
             &message.content,
             message.antigravity_kind,
             message.is_compact_summary,
+            message.is_task_notification,
             display_options,
         ) else {
             continue;
@@ -394,6 +395,7 @@ fn push_message(output: &mut String, message: &SessionMessage, display_options: 
         &message.content,
         message.antigravity_kind,
         message.is_compact_summary,
+        message.is_task_notification,
         display_options,
     ) else {
         return;
@@ -432,12 +434,14 @@ fn push_cell(
             timestamp,
             antigravity_kind,
             is_compact_summary,
+            is_task_notification,
         } => {
             let Some(content) = visible_message_content(
                 *role,
                 content,
                 *antigravity_kind,
                 *is_compact_summary,
+                *is_task_notification,
                 display_options,
             ) else {
                 return;
@@ -1248,6 +1252,7 @@ mod tests {
             SessionMessage {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::User,
                 content: "run the tests".to_owned(),
                 timestamp: None,
@@ -1256,6 +1261,7 @@ mod tests {
             SessionMessage {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::Assistant,
                 content: "on it".to_owned(),
                 timestamp: None,
@@ -1264,6 +1270,7 @@ mod tests {
             SessionMessage {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::ToolCall,
                 content: "cargo nextest run".to_owned(),
                 timestamp: None,
@@ -1272,6 +1279,7 @@ mod tests {
             SessionMessage {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::ToolResult,
                 content: "all green".to_owned(),
                 timestamp: None,
@@ -1301,6 +1309,7 @@ mod tests {
         session.cells = vec![SessionCell::Message {
             antigravity_kind: None,
             is_compact_summary: false,
+            is_task_notification: false,
             role: MessageRole::Assistant,
             content: "## Findings\n\n- one\n- two".to_owned(),
             timestamp: timestamp(12),
@@ -1468,6 +1477,7 @@ mod tests {
             SessionMessage {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::User,
                 content: "run the tests".to_owned(),
                 timestamp: timestamp(12),
@@ -1476,6 +1486,7 @@ mod tests {
             SessionMessage {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::ToolResult,
                 content: "# not a heading".to_owned(),
                 timestamp: None,
@@ -1563,6 +1574,7 @@ mod tests {
             SessionCell::Message {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::User,
                 content: "run the tests".to_owned(),
                 timestamp: None,
@@ -1570,6 +1582,7 @@ mod tests {
             SessionCell::Message {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::Assistant,
                 content: "on it".to_owned(),
                 timestamp: None,
@@ -1724,6 +1737,7 @@ mod tests {
             SessionMessage {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::User,
                 content: "run the tests".to_owned(),
                 timestamp: None,
@@ -1732,6 +1746,7 @@ mod tests {
             SessionMessage {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::ToolResult,
                 content: "all green".to_owned(),
                 timestamp: None,

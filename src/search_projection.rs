@@ -78,11 +78,15 @@ pub fn message_visibility(
     content: &str,
     antigravity_kind: Option<AntigravityMessageKind>,
     is_compact_summary: bool,
+    is_task_notification: bool,
 ) -> VisibilityRequirement {
     use AntigravityMessageKind as Kind;
 
     if role == MessageRole::User && is_compact_summary {
         return VisibilityRequirement(USER | INTERNAL_CONTEXT);
+    }
+    if role == MessageRole::User && is_task_notification {
+        return VisibilityRequirement(TOOL_RESULT);
     }
     // Only the Antigravity parser supplies these annotations. Keep original roles
     // for display and rules, and never apply them to user-authored messages.
@@ -125,12 +129,14 @@ pub fn cell_visible(cell: &SessionCell, options: &DisplayOptions) -> bool {
             content,
             antigravity_kind,
             is_compact_summary,
+            is_task_notification,
             ..
         } => visible_message_content(
             *role,
             content,
             *antigravity_kind,
             *is_compact_summary,
+            *is_task_notification,
             *options,
         )
         .is_some(),
@@ -491,6 +497,7 @@ impl SearchProjection {
                     &message.content,
                     message.antigravity_kind,
                     message.is_compact_summary,
+                    message.is_task_notification,
                 );
                 if let Some(source) = session.search_fields.tool_call_source_for_message(index) {
                     result.segment(
@@ -629,6 +636,7 @@ impl SearchProjection {
         content: &str,
         antigravity_kind: Option<AntigravityMessageKind>,
         is_compact_summary: bool,
+        is_task_notification: bool,
     ) {
         // Keep All's full source text and offsets intact; only visibility fields
         // are split when a message contains a generated citation footer.
@@ -637,7 +645,13 @@ impl SearchProjection {
             return;
         }
         self.append("content", &full);
-        for span in message_content_spans(role, content, antigravity_kind, is_compact_summary) {
+        for span in message_content_spans(
+            role,
+            content,
+            antigravity_kind,
+            is_compact_summary,
+            is_task_notification,
+        ) {
             let text = &content[span.range.clone()];
             if text.trim().is_empty() {
                 continue;
@@ -694,6 +708,7 @@ impl SearchProjection {
                 content,
                 antigravity_kind,
                 is_compact_summary,
+                is_task_notification,
                 ..
             } => {
                 self.message(
@@ -702,6 +717,7 @@ impl SearchProjection {
                     content,
                     *antigravity_kind,
                     *is_compact_summary,
+                    *is_task_notification,
                 );
             }
             SessionCell::Reasoning { header, body, .. } => {
@@ -871,7 +887,7 @@ impl SearchProjection {
         };
         if session.cells.is_empty() {
             for message in &session.messages {
-                if !message.is_compact_summary {
+                if !message.is_compact_summary && !message.is_task_notification {
                     visit(message.role, &message.content);
                 }
             }
@@ -882,6 +898,7 @@ impl SearchProjection {
                         role,
                         content,
                         is_compact_summary: false,
+                        is_task_notification: false,
                         ..
                     } => {
                         visit(*role, content);
@@ -1109,7 +1126,7 @@ fn semantic_candidates(field: &str, session: &Session) -> BTreeMap<String, Vec<P
     };
     if session.cells.is_empty() {
         for (index, item) in session.messages.iter().enumerate() {
-            if item.is_compact_summary {
+            if item.is_compact_summary || item.is_task_notification {
                 continue;
             }
             if item.role == MessageRole::Summary
@@ -1144,6 +1161,7 @@ fn semantic_candidates(field: &str, session: &Session) -> BTreeMap<String, Vec<P
                     role,
                     content,
                     is_compact_summary: false,
+                    is_task_notification: false,
                     ..
                 } => {
                     if *role != MessageRole::Summary
@@ -1482,6 +1500,7 @@ mod tests {
             SessionCell::Message {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::User,
                 content: "  userword  ".to_owned(),
                 timestamp: None,
@@ -1535,6 +1554,7 @@ mod tests {
             SessionCell::Message {
                 antigravity_kind: None,
                 is_compact_summary: false,
+                is_task_notification: false,
                 role: MessageRole::User,
                 content: "/repo/needle needle".to_owned(),
                 timestamp: None,
@@ -1596,6 +1616,7 @@ mod tests {
         session.cells.push(SessionCell::Message {
             antigravity_kind: None,
             is_compact_summary: false,
+            is_task_notification: false,
             role: MessageRole::User,
             content: "alpha alpha **beta**".to_owned(),
             timestamp: None,
