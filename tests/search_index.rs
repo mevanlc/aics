@@ -60,6 +60,51 @@ fn search_query_returns_matching_sessions() -> Result<()> {
 }
 
 #[test]
+fn unsupported_field_existence_syntax_keeps_lenient_search_behavior() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+
+    for sort in [SortMode::Time, SortMode::Relevance] {
+        let mut request = SearchRequest {
+            visibility_search: aics::search_query::VisibilitySearch::All,
+            query: "Express".to_owned(),
+            scope: Scope::Global,
+            limit: 10,
+            sort,
+            filters: SearchFilters::default(),
+        };
+        let paths = |hits: Vec<SearchHit>| {
+            hits.into_iter()
+                .map(|hit| hit.session.file_path)
+                .collect::<Vec<_>>()
+        };
+        let expected = paths(engine.search(&request)?);
+        assert!(!expected.is_empty());
+        for field in ["content", "user", "wd", "modified_ts", "unknown"] {
+            request.query = format!("{field}:*");
+            assert!(engine.search(&request)?.is_empty(), "{}", request.query);
+            for query in [
+                format!("{field}:* OR Express"),
+                format!("Express AND {field}:*"),
+                format!("Express NOT {field}:*"),
+            ] {
+                request.query = query;
+                assert_eq!(
+                    paths(engine.search(&request)?),
+                    expected,
+                    "{}",
+                    request.query
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn quoted_phrase_search_highlights_one_complete_occurrence() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;

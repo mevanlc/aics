@@ -950,6 +950,10 @@ pub(crate) fn prepare_query_ast(
             UserInputLeaf::Exists { field } => {
                 rewrite_field(field);
                 record_snippet_field(snippet_fields, Some(field), default_snippet_fields);
+                // Keep unsupported field-existence syntax ignored by the lenient
+                // parser. Tantivy 0.27 evaluates it only on fast fields, so text
+                // fields would otherwise fail during search.
+                *ast = UserInputAst::empty_query();
                 true
             }
             UserInputLeaf::All => true,
