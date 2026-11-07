@@ -286,7 +286,7 @@ top of an exported file — is not part of the transcript and is never hidden.
 | --- | --- |
 | `--preview-rules` | Evaluate all rules and review proposals without applying them |
 | `--preview-rules=verbose` | Also show informational `nothing()` results with non-empty notes |
-| `--preview-rules=startup` | Exclude rules with `applyAtStartup: false`; rules without the setting remain included |
+| `--preview-rules=startup` | Evaluate only rules configured with `applyAtStartup: true`, matching ordinary startup |
 | `--preview-rules=startup,verbose` | Combine both options in either order |
 | `--apply-rules` | Evaluate all rules and apply supported actions non-interactively |
 | `--no-apply-rules` | Disable automatic `applyAtStartup` rules during ordinary startup |
@@ -298,9 +298,9 @@ Plain preview hides all `nothing()` results. The attached `=verbose` value
 includes those with non-empty notes in the TUI; empty or whitespace-only notes
 stay hidden. The space-separated form `--preview-rules verbose` is not accepted.
 Use comma-separated values to combine `startup` and `verbose`, in either order.
-`startup` excludes rules explicitly marked `applyAtStartup: false`, while rules
-with no setting remain eligible. JSON output contains only action proposals
-with any preview options.
+`startup` limits preview to rules explicitly marked `applyAtStartup: true`,
+matching what runs automatically at startup. JSON output contains only action
+proposals with any preview options.
 `--preview-rules` and `--apply-rules` conflict. Explicit preview/apply modes do
 not accept `QUERY`, `--live`, or `--superseded`. They select all registered rules
 unless preview uses `startup`; turn-count bounds still gate each callback.

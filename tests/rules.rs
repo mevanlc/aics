@@ -293,7 +293,7 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
 }
 
 #[test]
-fn startup_preview_excludes_disabled_rules_and_keeps_separate_cached_results() -> Result<()> {
+fn startup_preview_filters_to_startup_rules_and_shares_startup_cache() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
     let config_root = temp.path().join("config");
@@ -314,19 +314,13 @@ fn startup_preview_excludes_disabled_rules_and_keeps_separate_cached_results() -
             "--preview-rules",
             vec!["enabled", "disabled", "unconfigured"],
         ),
-        ("--preview-rules=startup", vec!["enabled", "unconfigured"]),
+        ("--preview-rules=startup", vec!["enabled"]),
         (
             "--preview-rules=verbose",
             vec!["enabled", "disabled", "unconfigured"],
         ),
-        (
-            "--preview-rules=startup,verbose",
-            vec!["enabled", "unconfigured"],
-        ),
-        (
-            "--preview-rules=verbose,startup",
-            vec!["enabled", "unconfigured"],
-        ),
+        ("--preview-rules=startup,verbose", vec!["enabled"]),
+        ("--preview-rules=verbose,startup", vec!["enabled"]),
         (
             "--preview-rules",
             vec!["enabled", "disabled", "unconfigured"],
@@ -359,11 +353,8 @@ fn startup_preview_excludes_disabled_rules_and_keeps_separate_cached_results() -
         assert!(roots.codex_session.exists());
     }
     assert_eq!(profile_rules_caches(&cache_root)?.len(), 1);
-    assert_eq!(
-        profile_cache_files(&cache_root, "startup-preview-rules-cache.json")?.len(),
-        1
-    );
-    assert!(profile_startup_rules_caches(&cache_root)?.is_empty());
+    assert_eq!(profile_startup_rules_caches(&cache_root)?.len(), 1);
+    assert!(profile_cache_files(&cache_root, "startup-preview-rules-cache.json")?.is_empty());
     Ok(())
 }
 

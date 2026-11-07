@@ -238,7 +238,7 @@ interface AicsRuleConfig {
    * Apply this rule during ordinary AICS startup.
    * Startup rules evaluate globally over normal, non-trashed sessions.
    * Explicit preview/apply modes select every registered rule, subject to turn limits.
-   * --preview-rules=startup excludes rules explicitly set to false.
+   * --preview-rules=startup evaluates only rules configured with applyAtStartup: true.
    */
   applyAtStartup?: boolean;
 

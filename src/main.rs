@@ -94,7 +94,7 @@ struct Cli {
         conflicts_with = "apply_rules",
         value_enum, value_delimiter = ',', num_args = 0..=1, require_equals = true,
         help = "Review rule actions; =startup,verbose filters rules and includes no-op notes",
-        long_help = "[Read-only] Evaluate JavaScript rules and review proposed actions without changing files. Attach comma-separated options with '=' in either order: startup excludes rules with applyAtStartup: false (rules without the setting remain included); verbose also shows nothing() results with non-empty notes in the review TUI. For example: --preview-rules=startup,verbose. Combined with --json, emits only action proposals as JSONL."
+        long_help = "[Read-only] Evaluate JavaScript rules and review proposed actions without changing files. Attach comma-separated options with '=' in either order: startup evaluates only rules configured with applyAtStartup: true (matching ordinary startup); verbose also shows nothing() results with non-empty notes in the review TUI. For example: --preview-rules=startup,verbose. Combined with --json, emits only action proposals as JSONL."
     )]
     preview_rules: Option<Vec<CliRulesPreview>>,
 
@@ -551,12 +551,12 @@ fn main() -> Result<()> {
     }
     let index_paths = aics::index::IndexPaths::discover_for_roots(&resolved_paths.roots)?;
     let startup_preview = cli.has_preview_option(CliRulesPreview::Startup);
-    let rules_cache_path = index_paths.cache_root.join(if startup_preview {
-        "startup-preview-rules-cache.json"
-    } else {
-        "rules-cache.json"
-    });
     let startup_rules_cache_path = index_paths.cache_root.join("startup-rules-cache.json");
+    let rules_cache_path = if startup_preview {
+        startup_rules_cache_path.clone()
+    } else {
+        index_paths.cache_root.join("rules-cache.json")
+    };
     let manager = IndexManager::with_paths(index_paths);
     if cli.delete_index {
         manager.delete_index()?;
@@ -600,7 +600,7 @@ fn main() -> Result<()> {
                 .then_some(rules_cache_path.clone()),
             mode,
             selection: if startup_preview {
-                RuleSelection::StartupPreview
+                RuleSelection::ApplyAtStartup
             } else {
                 RuleSelection::All
             },

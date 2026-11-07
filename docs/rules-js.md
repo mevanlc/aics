@@ -15,8 +15,8 @@ startup cleanup, commit-only sessions, and superseded sessions.
   files. All `nothing()` results are hidden.
 - `aics --preview-rules=verbose` also shows `nothing()` results with non-empty
   notes.
-- `aics --preview-rules=startup` excludes rules with `applyAtStartup: false`.
-  Rules with `applyAtStartup: true` or no setting remain eligible.
+- `aics --preview-rules=startup` evaluates only rules configured with
+  `applyAtStartup: true`, matching ordinary startup.
 - `aics --preview-rules=startup,verbose` combines both options; the order does
   not matter (`--preview-rules=verbose,startup` works too). Values must be attached
   with `=`, rather than separated from the flag by a space.
@@ -207,17 +207,16 @@ rule("trash startup noise", { applyAtStartup: true }, ({ session }) => {
 Startup application is global over normal, non-trashed sessions and is
 independent of search scope and filters. Use `--no-apply-rules` to disable it.
 By default, `--preview-rules` and `--apply-rules` select all registered rules
-regardless of `applyAtStartup`. Adding `startup` to the preview options excludes
-rules explicitly marked `applyAtStartup: false`; rules without the setting still
-appear in this preview, but do not run automatically at startup. `minTurns` and
-`maxTurns` still gate each callback.
+regardless of `applyAtStartup`. Adding `startup` to the preview options limits
+evaluation to rules explicitly marked `applyAtStartup: true`, matching what runs
+automatically at startup. `minTurns` and `maxTurns` still gate each callback.
 
 ## Caching
 
 Rule determinations from the default `~/.config/aics/rules.js` are cached per
 index profile so unchanged sessions do not need to be parsed or evaluated again.
-All-rules evaluation, previews with the `startup` option, and automatic startup
-evaluation each use separate caches.
+All-rules evaluation and startup rules evaluation (both automatic startup and
+`--preview-rules=startup`) use separate caches.
 
 Each cache tracks the byte length, modification time, and CRC32 of the running
 `aics` binary, `rules.js`, and each session source. Antigravity fingerprints

@@ -201,8 +201,6 @@ pub enum RulesMode {
 pub enum RuleSelection {
     All,
     ApplyAtStartup,
-    /// Preview rules except those explicitly disabled for startup.
-    StartupPreview,
 }
 
 #[derive(Debug, Clone)]
@@ -1142,7 +1140,6 @@ impl RulePredicates {
         match selection {
             RuleSelection::All => true,
             RuleSelection::ApplyAtStartup => self.apply_at_startup == Some(true),
-            RuleSelection::StartupPreview => self.apply_at_startup != Some(false),
         }
     }
 
@@ -2589,21 +2586,6 @@ mod tests {
             .unwrap();
         assert_eq!(all_outcomes.len(), 3);
 
-        let preview_outcomes = engine
-            .evaluate(
-                &input("codex", "preview"),
-                details("preview"),
-                RuleSelection::StartupPreview,
-            )
-            .unwrap();
-        assert_eq!(
-            preview_outcomes
-                .iter()
-                .map(|outcome| outcome.rule.as_str())
-                .collect::<Vec<_>>(),
-            vec!["configured", "unconfigured"]
-        );
-
         let startup_outcomes = engine
             .evaluate(
                 &input("codex", "preview"),
@@ -2635,11 +2617,6 @@ mod tests {
                 None,
             ),
             (
-                "rule('manual', { applyAtStartup: false }, () => trash());",
-                RuleSelection::StartupPreview,
-                None,
-            ),
-            (
                 "rule('bounded', { minTurns: 1, maxTurns: 3 }, () => trash());",
                 RuleSelection::All,
                 Some(0),
@@ -2658,7 +2635,7 @@ mod tests {
             (
                 "rule('first', { minTurns: 1, maxTurns: 3 }, () => trash());
                  rule('second', { minTurns: 5 }, () => trash());",
-                RuleSelection::StartupPreview,
+                RuleSelection::All,
                 Some(4),
             ),
         ] {
@@ -2807,11 +2784,7 @@ mod tests {
             (4, vec!["minimum", "unbounded"]),
         ] {
             input.turns.user = vec![turn.clone(); count];
-            for selection in [
-                RuleSelection::All,
-                RuleSelection::ApplyAtStartup,
-                RuleSelection::StartupPreview,
-            ] {
+            for selection in [RuleSelection::All, RuleSelection::ApplyAtStartup] {
                 let outcomes = engine
                     .evaluate(&input, details("preview"), selection)
                     .unwrap();
