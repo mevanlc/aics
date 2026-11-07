@@ -286,6 +286,8 @@ top of an exported file — is not part of the transcript and is never hidden.
 | --- | --- |
 | `--preview-rules` | Evaluate all rules and review proposals without applying them |
 | `--preview-rules=verbose` | Also show informational `nothing()` results with non-empty notes |
+| `--preview-rules=startup` | Exclude rules with `applyAtStartup: false`; rules without the setting remain included |
+| `--preview-rules=startup,verbose` | Combine both options in either order |
 | `--apply-rules` | Evaluate all rules and apply supported actions non-interactively |
 | `--no-apply-rules` | Disable automatic `applyAtStartup` rules during ordinary startup |
 | `--rules PATH` | Use another rules file without reading or writing rules caches |
@@ -295,10 +297,14 @@ top of an exported file — is not part of the transcript and is never hidden.
 Plain preview hides all `nothing()` results. The attached `=verbose` value
 includes those with non-empty notes in the TUI; empty or whitespace-only notes
 stay hidden. The space-separated form `--preview-rules verbose` is not accepted.
-JSON output contains only action proposals in either mode.
+Use comma-separated values to combine `startup` and `verbose`, in either order.
+`startup` excludes rules explicitly marked `applyAtStartup: false`, while rules
+with no setting remain eligible. JSON output contains only action proposals
+with any preview options.
 `--preview-rules` and `--apply-rules` conflict. Explicit preview/apply modes do
-not accept `QUERY`, `--live`, or `--superseded` and always evaluate every
-registered rule. Live or locked sessions are automatically excluded from rules
+not accept `QUERY`, `--live`, or `--superseded`. They select all registered rules
+unless preview uses `startup`; turn-count bounds still gate each callback.
+Live or locked sessions are automatically excluded from rules
 processing, and rule actions recheck activity immediately before changing files.
 `--no-apply-rules` conflicts with explicit preview/apply modes and with
 `--rules PATH`.

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -57,6 +58,14 @@ globalThis.rule = function(name, configOrCallback, callback) {
   if (config.applyAtStartup !== undefined && typeof config.applyAtStartup !== "boolean") {
     throw new TypeError(`rule ${name} config.applyAtStartup must be a boolean`);
   }
+  for (const key of ["minTurns", "maxTurns"]) {
+    if (config[key] !== undefined && (!Number.isSafeInteger(config[key]) || config[key] < 0)) {
+      throw new TypeError(`rule ${name} config.${key} must be a non-negative safe integer`);
+    }
+  }
+  if (config.minTurns !== undefined && config.maxTurns !== undefined && config.minTurns > config.maxTurns) {
+    throw new RangeError(`rule ${name} config.minTurns must not exceed config.maxTurns`);
+  }
   if (typeof callback !== "function") {
     throw new TypeError(`rule ${name} callback must be a function`);
   }
@@ -67,7 +76,14 @@ globalThis.rule = function(name, configOrCallback, callback) {
     throw new TypeError(`rule ${name} config.dependencyPolicy must be skip or include`);
   }
   __aicsRuleNames.add(name);
-  __aicsRules.push({ name, config, callback });
+  __aicsRules.push({
+    name, config, callback,
+    predicates: {
+      applyAtStartup: config.applyAtStartup,
+      minTurns: config.minTurns,
+      maxTurns: config.maxTurns,
+    },
+  });
 };
 
 globalThis.nothing = function(reason) {
@@ -95,6 +111,10 @@ globalThis.__aicsRuleNames = function() {
   return JSON.stringify(__aicsRules.map((entry) => entry.name));
 };
 
+globalThis.__aicsRulePredicates = function() {
+  return JSON.stringify(__aicsRules.map((entry) => entry.predicates));
+};
+
 function __aicsNormalizeLimit(limit) {
   if (limit == null) {
     return 1000000000;
@@ -106,7 +126,7 @@ function __aicsNormalizeLimit(limit) {
   return Math.floor(n);
 }
 
-globalThis.__aicsRunRules = function(contextJson, applyAtStartupOnly) {
+globalThis.__aicsRunRules = function(contextJson, eligibleRules) {
   const context = JSON.parse(contextJson);
 
   for (const kind of ["user", "contextualUser", "agent", "system", "toolResults"]) {
@@ -137,10 +157,8 @@ globalThis.__aicsRunRules = function(contextJson, applyAtStartupOnly) {
   }
 
   const outcomes = [];
-  for (const entry of __aicsRules) {
-    if (applyAtStartupOnly && entry.config.applyAtStartup !== true) {
-      continue;
-    }
+  for (const ruleIndex of eligibleRules) {
+    const entry = __aicsRules[ruleIndex];
     try {
       const raw = entry.callback(context);
       const actions = Array.isArray(raw) ? raw : [raw];
@@ -183,6 +201,8 @@ pub enum RulesMode {
 pub enum RuleSelection {
     All,
     ApplyAtStartup,
+    /// Preview rules except those explicitly disabled for startup.
+    StartupPreview,
 }
 
 #[derive(Debug, Clone)]
@@ -823,9 +843,16 @@ fn evaluate_rule_file(
                         )),
                     };
                 }
-                let input = RuleInput::from_session(&session, file, superseded_by);
-                let details = RuleDetails::from_session(&session);
-                match engine.evaluate(&input, details, selection) {
+                match engine.evaluate_with_context(
+                    selection,
+                    || rule_user_turn_count(&session),
+                    || {
+                        (
+                            RuleInput::from_session(&session, file, superseded_by),
+                            RuleDetails::from_session(&session),
+                        )
+                    },
+                ) {
                     Ok(outcomes) if outcomes.is_empty() => CachedDetermination::NoMatch {
                         session_id: session.session_id.clone(),
                     },
@@ -1102,8 +1129,33 @@ fn file_label(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RulePredicates {
+    apply_at_startup: Option<bool>,
+    min_turns: Option<u64>,
+    max_turns: Option<u64>,
+}
+
+impl RulePredicates {
+    fn is_selected(&self, selection: RuleSelection) -> bool {
+        match selection {
+            RuleSelection::All => true,
+            RuleSelection::ApplyAtStartup => self.apply_at_startup == Some(true),
+            RuleSelection::StartupPreview => self.apply_at_startup != Some(false),
+        }
+    }
+
+    fn matches_turn_count(&self, user_turn_count: usize) -> bool {
+        let count = user_turn_count as u64;
+        self.min_turns.is_none_or(|min| count >= min)
+            && self.max_turns.is_none_or(|max| count <= max)
+    }
+}
+
 struct JsRuleEngine {
     context: RefCell<BoaContext>,
+    predicates: Vec<RulePredicates>,
 }
 
 impl JsRuleEngine {
@@ -1133,14 +1185,18 @@ impl JsRuleEngine {
             .map_err(boa_error)
             .context("failed to install Boa rules runtime")?;
 
-        let engine = Self {
+        let mut engine = Self {
             context: RefCell::new(context),
+            predicates: Vec::new(),
         };
         engine
             .eval_ignore_result(RULES_HARNESS)
             .and_then(|_| engine.eval_ignore_result(source))
             .with_context(|| format!("failed to load rules from {}", path.display()))?;
         engine.rule_names()?;
+        let predicates_json = engine.eval_string("globalThis.__aicsRulePredicates()")?;
+        engine.predicates = serde_json::from_str(&predicates_json)
+            .context("rules runtime returned invalid rule-predicate JSON")?;
         Ok(engine)
     }
 
@@ -1149,17 +1205,38 @@ impl JsRuleEngine {
         serde_json::from_str(&json).context("rules runtime returned invalid rule-name JSON")
     }
 
-    fn evaluate(
+    fn evaluate_with_context(
         &self,
-        input: &RuleInput,
-        details: RuleDetails,
         selection: RuleSelection,
+        user_turn_count: impl FnOnce() -> usize,
+        build_context: impl FnOnce() -> (RuleInput, RuleDetails),
     ) -> Result<Vec<RawRuleOutcome>> {
-        let input_json = serde_json::to_string(input).context("failed to serialize rule input")?;
+        let mut eligible_rules = self
+            .predicates
+            .iter()
+            .enumerate()
+            .filter_map(|(index, predicates)| predicates.is_selected(selection).then_some(index))
+            .collect::<Vec<_>>();
+        if eligible_rules.is_empty() {
+            return Ok(Vec::new());
+        }
+        if eligible_rules.iter().any(|&index| {
+            self.predicates[index].min_turns.is_some() || self.predicates[index].max_turns.is_some()
+        }) {
+            let count = user_turn_count();
+            eligible_rules.retain(|&index| self.predicates[index].matches_turn_count(count));
+            if eligible_rules.is_empty() {
+                return Ok(Vec::new());
+            }
+        }
+
+        let (input, details) = build_context();
+        let input_json = serde_json::to_string(&input).context("failed to serialize rule input")?;
         let input_literal =
             serde_json::to_string(&input_json).context("failed to quote rule input")?;
-        let apply_at_startup_only = matches!(selection, RuleSelection::ApplyAtStartup);
-        let script = format!("globalThis.__aicsRunRules({input_literal}, {apply_at_startup_only})");
+        let eligible_rules_json = serde_json::to_string(&eligible_rules)
+            .context("failed to serialize eligible rule indices")?;
+        let script = format!("globalThis.__aicsRunRules({input_literal}, {eligible_rules_json})");
         BOA_RULE_DETAILS.with(|slot| {
             *slot.borrow_mut() = Some(details);
         });
@@ -1169,6 +1246,20 @@ impl JsRuleEngine {
         });
         let output_json = output_json?;
         serde_json::from_str(&output_json).context("rules runtime returned invalid action JSON")
+    }
+
+    #[cfg(test)]
+    fn evaluate(
+        &self,
+        input: &RuleInput,
+        details: RuleDetails,
+        selection: RuleSelection,
+    ) -> Result<Vec<RawRuleOutcome>> {
+        self.evaluate_with_context(
+            selection,
+            || input.turns.user.len(),
+            || (input.clone(), details),
+        )
     }
 
     fn eval_ignore_result(&self, source: &str) -> Result<()> {
@@ -1663,12 +1754,31 @@ impl RuleDetails {
     }
 }
 
-fn rule_cells(session: &Session) -> Vec<SessionCell> {
+fn rule_cells(session: &Session) -> Cow<'_, [SessionCell]> {
     if session.cells.is_empty() {
-        crate::parse::session::cells_from_messages(&session.messages)
+        Cow::Owned(crate::parse::session::cells_from_messages(
+            &session.messages,
+        ))
     } else {
-        session.cells.clone()
+        Cow::Borrowed(&session.cells)
     }
+}
+
+fn rule_user_turn_count(session: &Session) -> usize {
+    rule_cells(session)
+        .iter()
+        .filter(|cell| {
+            matches!(
+                cell,
+                SessionCell::Message {
+                    role: MessageRole::User,
+                    content,
+                    is_task_notification: false,
+                    ..
+                } if !is_contextual_user_message_content(MessageRole::User, content)
+            )
+        })
+        .count()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2238,6 +2348,7 @@ mod tests {
         let turns = RuleTurns::from_session(&session);
         assert_eq!(turns.contextual_user.len(), 1);
         assert_eq!(turns.user.len(), 1);
+        assert_eq!(super::rule_user_turn_count(&session), 1);
         assert_eq!(turns.contextual_user[0].index, 0);
         assert_eq!(turns.user[0].index, 1);
 
@@ -2251,6 +2362,41 @@ mod tests {
             Some(request.to_owned())
         );
         assert_eq!(details.fetch("user", 0, "text", usize::MAX), None);
+    }
+
+    #[test]
+    fn rule_user_turn_count_matches_fallback_cells() {
+        let mut session = session_with_cells(Vec::new());
+        session.messages = [
+            ("real request", false),
+            ("<task-notification>finished</task-notification>", true),
+            (
+                "<user_shell_command><command>pwd</command></user_shell_command>",
+                false,
+            ),
+            (
+                "# AGENTS.md instructions\n\n<INSTRUCTIONS>context</INSTRUCTIONS>",
+                false,
+            ),
+        ]
+        .into_iter()
+        .map(
+            |(content, is_task_notification)| crate::parse::SessionMessage {
+                role: MessageRole::User,
+                content: content.to_owned(),
+                timestamp: None,
+                tool_name: None,
+                antigravity_kind: None,
+                is_compact_summary: false,
+                is_task_notification,
+            },
+        )
+        .collect();
+        let turns = RuleTurns::from_session(&session);
+        assert_eq!(turns.user.len(), 1);
+        assert_eq!(turns.contextual_user.len(), 2);
+        assert_eq!(turns.exec.len(), 1);
+        assert_eq!(super::rule_user_turn_count(&session), turns.user.len());
     }
 
     #[test]
@@ -2443,6 +2589,21 @@ mod tests {
             .unwrap();
         assert_eq!(all_outcomes.len(), 3);
 
+        let preview_outcomes = engine
+            .evaluate(
+                &input("codex", "preview"),
+                details("preview"),
+                RuleSelection::StartupPreview,
+            )
+            .unwrap();
+        assert_eq!(
+            preview_outcomes
+                .iter()
+                .map(|outcome| outcome.rule.as_str())
+                .collect::<Vec<_>>(),
+            vec!["configured", "unconfigured"]
+        );
+
         let startup_outcomes = engine
             .evaluate(
                 &input("codex", "preview"),
@@ -2457,6 +2618,253 @@ mod tests {
             startup_outcomes[0].reason.as_deref(),
             Some("configured rule")
         );
+    }
+
+    #[test]
+    fn ineligible_rules_skip_context_construction_and_javascript() {
+        for (source, selection, count) in [
+            ("", RuleSelection::All, None),
+            (
+                "rule('manual', { applyAtStartup: false }, () => trash());",
+                RuleSelection::ApplyAtStartup,
+                None,
+            ),
+            (
+                "rule('unset', () => trash());",
+                RuleSelection::ApplyAtStartup,
+                None,
+            ),
+            (
+                "rule('manual', { applyAtStartup: false }, () => trash());",
+                RuleSelection::StartupPreview,
+                None,
+            ),
+            (
+                "rule('bounded', { minTurns: 1, maxTurns: 3 }, () => trash());",
+                RuleSelection::All,
+                Some(0),
+            ),
+            (
+                "rule('bounded', { minTurns: 1, maxTurns: 3 }, () => trash());",
+                RuleSelection::All,
+                Some(4),
+            ),
+            (
+                "rule('bounded', { applyAtStartup: true, minTurns: 1, maxTurns: 3 }, () => trash());
+                 rule('manual', { applyAtStartup: false }, () => trash());",
+                RuleSelection::ApplyAtStartup,
+                Some(4),
+            ),
+            (
+                "rule('first', { minTurns: 1, maxTurns: 3 }, () => trash());
+                 rule('second', { minTurns: 5 }, () => trash());",
+                RuleSelection::StartupPreview,
+                Some(4),
+            ),
+        ] {
+            let engine = JsRuleEngine::from_source(&PathBuf::from("rules.js"), source).unwrap();
+            engine
+                .eval_ignore_result(
+                    "globalThis.__aicsRunRules = () => { throw new Error('unexpected JS evaluation'); };",
+                )
+                .unwrap();
+            let mut counted = false;
+            let outcomes = engine
+                .evaluate_with_context(
+                    selection,
+                    || {
+                        counted = true;
+                        count.expect("unselected rules must not require counting turns")
+                    },
+                    || panic!("ineligible rules must not construct the session context"),
+                )
+                .unwrap();
+            assert!(outcomes.is_empty(), "{source}");
+            assert_eq!(counted, count.is_some(), "{source}");
+        }
+    }
+
+    #[test]
+    fn eligible_rules_share_one_context_and_preserve_registration_order() {
+        let engine = JsRuleEngine::from_source(
+            &PathBuf::from("rules.js"),
+            r#"
+            rule("manual", { applyAtStartup: false }, () => { throw new Error("manual callback"); });
+            rule("too long", { applyAtStartup: true, minTurns: 4 }, () => { throw new Error("long callback"); });
+            rule("first", { applyAtStartup: true, minTurns: 1, maxTurns: 3 }, ({ turns }) => trash(turns.user[0].text()));
+            rule("second", { applyAtStartup: true, minTurns: 2, maxTurns: 2 }, () => trash("second"));
+            "#,
+        )
+        .unwrap();
+        let mut builds = 0;
+        let mut counts = 0;
+        let outcomes = engine
+            .evaluate_with_context(
+                RuleSelection::ApplyAtStartup,
+                || {
+                    counts += 1;
+                    2
+                },
+                || {
+                    builds += 1;
+                    let mut input = input("codex", "preview");
+                    input.turns.user.push(input.turns.user[0].clone());
+                    (input, details("lazy text remains available"))
+                },
+            )
+            .unwrap();
+        assert_eq!(counts, 1);
+        assert_eq!(builds, 1);
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].rule, "first");
+        assert_eq!(
+            outcomes[0].reason.as_deref(),
+            Some("lazy text remains available")
+        );
+        assert_eq!(outcomes[1].rule, "second");
+        assert_eq!(outcomes[1].action.as_deref(), Some("trash"));
+    }
+
+    #[test]
+    fn unbounded_selected_rules_do_not_require_a_turn_count() {
+        let engine = JsRuleEngine::from_source(
+            &PathBuf::from("rules.js"),
+            r#"
+            rule("unbounded", { applyAtStartup: true }, () => trash("unbounded"));
+            rule("manual bounded", { applyAtStartup: false, minTurns: 5 }, () => trash());
+            "#,
+        )
+        .unwrap();
+        let outcomes = engine
+            .evaluate_with_context(
+                RuleSelection::ApplyAtStartup,
+                || panic!("unbounded selected rules do not require counting turns"),
+                || (input("codex", "preview"), details("preview")),
+            )
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].rule, "unbounded");
+    }
+
+    #[test]
+    fn rule_predicates_capture_config_at_registration() {
+        let engine = JsRuleEngine::from_source(
+            &PathBuf::from("rules.js"),
+            r#"
+            const config = { applyAtStartup: true, minTurns: 1, maxTurns: 1 };
+            rule("registered", config, () => trash("registered"));
+            config.applyAtStartup = false;
+            config.minTurns = 4;
+            config.maxTurns = 5;
+            "#,
+        )
+        .unwrap();
+        let outcomes = engine
+            .evaluate(
+                &input("codex", "preview"),
+                details("preview"),
+                RuleSelection::ApplyAtStartup,
+            )
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].rule, "registered");
+    }
+
+    #[test]
+    fn js_rule_turn_bounds_skip_callbacks_outside_inclusive_user_turn_range() {
+        let engine = JsRuleEngine::from_source(
+            &PathBuf::from("rules.js"),
+            r#"
+            rule("bounded", { applyAtStartup: true, minTurns: 1, maxTurns: 3 }, ({ turns }) => {
+              if (turns.user.length < 1 || turns.user.length > 3) {
+                throw new Error("callback ran outside turn bounds");
+              }
+              return trash("bounded");
+            });
+            rule("minimum", { applyAtStartup: true, minTurns: 2 }, () => trash("minimum"));
+            rule("maximum", { applyAtStartup: true, maxTurns: 2 }, () => trash("maximum"));
+            rule("zero", { applyAtStartup: true, minTurns: 0, maxTurns: 0 }, () => trash("zero"));
+            rule("exact", { applyAtStartup: true, minTurns: 2, maxTurns: 2 }, () => trash("exact"));
+            rule("unbounded", { applyAtStartup: true }, () => trash("unbounded"));
+            rule("manual", { minTurns: 1, maxTurns: 3 }, () => trash("manual"));
+            "#,
+        )
+        .unwrap();
+        let mut input = input("codex", "preview");
+        let turn = input.turns.user[0].clone();
+        input.turns.contextual_user = vec![turn.clone(); 5];
+        input.turns.agent = vec![turn.clone(); 5];
+        input.turns.system = vec![turn.clone(); 5];
+
+        for (count, expected) in [
+            (0, vec!["maximum", "zero", "unbounded"]),
+            (1, vec!["bounded", "maximum", "unbounded"]),
+            (
+                2,
+                vec!["bounded", "minimum", "maximum", "exact", "unbounded"],
+            ),
+            (3, vec!["bounded", "minimum", "unbounded"]),
+            (4, vec!["minimum", "unbounded"]),
+        ] {
+            input.turns.user = vec![turn.clone(); count];
+            for selection in [
+                RuleSelection::All,
+                RuleSelection::ApplyAtStartup,
+                RuleSelection::StartupPreview,
+            ] {
+                let outcomes = engine
+                    .evaluate(&input, details("preview"), selection)
+                    .unwrap();
+                let mut expected = expected.clone();
+                if selection != RuleSelection::ApplyAtStartup && (1..=3).contains(&count) {
+                    expected.push("manual");
+                }
+                assert_eq!(
+                    outcomes
+                        .iter()
+                        .map(|outcome| outcome.rule.as_str())
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "{count} user turns with {selection:?}"
+                );
+                assert!(outcomes
+                    .iter()
+                    .all(|outcome| outcome.action.as_deref() == Some("trash")));
+            }
+        }
+    }
+
+    #[test]
+    fn js_rule_rejects_invalid_turn_bounds_at_registration() {
+        for key in ["minTurns", "maxTurns"] {
+            for value in [
+                "-1",
+                "1.5",
+                "NaN",
+                "Infinity",
+                "9007199254740992",
+                "null",
+                "true",
+                "\"1\"",
+            ] {
+                let source = format!("rule('invalid', {{ {key}: {value} }}, () => nothing());");
+                let error = JsRuleEngine::from_source(&PathBuf::from("rules.js"), &source)
+                    .err()
+                    .expect("invalid turn bound must fail to load rules");
+                assert!(
+                    format!("{error:#}")
+                        .contains(&format!("config.{key} must be a non-negative safe integer")),
+                    "{key}: {value}: {error:#}"
+                );
+            }
+        }
+        let error = JsRuleEngine::from_source(
+            &PathBuf::from("rules.js"),
+            "rule('invalid', { minTurns: 3, maxTurns: 1 }, () => nothing());",
+        )
+        .err()
+        .expect("inverted turn bounds must fail to load rules");
+        assert!(format!("{error:#}").contains("config.minTurns must not exceed config.maxTurns"));
     }
 
     #[test]
@@ -2609,6 +3017,7 @@ mod tests {
         ]);
         let turns = RuleTurns::from_session(&session);
         let details = RuleDetails::from_session(&session);
+        assert_eq!(super::rule_user_turn_count(&session), turns.user.len());
         assert_eq!(turns.contextual_user.len(), 1);
         assert_eq!(turns.contextual_user[0].index, 0);
         assert_eq!(turns.user.len(), 1);

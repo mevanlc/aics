@@ -293,6 +293,81 @@ fn preview_rules_emits_jsonl_proposals_without_modifying_files() -> Result<()> {
 }
 
 #[test]
+fn startup_preview_excludes_disabled_rules_and_keeps_separate_cached_results() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let config_root = temp.path().join("config");
+    let cache_root = temp.path().join("cache");
+    fs::create_dir_all(&config_root)?;
+    fs::write(
+        config_root.join("rules.js"),
+        r#"
+        const cleanup = ({ session }) => session.agent === "claude" ? trash("cleanup") : nothing();
+        rule("enabled", { applyAtStartup: true }, cleanup);
+        rule("disabled", { applyAtStartup: false }, cleanup);
+        rule("unconfigured", cleanup);
+        "#,
+    )?;
+
+    for (flag, expected) in [
+        (
+            "--preview-rules",
+            vec!["enabled", "disabled", "unconfigured"],
+        ),
+        ("--preview-rules=startup", vec!["enabled", "unconfigured"]),
+        (
+            "--preview-rules=verbose",
+            vec!["enabled", "disabled", "unconfigured"],
+        ),
+        (
+            "--preview-rules=startup,verbose",
+            vec!["enabled", "unconfigured"],
+        ),
+        (
+            "--preview-rules=verbose,startup",
+            vec!["enabled", "unconfigured"],
+        ),
+        (
+            "--preview-rules",
+            vec!["enabled", "disabled", "unconfigured"],
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_aics"))
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env("AICS_CONFIG_ROOT", &config_root)
+            .env("AICS_CACHE_ROOT", &cache_root)
+            .env("AICS_DATA_ROOT", temp.path().join("data"))
+            .env("AICS_CLAUDE_PROJECTS_DIR", &roots.claude_projects)
+            .env("AICS_CODEX_SESSIONS_DIR", &roots.codex_sessions)
+            .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
+            .args([flag, "--json", "--progress", "none", "-g"])
+            .output()?;
+        assert!(output.status.success(), "{flag}: {output:#?}");
+        let proposals = String::from_utf8(output.stdout)?
+            .lines()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            proposals
+                .iter()
+                .map(|proposal| proposal["rule"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected,
+            "{flag}"
+        );
+        assert!(roots.claude_session.exists());
+        assert!(roots.codex_session.exists());
+    }
+    assert_eq!(profile_rules_caches(&cache_root)?.len(), 1);
+    assert_eq!(
+        profile_cache_files(&cache_root, "startup-preview-rules-cache.json")?.len(),
+        1
+    );
+    assert!(profile_startup_rules_caches(&cache_root)?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn ordinary_json_search_skips_default_and_custom_startup_rules() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;

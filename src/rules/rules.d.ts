@@ -228,14 +228,33 @@ interface AicsPatchFile {
 /** An action that a rule callback may return, alone or in an array. */
 type AicsRuleAction = AicsNothingAction | AicsTrashAction | AicsUntrashAction;
 
-/** Optional behavior for a registered rule. */
+/**
+ * Optional behavior for a registered rule.
+ * Startup selection and turn bounds are captured at registration and checked in Rust.
+ * Sessions with no eligible rules skip callback-context construction and JS marshalling.
+ */
 interface AicsRuleConfig {
   /**
    * Apply this rule during ordinary AICS startup.
    * Startup rules evaluate globally over normal, non-trashed sessions.
-   * Explicit preview/apply modes evaluate every registered rule.
+   * Explicit preview/apply modes select every registered rule, subject to turn limits.
+   * --preview-rules=startup excludes rules explicitly set to false.
    */
   applyAtStartup?: boolean;
+
+  /**
+   * Inclusive minimum user-turn count (`turns.user.length`); omitted means no minimum.
+   * Must be a non-negative safe integer. Injected contextual messages do not count.
+   * The callback is skipped when the session falls outside the configured range.
+   */
+  minTurns?: number;
+
+  /**
+   * Inclusive maximum user-turn count (`turns.user.length`); omitted means no maximum.
+   * Must be a non-negative safe integer, at least minTurns when both are set.
+   * Applies in startup and explicit preview/apply modes.
+   */
+  maxTurns?: number;
 
   /**
    * "skip" (default) skips actions needing additional dependency members.

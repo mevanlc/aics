@@ -14,7 +14,12 @@ startup cleanup, commit-only sessions, and superseded sessions.
 - `aics --preview-rules` reviews proposed actions in the TUI without changing
   files. All `nothing()` results are hidden.
 - `aics --preview-rules=verbose` also shows `nothing()` results with non-empty
-  notes. Only the attached `=verbose` form is accepted.
+  notes.
+- `aics --preview-rules=startup` excludes rules with `applyAtStartup: false`.
+  Rules with `applyAtStartup: true` or no setting remain eligible.
+- `aics --preview-rules=startup,verbose` combines both options; the order does
+  not matter (`--preview-rules=verbose,startup` works too). Values must be attached
+  with `=`, rather than separated from the flag by a space.
 - `aics --preview-rules --json` prints proposed actions as JSONL.
 - `aics --apply-rules` applies supported actions non-interactively.
 - `aics --rules PATH` selects another rules file for startup or an explicit
@@ -85,13 +90,28 @@ Register a rule with either `rule(name, callback)` or
 `rule(name, config, callback)`:
 
 ```js
-rule("trash short commit helper sessions", ({ turns }) => {
-  return turns.user.length === 2 &&
-    /\s*[/$](?:gdf-)?commit\b/m.test(turns.user[0].text(4096))
+rule("commit tool short session", { applyAtStartup: true, minTurns: 1, maxTurns: 3 }, ({ turns }) => {
+  return /\s*[/$](?:gdf-)?commit\b/m.test(turns.user[0].text(4096))
     ? trash("commit helper")
     : nothing();
 });
 ```
+
+`minTurns` and `maxTurns` are inclusive bounds on `turns.user.length`. In this
+example, the callback runs only for sessions with 1–3 user turns; sessions with
+0 or 4+ user turns skip it entirely. Injected contextual messages, assistant
+messages, and tool calls/results do not count. Both bounds apply in startup and
+explicit preview/apply modes. Either bound can be omitted for a one-sided limit;
+omitting both leaves the count unrestricted. Values must be non-negative safe
+integers, and `minTurns` must not exceed `maxTurns` when both are set.
+
+Startup settings and turn bounds are captured when each `rule()` registers.
+Rust checks them before building or serializing the session's callback context.
+When no selected rule accepts the session's user-turn count, AICS skips context
+construction, lazy-text storage, JSON marshalling, and JavaScript invocation for
+that session. If any rule is eligible, it builds one shared context and invokes
+only eligible callbacks in registration order. Session parsing is still needed
+to obtain the user-turn count.
 
 Callbacks for different sessions may run concurrently and out of session order.
 Write each callback as an independent per-session calculation: do not use mutable
@@ -186,15 +206,18 @@ rule("trash startup noise", { applyAtStartup: true }, ({ session }) => {
 
 Startup application is global over normal, non-trashed sessions and is
 independent of search scope and filters. Use `--no-apply-rules` to disable it.
-`--preview-rules` and `--apply-rules` always evaluate all registered rules,
-regardless of `applyAtStartup`.
+By default, `--preview-rules` and `--apply-rules` select all registered rules
+regardless of `applyAtStartup`. Adding `startup` to the preview options excludes
+rules explicitly marked `applyAtStartup: false`; rules without the setting still
+appear in this preview, but do not run automatically at startup. `minTurns` and
+`maxTurns` still gate each callback.
 
 ## Caching
 
 Rule determinations from the default `~/.config/aics/rules.js` are cached per
 index profile so unchanged sessions do not need to be parsed or evaluated again.
-Explicit all-rules evaluation and automatic startup evaluation use separate
-caches.
+All-rules evaluation, previews with the `startup` option, and automatic startup
+evaluation each use separate caches.
 
 Each cache tracks the byte length, modification time, and CRC32 of the running
 `aics` binary, `rules.js`, and each session source. Antigravity fingerprints

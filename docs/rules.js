@@ -12,7 +12,7 @@ const COMMIT_SKILL_REPLY_RE = /^\s*(?:y|yes|no|n)\s*$/i;
  * Trashes short commit helper sessions to avoid cluttering the chat history.
  * This rule specifically targets sessions using models with "-spark" in their name
  */
-rule("commit tool short session", { applyAtStartup: true }, (ctx) => {
+rule("commit tool short session", { applyAtStartup: true, minTurns: 1, maxTurns: 3 }, (ctx) => {
   const { turns, session, session: { model, agent } } = ctx;
 
 
@@ -23,21 +23,13 @@ rule("commit tool short session", { applyAtStartup: true }, (ctx) => {
   // let isLowOrMediumEffortGPT = model.includes("gpt-") && (session.reasoningEffort == "low" || session.reasoningEffort == "medium");
 
 
-  if (turns.user.length == 0) {
-    if (isAgy) return trash("agy session has 0 user turns");
-    if (isSpark || isClaude || isCodex) return trash("session has 0 user turns");
-    return nothing();
-  }
-
   const ut0t = turns.user[0].text();
   if ((isSpark || isClaude || isCodex)
     && COMMIT_COMMAND_RE.test(ut0t)) {
-    if (turns.user.length > 3) return nothing("session has more than 3 user turns");
     return trash(`short (${turns.user.length} user turns) commit`);
   }
 
   if (isAgy && COMMIT_SKILL_REQUEST_RE.test(ut0t)) {
-    if (turns.user.length > 12) return nothing("agy session has more than 12 user turns");
     return trash(`commit skill session (u=${turns.user.length} a=${turns.agent.length})`);
   }
 

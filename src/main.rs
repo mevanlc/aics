@@ -92,11 +92,11 @@ struct Cli {
         long = "preview-rules",
         help_heading = "Interactive TUI Overrides",
         conflicts_with = "apply_rules",
-        value_enum, num_args = 0..=1, require_equals = true,
-        help = "Review proposed rule actions; =verbose includes no-op notes",
-        long_help = "[Read-only] Evaluate JavaScript rules and review proposed actions without changing files. Use --preview-rules=verbose to also show nothing() results with non-empty notes in the review TUI. The value must be attached with '='. Combined with --json, emits only action proposals as JSONL."
+        value_enum, value_delimiter = ',', num_args = 0..=1, require_equals = true,
+        help = "Review rule actions; =startup,verbose filters rules and includes no-op notes",
+        long_help = "[Read-only] Evaluate JavaScript rules and review proposed actions without changing files. Attach comma-separated options with '=' in either order: startup excludes rules with applyAtStartup: false (rules without the setting remain included); verbose also shows nothing() results with non-empty notes in the review TUI. For example: --preview-rules=startup,verbose. Combined with --json, emits only action proposals as JSONL."
     )]
-    preview_rules: Option<Option<CliRulesPreview>>,
+    preview_rules: Option<Vec<CliRulesPreview>>,
 
     // === Search Scope & Target ===
     #[arg(
@@ -352,6 +352,7 @@ enum CliJson {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliRulesPreview {
+    Startup,
     Verbose,
 }
 
@@ -461,6 +462,12 @@ impl From<CliSupersededFilter> for SupersededFilter {
 }
 
 impl Cli {
+    fn has_preview_option(&self, option: CliRulesPreview) -> bool {
+        self.preview_rules
+            .as_ref()
+            .is_some_and(|options| options.contains(&option))
+    }
+
     fn display_options(&self, base: DisplayOptions) -> DisplayOptions {
         if self.visibility_overrides.is_empty() {
             return hidden_from(base, &self.hide);
@@ -543,7 +550,12 @@ fn main() -> Result<()> {
         aics::lifecycle::recover(&resolved_paths.roots)?;
     }
     let index_paths = aics::index::IndexPaths::discover_for_roots(&resolved_paths.roots)?;
-    let rules_cache_path = index_paths.cache_root.join("rules-cache.json");
+    let startup_preview = cli.has_preview_option(CliRulesPreview::Startup);
+    let rules_cache_path = index_paths.cache_root.join(if startup_preview {
+        "startup-preview-rules-cache.json"
+    } else {
+        "rules-cache.json"
+    });
     let startup_rules_cache_path = index_paths.cache_root.join("startup-rules-cache.json");
     let manager = IndexManager::with_paths(index_paths);
     if cli.delete_index {
@@ -587,7 +599,11 @@ fn main() -> Result<()> {
             cache_path: (!cli.benchmark_rules && cli.rules.is_none())
                 .then_some(rules_cache_path.clone()),
             mode,
-            selection: RuleSelection::All,
+            selection: if startup_preview {
+                RuleSelection::StartupPreview
+            } else {
+                RuleSelection::All
+            },
             json: cli.json.is_some(),
             scope: rules_scope.clone(),
             filters: rules_filters.clone(),
@@ -609,7 +625,7 @@ fn main() -> Result<()> {
             return Ok(());
         }
         if mode == RulesMode::Preview && cli.json.is_none() {
-            if cli.preview_rules != Some(Some(CliRulesPreview::Verbose)) {
+            if !cli.has_preview_option(CliRulesPreview::Verbose) {
                 report.hide_nothing_decisions();
             }
             let initial_request = SearchRequest {
@@ -1746,11 +1762,11 @@ mod tests {
     fn parses_rules_mode_flags() {
         let preview = Cli::parse_from(["aics", "--preview-rules"]);
         assert_eq!(rules_mode(&preview), Some(RulesMode::Preview));
-        assert_eq!(preview.preview_rules, Some(None));
+        assert_eq!(preview.preview_rules, Some(vec![]));
 
         let verbose = Cli::parse_from(["aics", "--preview-rules=verbose"]);
         assert_eq!(rules_mode(&verbose), Some(RulesMode::Preview));
-        assert_eq!(verbose.preview_rules, Some(Some(CliRulesPreview::Verbose)));
+        assert_eq!(verbose.preview_rules, Some(vec![CliRulesPreview::Verbose]));
 
         let apply = Cli::parse_from(["aics", "--apply-rules", "--rules", "rules.js"]);
         assert_eq!(rules_mode(&apply), Some(RulesMode::Apply));
@@ -1765,9 +1781,40 @@ mod tests {
     }
 
     #[test]
+    fn parses_comma_separated_rules_preview_options() {
+        for (value, expected, startup, verbose) in [
+            ("startup", vec![CliRulesPreview::Startup], true, false),
+            ("verbose", vec![CliRulesPreview::Verbose], false, true),
+            (
+                "startup,verbose",
+                vec![CliRulesPreview::Startup, CliRulesPreview::Verbose],
+                true,
+                true,
+            ),
+            (
+                "verbose,startup",
+                vec![CliRulesPreview::Verbose, CliRulesPreview::Startup],
+                true,
+                true,
+            ),
+        ] {
+            let cli = Cli::parse_from(["aics", &format!("--preview-rules={value}")]);
+            assert_eq!(rules_mode(&cli), Some(RulesMode::Preview));
+            assert_eq!(cli.preview_rules, Some(expected));
+            assert_eq!(cli.has_preview_option(CliRulesPreview::Startup), startup);
+            assert_eq!(cli.has_preview_option(CliRulesPreview::Verbose), verbose);
+        }
+        for value in ["unknown", "startup,unknown", "verbose,"] {
+            let error =
+                Cli::try_parse_from(["aics", &format!("--preview-rules={value}")]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+        }
+    }
+
+    #[test]
     fn preview_rules_value_requires_equals() {
         let cli = Cli::parse_from(["aics", "--preview-rules", "verbose"]);
-        assert_eq!(cli.preview_rules, Some(None));
+        assert_eq!(cli.preview_rules, Some(vec![]));
         assert_eq!(cli.query.as_deref(), Some("verbose"));
         assert!(validate_terminal_mode(&cli)
             .unwrap_err()
