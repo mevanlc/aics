@@ -285,12 +285,17 @@ top of an exported file — is not part of the transcript and is never hidden.
 | Option | Meaning |
 | --- | --- |
 | `--preview-rules` | Evaluate all rules and review proposals without applying them |
+| `--preview-rules=verbose` | Also show informational `nothing()` results with non-empty notes |
 | `--apply-rules` | Evaluate all rules and apply supported actions non-interactively |
 | `--no-apply-rules` | Disable automatic `applyAtStartup` rules during ordinary startup |
 | `--rules PATH` | Use another rules file without reading or writing rules caches |
 | `--write-rules-dts` | Write `~/.config/aics/rules.d.ts` and exit |
 
 `--preview-rules` opens a review TUI unless combined with `--json`.
+Plain preview hides all `nothing()` results. The attached `=verbose` value
+includes those with non-empty notes in the TUI; empty or whitespace-only notes
+stay hidden. The space-separated form `--preview-rules verbose` is not accepted.
+JSON output contains only action proposals in either mode.
 `--preview-rules` and `--apply-rules` conflict. Explicit preview/apply modes do
 not accept `QUERY`, `--live`, or `--superseded` and always evaluate every
 registered rule. Live or locked sessions are automatically excluded from rules

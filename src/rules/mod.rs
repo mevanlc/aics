@@ -219,6 +219,18 @@ pub struct RulesReport {
     pub processing_skips: Vec<RuleProcessingSkip>,
 }
 
+impl RulesReport {
+    /// Keep action preview rows and their explanations, hiding informational no-op notes.
+    pub fn hide_nothing_decisions(&mut self) {
+        self.preview_matches.retain_mut(|matched| {
+            matched
+                .decisions
+                .retain(|decision| decision.action != "nothing");
+            !matched.proposals.is_empty()
+        });
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "event", rename = "rules_processing_skip")]
 pub struct RuleProcessingSkip {

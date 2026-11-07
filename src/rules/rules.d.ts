@@ -254,7 +254,7 @@ interface AicsNothingAction {
   /** No-op action discriminator. */
   action: "nothing";
 
-  /** Optional informational decision shown in the interactive rules preview. */
+  /** Optional informational decision shown with --preview-rules=verbose. */
   reason: string | null;
 }
 
@@ -308,7 +308,7 @@ declare function rule(
 /**
  * Returns an explicit no-op action.
  *
- * @param reason Optional informational decision shown in the interactive rules preview.
+ * @param reason Optional informational decision shown with --preview-rules=verbose.
  */
 declare function nothing(reason?: string): AicsNothingAction;
 

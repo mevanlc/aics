@@ -901,12 +901,19 @@ fn rules_progress_reports_processing_count() -> Result<()> {
 }
 
 #[test]
-fn non_empty_nothing_decision_is_available_to_interactive_preview_only() -> Result<()> {
+fn rules_preview_hides_silent_results_and_keeps_non_empty_comments() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
     let rules = write_rules(
         &temp,
         r#"
+        rule("null", () => { return null; });
+        rule("undefined", () => { return undefined; });
+        rule("bare return", () => { return; });
+        rule("no return", () => {});
+        rule("plain nothing", () => { return nothing(); });
+        rule("empty nothing", () => { return nothing(""); });
+        rule("blank nothing", () => { return nothing(" \t "); });
         rule("explain no-op", ({ session }) => {
           return session.agent === "claude"
             ? nothing("session has more than 3 user turns")
@@ -922,14 +929,72 @@ fn non_empty_nothing_decision_is_available_to_interactive_preview_only() -> Resu
         trash: None,
     };
 
-    let report = run_rules_with_progress(
+    let cache_path = temp.path().join("rules-cache.json");
+    let mut options = RulesOptions {
+        rules_path: rules,
+        cache_path: None,
+        mode: RulesMode::Preview,
+        selection: RuleSelection::All,
+        json: false,
+        scope: Scope::Global,
+        filters: SearchFilters::default(),
+        supersession: Default::default(),
+    };
+
+    for (run, cache) in [
+        ("uncached", None),
+        ("cold cache", Some(cache_path.clone())),
+        ("warm cache", Some(cache_path)),
+    ] {
+        options.cache_path = cache;
+        let mut report = run_rules_with_progress(&session_roots, &options, |_| {})?;
+
+        assert!(report.errors.is_empty(), "{run}: {:?}", report.errors);
+        assert!(report.proposals.is_empty(), "{run}");
+        assert_eq!(report.preview_matches.len(), 1, "{run}");
+        let matched = &report.preview_matches[0];
+        assert_eq!(matched.hit.session.agent, Agent::Claude, "{run}");
+        assert!(matched.proposals.is_empty(), "{run}");
+        assert_eq!(matched.decisions.len(), 1, "{run}");
+        assert_eq!(matched.decisions[0].rule, "explain no-op", "{run}");
+        assert_eq!(matched.decisions[0].action, "nothing", "{run}");
+        assert_eq!(
+            matched.decisions[0].text, "session has more than 3 user turns",
+            "{run}"
+        );
+
+        report.hide_nothing_decisions();
+        assert!(report.preview_matches.is_empty(), "{run}");
+    }
+    Ok(())
+}
+
+#[test]
+fn hiding_nothing_decisions_preserves_action_proposals_and_reasons() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let rules = write_rules(
+        &temp,
+        r#"
+        rule("note", () => nothing("kept for verbose preview"));
+        rule("cleanup", ({ session }) => session.agent === "claude" ? trash("finished") : null);
+        "#,
+    )?;
+    let session_roots = SessionRoots {
+        live_sessions: Default::default(),
+        claude_projects: roots.claude_projects,
+        codex_sessions: roots.codex_sessions,
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
+        trash: None,
+    };
+    let mut report = run_rules_with_progress(
         &session_roots,
         &RulesOptions {
             rules_path: rules,
             cache_path: None,
             mode: RulesMode::Preview,
             selection: RuleSelection::All,
-            json: true,
+            json: false,
             scope: Scope::Global,
             filters: SearchFilters::default(),
             supersession: Default::default(),
@@ -937,17 +1002,26 @@ fn non_empty_nothing_decision_is_available_to_interactive_preview_only() -> Resu
         |_| {},
     )?;
 
-    assert!(report.proposals.is_empty());
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.preview_matches.len(), 2);
+    let proposals = report.proposals.clone();
+    assert_eq!(proposals.len(), 1);
+
+    report.hide_nothing_decisions();
+
+    assert_eq!(report.proposals, proposals);
     assert_eq!(report.preview_matches.len(), 1);
     let matched = &report.preview_matches[0];
-    assert!(matched.proposals.is_empty());
-    assert_eq!(matched.decisions.len(), 1);
-    assert_eq!(matched.decisions[0].rule, "explain no-op");
-    assert_eq!(matched.decisions[0].action, "nothing");
-    assert_eq!(
-        matched.decisions[0].text,
-        "session has more than 3 user turns"
-    );
+    assert_eq!(matched.hit.session.agent, Agent::Claude);
+    assert_eq!(matched.proposals, proposals);
+    assert!(matched
+        .decisions
+        .iter()
+        .all(|decision| decision.action != "nothing"));
+    assert!(matched
+        .decisions
+        .iter()
+        .any(|decision| { decision.action == "trash" && decision.text == "finished" }));
     Ok(())
 }
 

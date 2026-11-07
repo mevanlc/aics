@@ -92,10 +92,11 @@ struct Cli {
         long = "preview-rules",
         help_heading = "Interactive TUI Overrides",
         conflicts_with = "apply_rules",
-        help = "Evaluate rules and review proposed actions",
-        long_help = "[Read-only] Evaluate JavaScript rules and review proposed actions without changing files (opens review TUI, or emits JSONL if combined with --json)"
+        value_enum, num_args = 0..=1, require_equals = true,
+        help = "Review proposed rule actions; =verbose includes no-op notes",
+        long_help = "[Read-only] Evaluate JavaScript rules and review proposed actions without changing files. Use --preview-rules=verbose to also show nothing() results with non-empty notes in the review TUI. The value must be attached with '='. Combined with --json, emits only action proposals as JSONL."
     )]
-    preview_rules: bool,
+    preview_rules: Option<Option<CliRulesPreview>>,
 
     // === Search Scope & Target ===
     #[arg(
@@ -350,6 +351,11 @@ enum CliJson {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliRulesPreview {
+    Verbose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliSort {
     Time,
     Relevance,
@@ -587,7 +593,7 @@ fn main() -> Result<()> {
             filters: rules_filters.clone(),
             supersession: manager.supersession_snapshot()?,
         };
-        let report = if let Some(draw_target) =
+        let mut report = if let Some(draw_target) =
             progress_draw_target(cli.progress, cli.stdout_reserved())
         {
             let mut progress = RulesProcessingProgress::new(draw_target);
@@ -603,6 +609,9 @@ fn main() -> Result<()> {
             return Ok(());
         }
         if mode == RulesMode::Preview && cli.json.is_none() {
+            if cli.preview_rules != Some(Some(CliRulesPreview::Verbose)) {
+                report.hide_nothing_decisions();
+            }
             let initial_request = SearchRequest {
                 visibility_search: settings
                     .default_filter
@@ -853,7 +862,7 @@ fn validate_terminal_mode(cli: &Cli) -> Result<()> {
 }
 
 fn rules_mode(cli: &Cli) -> Option<RulesMode> {
-    if cli.preview_rules || cli.benchmark_rules {
+    if cli.preview_rules.is_some() || cli.benchmark_rules {
         Some(RulesMode::Preview)
     } else if cli.apply_rules {
         Some(RulesMode::Apply)
@@ -1432,7 +1441,7 @@ mod tests {
         apply_default_filter_to_request, build_request, hidden_from, palette_pairs,
         parse_after_date, parse_before_date, parse_dir_arg, render_manpage, render_palettes,
         rules_mode, scope_for_current_dir, validate_terminal_mode, Cli, CliProgress,
-        DisplayOptions,
+        CliRulesPreview, DisplayOptions,
     };
     use aics::index::{Scope, SearchFilters, SortMode, SupersededFilter, TrashFilter};
     use aics::parse::Agent;
@@ -1737,6 +1746,11 @@ mod tests {
     fn parses_rules_mode_flags() {
         let preview = Cli::parse_from(["aics", "--preview-rules"]);
         assert_eq!(rules_mode(&preview), Some(RulesMode::Preview));
+        assert_eq!(preview.preview_rules, Some(None));
+
+        let verbose = Cli::parse_from(["aics", "--preview-rules=verbose"]);
+        assert_eq!(rules_mode(&verbose), Some(RulesMode::Preview));
+        assert_eq!(verbose.preview_rules, Some(Some(CliRulesPreview::Verbose)));
 
         let apply = Cli::parse_from(["aics", "--apply-rules", "--rules", "rules.js"]);
         assert_eq!(rules_mode(&apply), Some(RulesMode::Apply));
@@ -1748,6 +1762,17 @@ mod tests {
         let benchmark = Cli::parse_from(["aics", "--benchmark-rules", "--rules", "rules.js"]);
         assert_eq!(rules_mode(&benchmark), Some(RulesMode::Preview));
         assert!(benchmark.benchmark_rules);
+    }
+
+    #[test]
+    fn preview_rules_value_requires_equals() {
+        let cli = Cli::parse_from(["aics", "--preview-rules", "verbose"]);
+        assert_eq!(cli.preview_rules, Some(None));
+        assert_eq!(cli.query.as_deref(), Some("verbose"));
+        assert!(validate_terminal_mode(&cli)
+            .unwrap_err()
+            .to_string()
+            .contains("does not support a search query"));
     }
 
     #[test]

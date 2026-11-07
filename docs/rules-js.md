@@ -12,7 +12,9 @@ See [the maintainer's rules.js](rules.js) for a complete exemplar, including
 startup cleanup, commit-only sessions, and superseded sessions.
 
 - `aics --preview-rules` reviews proposed actions in the TUI without changing
-  files.
+  files. All `nothing()` results are hidden.
+- `aics --preview-rules=verbose` also shows `nothing()` results with non-empty
+  notes. Only the attached `=verbose` form is accepted.
 - `aics --preview-rules --json` prints proposed actions as JSONL.
 - `aics --apply-rules` applies supported actions non-interactively.
 - `aics --rules PATH` selects another rules file for startup or an explicit
@@ -103,11 +105,19 @@ per available logical CPU, capped by the number of sessions. Each worker keeps
 one JavaScript runtime for the duration of the run. Exact cache hits do not start
 or pass through a JavaScript worker.
 
-A rule can return `nothing(reason)`, `trash(reason)`, or `untrash(reason)`. A
-non-empty reason passed to `nothing` is an informational decision: it appears in
-the center of that session card's title in the interactive rules preview, but it
-does not create a markable or JSON action proposal. Plain `nothing()` remains
-invisible. Non-empty `trash` and `untrash` reasons use the same title position.
+A rule can return `nothing(reason)`, `trash(reason)`, or `untrash(reason)`.
+Plain `--preview-rules` shows only action proposals and hides all `nothing()`
+results, including their notes on sessions that also have action proposals.
+With `--preview-rules=verbose`, a non-empty reason passed to `nothing` appears
+in the center of that session card's title. It is informational and does not
+create a markable or JSON action proposal; JSON output remains action proposals
+only in either mode.
+
+Returning `null`, `undefined`, using a bare `return` or no return, or returning
+`nothing()` or `nothing("")` never adds a session to either preview. Whitespace-only
+notes are also always hidden. The session can still appear if another rule
+proposes an action, or in verbose mode if another rule returns a non-empty note.
+Non-empty `trash` and `untrash` reasons use the same title position in both modes.
 To evaluate trashed sessions for `untrash`, use `--trashed yes` or `--trashed both`.
 Applying `untrash` to a normal session is skipped as already untrashed.
 For Antigravity, `trash` moves the complete conversation artifact directory and

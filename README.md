@@ -97,7 +97,8 @@ to All, retain their archival behavior, and ignore saved filters.
 
 JavaScript rules automate repeatable session cleanup. Rules live at
 `~/.config/aics/rules.js` by default; preview their proposed actions with
-`--preview-rules` or apply them with `--apply-rules`.
+`--preview-rules` or apply them with `--apply-rules`. Use
+`--preview-rules=verbose` to also show `nothing()` results with non-empty notes.
 Rules automatically exclude live or locked Claude, Codex, and Antigravity sessions.
 Dependency groups default to `dependencyPolicy: "skip"`; opt into `"include"` to
 process the complete required group. Use **Enter → g** to review related sessions.
