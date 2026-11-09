@@ -66,28 +66,6 @@ fn built_in_json_warning_obeys_rust_log_without_contaminating_stdout() -> Result
 }
 
 #[test]
-fn malformed_custom_config_warns_and_falls_back_before_installing_logger() -> Result<()> {
-    let temp = TempDir::new()?;
-    let config = temp.path().join("config");
-    fs::create_dir_all(&config)?;
-    fs::write(config.join("log4rs.yaml"), "appenders: [not valid")?;
-
-    let output = Command::new(env!("CARGO_BIN_EXE_aics"))
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("AICS_CONFIG_ROOT", &config)
-        .arg("--print-palettes")
-        .output()?;
-
-    assert!(output.status.success(), "{output:#?}");
-    let stdout = String::from_utf8(output.stdout)?;
-    let stderr = String::from_utf8(output.stderr)?;
-    assert!(stdout.contains("lazygit"));
-    assert!(stderr.contains("could not load"), "{stderr}");
-    assert!(stderr.contains("using built-in logging"), "{stderr}");
-    Ok(())
-}
-
-#[test]
 fn simultaneous_interactive_processes_own_distinct_log_groups() -> Result<()> {
     let temp = TempDir::new()?;
     let config = temp.path().join("config");
@@ -114,48 +92,6 @@ fn simultaneous_interactive_processes_own_distinct_log_groups() -> Result<()> {
     let summary_instances = active_instances(&log_dir, "summarizer-errors-")?;
     assert_eq!(main_instances.len(), 2, "{main_instances:#?}");
     assert_eq!(summary_instances, main_instances);
-    Ok(())
-}
-
-#[test]
-fn copied_template_is_authoritative_and_uses_reserved_process_paths() -> Result<()> {
-    let temp = TempDir::new()?;
-    let config = temp.path().join("config");
-    let claude = temp.path().join("claude/project");
-    let codex = temp.path().join("codex");
-    fs::create_dir_all(&config)?;
-    fs::create_dir_all(&claude)?;
-    fs::create_dir_all(&codex)?;
-    fs::write(claude.join("malformed.jsonl"), "this is not JSON\n")?;
-    fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/log4rs.yaml"),
-        config.join("log4rs.yaml"),
-    )?;
-
-    let output = Command::new(env!("CARGO_BIN_EXE_aics"))
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("AICS_CONFIG_ROOT", &config)
-        .env("AICS_CACHE_ROOT", temp.path().join("cache"))
-        .env("AICS_DATA_ROOT", temp.path().join("data"))
-        .env("AICS_CLAUDE_PROJECTS_DIR", temp.path().join("claude"))
-        .env("AICS_CODEX_SESSIONS_DIR", &codex)
-        .env("AICS_ANTIGRAVITY_HOME", temp.path().join("antigravity"))
-        .env("RUST_LOG", "off")
-        .args(["--json", "--progress", "none", "-g"])
-        .output()?;
-
-    assert!(output.status.success(), "{output:#?}");
-    assert!(output.stdout.is_empty(), "{output:#?}");
-    assert!(output.stderr.is_empty(), "{output:#?}");
-    let main_instances = active_instances(&config.join("logs"), "aics-")?;
-    assert_eq!(main_instances.len(), 1);
-    assert_eq!(
-        active_instances(&config.join("logs"), "summarizer-errors-")?.len(),
-        1
-    );
-    let instance = main_instances.into_iter().next().unwrap();
-    let main = fs::read_to_string(config.join(format!("logs/aics-{instance}.log")))?;
-    assert!(main.contains("skipping malformed Claude JSON"), "{main}");
     Ok(())
 }
 
@@ -190,6 +126,10 @@ fn startup_reaps_only_enough_old_dead_groups_to_reach_ten() -> Result<()> {
     for day in 1..=12 {
         let instance = format!("202601{day:02}T010203.004Z-p{}", 900_000_000 + day);
         fs::write(log_dir.join(format!("aics-{instance}.log")), "old main")?;
+        fs::write(
+            log_dir.join(format!("aics-{instance}.log.2026-01-{day:02}")),
+            "daily main",
+        )?;
         fs::write(
             log_dir.join(format!("summarizer-errors-{instance}.log.1")),
             "old summary",
@@ -241,11 +181,17 @@ fn active_instances(log_dir: &Path, prefix: &str) -> Result<BTreeSet<String>> {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if let Some(instance) = name
+        if let Some((instance, suffix)) = name
             .strip_prefix(prefix)
-            .and_then(|name| name.strip_suffix(".log"))
+            .and_then(|name| name.split_once(".log"))
         {
-            instances.insert(instance.to_owned());
+            if suffix.is_empty()
+                || suffix.strip_prefix('.').is_some_and(|date| {
+                    date.len() == 10 && chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok()
+                })
+            {
+                instances.insert(instance.to_owned());
+            }
         }
     }
     Ok(instances)

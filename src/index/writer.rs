@@ -11,11 +11,11 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use directories::BaseDirs;
-use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tantivy::directory::error::LockError;
 use tantivy::{Index, TantivyDocument, TantivyError, Term};
+use tracing::{debug, info, warn};
 
 use crate::conversation::{ConversationSource, HeaderCache, SessionHistory};
 use crate::index::reader::SearchEngine;

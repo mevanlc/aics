@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
-use log::{debug, warn};
+use tracing::{debug, warn};
 
 use crate::logging::SUMMARY_ERROR_TARGET;
 use crate::summary::sidecar::{sidecar_path, SummarySidecar};
@@ -115,8 +115,9 @@ fn worker_loop(rx: Receiver<SummaryCommand>, tx: Sender<SummaryEvent>) {
                 let msg = format!("{error:#}");
                 warn!(
                     target: SUMMARY_ERROR_TARGET,
-                    "session={} error={error:#}",
-                    path.display()
+                    session = %path.display(),
+                    error = %format_args!("{error:#}"),
+                    "summary failed"
                 );
                 SummaryEvent::Failed {
                     path: path.clone(),

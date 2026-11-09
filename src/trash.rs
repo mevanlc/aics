@@ -8,8 +8,8 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use directories::BaseDirs;
-use log::warn;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::parse::Agent;
 

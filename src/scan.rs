@@ -7,9 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use directories::BaseDirs;
-use log::warn;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracing::warn;
 use url::Url;
 
 use crate::parse::session::{system_time_or_epoch, Agent};

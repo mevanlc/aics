@@ -159,7 +159,7 @@ The built-in logging configuration defaults to `warn`; set `RUST_LOG` to enable
 more diagnostics. Interactive sessions write per-process rolling files under
 the AICS configuration directory, while command and JSON modes log to stderr.
 
-[Learn more about log files and log4rs configuration.](docs/logging.md)
+[Learn more about log files, filtering, and retention.](docs/logging.md)
 
 ## Development and releases
 

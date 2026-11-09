@@ -60,7 +60,7 @@ impl DependencyGraphs {
             None => {
                 let start = std::time::Instant::now();
                 let graph = DependencyGraph::discover(roots, agent, &seeds)?;
-                log::debug!(
+                tracing::debug!(
                     "rules: discovered {agent:?} dependency graph ({} members, {} errors) in {:?}",
                     graph.members.len(),
                     graph.errors.len(),

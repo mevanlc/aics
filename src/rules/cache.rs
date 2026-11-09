@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use crc32fast::Hasher;
-use log::warn;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use super::RawRuleOutcome;
 use crate::index::StoredSession;

@@ -8,8 +8,8 @@ use anyhow::{bail, Result};
 use chrono::{Local, NaiveDate, TimeZone, Utc};
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use log::warn;
 use ratatui::style::Color;
+use tracing::warn;
 
 use aics::export::write_session_markdown;
 use aics::index::{

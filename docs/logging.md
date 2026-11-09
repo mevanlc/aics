@@ -1,7 +1,8 @@
 # Logging
 
-AICS uses log4rs behind the standard Rust `log` facade. Its built-in logging
-configuration defaults to `warn`.
+AICS uses `tracing` events, `tracing-subscriber` for formatting and filtering,
+and `tracing-appender` for background file output. Dependency messages emitted
+through Rust's `log` facade are forwarded into the same subscriber.
 
 ## Log levels
 
@@ -10,58 +11,67 @@ Set `RUST_LOG` to enable global or module-specific diagnostics:
 ```bash
 RUST_LOG=debug aics
 RUST_LOG=aics=debug,tantivy=warn aics
+RUST_LOG=off aics
 ```
 
-An invalid `RUST_LOG` value produces a startup warning and safely falls back to
-`warn`.
+Missing or empty `RUST_LOG` defaults to `warn`. Invalid directives produce a
+startup warning and fall back to `warn`. Filtering uses tracing-subscriber's
+native [EnvFilter syntax](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives),
+including target, span, and field directives. The former env_logger-style
+`level/message-regex` syntax is no longer supported.
+
+Log output is readable text with UTC timestamps, level, thread name/ID, target,
+and event fields. ANSI colors are disabled for both files and stderr.
 
 ## Interactive log files
 
-Interactive TUI processes write separate rolling files under the AICS
-configuration directory so simultaneous instances never share a file:
+Each interactive TUI process writes separate daily files under the AICS
+configuration directory, so simultaneous instances never share a file:
 
 ```text
-logs/aics-<UTC-startup-timestamp>-p<PID>.log
-logs/aics-<UTC-startup-timestamp>-p<PID>.log.<archive-index>
-logs/summarizer-errors-<UTC-startup-timestamp>-p<PID>.log
-logs/summarizer-errors-<UTC-startup-timestamp>-p<PID>.log.<archive-index>
+logs/aics-<UTC-startup-timestamp>-p<PID>.log.YYYY-MM-DD
+logs/summarizer-errors-<UTC-startup-timestamp>-p<PID>.log.YYYY-MM-DD
 ```
 
-The main file rolls at 2 MiB and keeps two archives. The summary-error file
-rolls at 1 MiB and keeps one archive.
+Files rotate on the first write after midnight UTC. Each process retains up to
+3 daily main files and 2 daily summary-error files, including the current files.
+These are file-count limits, not age or byte limits; verbose logging can make a
+single day's file large.
 
 At startup, AICS takes one system process snapshot and removes the oldest log
 groups for processes that are definitely no longer running until at most 10
 groups remain. More than 10 groups are retained when their PIDs are still live
-or cannot be checked safely. When available, process start times distinguish an
-old log group from a newer process that reused its PID; an unavailable start
-time is handled conservatively by retaining the group.
+or cannot be checked safely. Process start times distinguish an old log group
+from a newer process that reused its PID; unavailable start times are handled
+conservatively. Cleanup also recognizes the previous numbered-archive filenames.
+Unrelated files are left alone.
 
-Built-in command and JSON modes send diagnostics to stderr, leaving stdout safe
-for JSONL and other command output. `AICS_CONFIG_ROOT` relocates the log
-directory and logging configuration along with `settings.json`.
+Main and summary files use independent bounded queues with the appender's default
+capacity. Ordinary diagnostics may be dropped when their queue fills, keeping
+the TUI responsive. Summary failures at warn/error always go to the dedicated
+summary file, even with `RUST_LOG=off`; that queue waits for space instead of
+dropping failures. They also reach the main output when its filter permits.
+
+The logging handle drains queued records during normal shutdown, early error
+returns, and panic unwinding, subject to the appender's bounded shutdown wait.
+Records are buffered rather than written immediately. This is not an fsync
+guarantee: a stalled writer, forced termination, process abort, power loss, or
+disk errors can still lose records.
+
+## Command output and failures
+
+Command and JSON modes send diagnostics synchronously to stderr, leaving stdout
+safe for JSONL and other command output. `AICS_CONFIG_ROOT` relocates the log
+directory along with `settings.json`.
 
 If an interactive file sink cannot be opened, AICS reports the problem before
 entering the TUI and falls back to stderr for the main route. If only the
 dedicated summary sink is unavailable, summary failures can still reach the main
-route when its `RUST_LOG` filter enables them.
+route when its `RUST_LOG` filter enables them. The upstream rolling appender may
+print rotation or retention failures directly to stderr while the TUI is running.
 
-## Custom log4rs configuration
-
-For full customization, copy the checked-in reference configuration:
-
-```bash
-mkdir -p ~/.config/aics
-cp examples/log4rs.yaml ~/.config/aics/log4rs.yaml
-```
-
-When `{config_dir}/log4rs.yaml` exists and is valid, it is authoritative: its
-levels, filters, destinations, and retention replace the built-in configuration
-and `RUST_LOG`. The file is read once per launch. If it is malformed, AICS prints
-a startup warning and falls back to the built-in configuration.
-
-The reference file intentionally routes every mode to per-process files. Custom
-configurations should never log to stdout because that can corrupt JSONL output.
+`RUST_LOG` is the sole logging configuration. The former `log4rs.yaml` override
+is no longer loaded, and `AICS_LOG_DIR`/`AICS_LOG_INSTANCE` are no longer exported.
 
 Diagnostic logs can contain local paths and expanded summarizer commands. Review
 and redact them before sharing.

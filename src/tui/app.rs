@@ -9,7 +9,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use log::{debug, trace, warn};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -24,6 +23,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
+use tracing::{debug, trace, warn};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
@@ -632,7 +632,7 @@ impl App {
             .iter()
             .filter(|skip| skip.indeterminate)
         {
-            log::warn!("rules excluded {}: {}", skip.path.display(), skip.reason);
+            tracing::warn!("rules excluded {}: {}", skip.path.display(), skip.reason);
         }
         let preview_state = RulesPreviewState::from_report(report);
         if !preview_state.errors.is_empty() {

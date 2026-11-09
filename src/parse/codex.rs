@@ -8,9 +8,9 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use log::warn;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use super::search_fields::{authored_user_text, SessionSearchFields};
 use super::session::{

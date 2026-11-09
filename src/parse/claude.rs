@@ -5,8 +5,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use log::warn;
 use serde_json::Value;
+use tracing::warn;
 
 use super::search_fields::{authored_user_text, SessionSearchFields, ToolCallSource};
 use super::session::{
@@ -894,6 +894,7 @@ mod tests {
         is_local_command_caveat_entry, normalize_claude_text, parse_claude_session_file,
         MessageRole, SessionCell,
     };
+    use test_log::test;
 
     #[test]
     fn normalizes_claude_local_command_wrappers() {

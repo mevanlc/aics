@@ -9,12 +9,13 @@ use anyhow::{bail, Result};
 use tempfile::TempDir;
 
 #[test]
-fn summary_failure_is_durable_even_when_rust_log_is_off() -> Result<()> {
+fn summary_failure_is_flushed_even_when_rust_log_is_off() -> Result<()> {
     let temp = TempDir::new()?;
     std::env::set_var("AICS_CONFIG_ROOT", temp.path().join("config"));
     std::env::set_var("RUST_LOG", "off");
+    let first_date = chrono::Utc::now().date_naive();
     let logging = logging::init(LoggingMode::Interactive)?;
-    let paths = logging.paths.as_ref().expect("built-in managed paths");
+    let paths = logging.paths.clone().expect("built-in managed paths");
 
     let missing_session = temp.path().join("missing-session.jsonl");
     let worker = SummaryWorker::spawn()?;
@@ -45,11 +46,26 @@ fn summary_failure_is_durable_even_when_rust_log_is_off() -> Result<()> {
         thread::sleep(Duration::from_millis(10));
     }
 
-    let summary = fs::read_to_string(&paths.summary_errors)?;
+    drop(worker);
+    drop(logging);
+    let dates = [first_date, chrono::Utc::now().date_naive()]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut summary = String::new();
+    for date in dates {
+        let summary_path = paths.summary_errors_for_date(date);
+        if summary_path.exists() {
+            summary.push_str(&fs::read_to_string(summary_path)?);
+        }
+        let main_path = paths.main_for_date(date);
+        if main_path.exists() {
+            assert_eq!(fs::read_to_string(main_path)?, "");
+        }
+    }
     assert!(summary.contains(&format!("session={}", missing_session.display())));
     assert!(summary.contains("error=jsonl does not exist"));
     assert!(summary.ends_with('\n'));
     assert!(!summary.ends_with("\n\n"));
-    assert_eq!(fs::read_to_string(&paths.main)?, "");
+
     Ok(())
 }

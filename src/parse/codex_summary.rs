@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use log::warn;
+use tracing::warn;
 
 const ROLLOUT_SUMMARIES_DIR: &str = "rollout_summaries";
 
@@ -144,6 +144,7 @@ fn read_codex_autosummary_file(path: &Path) -> Result<Option<CodexAutosummary>> 
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+    use test_log::test;
 
     use tempfile::TempDir;
 

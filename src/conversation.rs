@@ -347,12 +347,12 @@ pub(crate) fn logical_files(
     let home = codex_home(roots);
     let names = crate::parse::codex::read_codex_thread_names(&home.join("sessions"))
         .unwrap_or_else(|error| {
-            log::warn!("Codex conversation names unavailable: {error:#}");
+            tracing::warn!("Codex conversation names unavailable: {error:#}");
             Arc::new(HashMap::new())
         });
     let archive = home.join("archived_sessions");
     let selections = read_selections(home, None).unwrap_or_else(|error| {
-        log::warn!("Codex current history selection unavailable: {error:#}");
+        tracing::warn!("Codex current history selection unavailable: {error:#}");
         HashMap::new()
     });
     let mut physical = files
@@ -365,7 +365,7 @@ pub(crate) fn logical_files(
         .map(|file| file.path.clone())
         .collect::<HashSet<_>>();
     if let Err(error) = archive_files(&archive, &mut physical) {
-        log::warn!("cannot discover archived Codex history: {error:#}");
+        tracing::warn!("cannot discover archived Codex history: {error:#}");
     }
     physical.sort_by(|left, right| left.path.cmp(&right.path));
     physical.dedup_by(|left, right| left.path == right.path);
@@ -384,7 +384,7 @@ pub(crate) fn logical_files(
         let stamp = match SourceStamp::read(&file.path) {
             Ok(stamp) => stamp,
             Err(error) => {
-                log::warn!("cannot inspect {}: {error:#}", file.path.display());
+                tracing::warn!("cannot inspect {}: {error:#}", file.path.display());
                 continue;
             }
         };
@@ -397,7 +397,7 @@ pub(crate) fn logical_files(
             None => match read_metadata(&file) {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    log::warn!(
+                    tracing::warn!(
                         "cannot read Codex metadata {}: {error:#}",
                         file.path.display()
                     );

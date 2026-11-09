@@ -203,7 +203,7 @@ fn walk(path: &Path, agent: Agent, out: &mut Vec<PathBuf>, errors: &mut Vec<Stri
         if agent == Agent::Codex {
             errors.push(message);
         } else {
-            log::warn!("lifecycle discovery: {message}");
+            tracing::warn!("lifecycle discovery: {message}");
         }
     };
     let entries = match fs::read_dir(path) {
@@ -526,7 +526,7 @@ impl DependencyGraph {
         if agent == Agent::Codex {
             self.errors.push(message);
         } else {
-            log::debug!("lifecycle discovery: {message}");
+            tracing::debug!("lifecycle discovery: {message}");
             self.member_errors.insert(path.into(), message);
         }
     }

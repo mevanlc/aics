@@ -132,8 +132,9 @@ command cannot be started, the command exits unsuccessfully, the output file is
 missing, or the generated output is empty. The TUI reports the failure in its
 status line.
 
-Failures are also sent to the dedicated summary-error log, which remains durable
-even when ordinary `RUST_LOG` filtering is disabled. See [Logging](logging.md)
-for file locations, retention, and custom log4rs configuration.
+Failures are also queued to the dedicated summary-error log, independently of
+ordinary `RUST_LOG` filtering. The summary queue waits for space rather than
+dropping failures, and buffered records flush during normal application teardown.
+See [Logging](logging.md) for file locations, retention, and buffering limits.
 
 [Back to the README.](../README.md#session-summaries)

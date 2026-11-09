@@ -12,8 +12,8 @@ use boa_engine::{
     js_string, Context as BoaContext, JsArgs, JsNativeError, JsResult as BoaJsResult, JsString,
     JsValue, NativeFunction, Source,
 };
-use log::{debug, warn};
 use serde::{Deserialize, Serialize};
+use tracing::{debug, warn};
 
 use crate::index::reader::fallback_snippet;
 use crate::index::{Scope, SearchFilters, SearchHit, StoredSession, TrashFilter};
