@@ -1,12 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::env;
-use std::fs;
-use std::io::{self, Write};
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -32,7 +31,7 @@ impl TrashPaths {
                     .data_dir()
                     .join("aics")
             };
-        Ok(Self::from_data_root(data_root))
+        Ok(Self::from_data_root(std::path::absolute(data_root)?))
     }
 
     pub fn from_data_root(data_root: impl Into<PathBuf>) -> Self {
@@ -44,14 +43,6 @@ impl TrashPaths {
             data_root,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TrashEntry {
-    pub ts: String,
-    pub nm: String,
-    pub op: String,
-    pub tn: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,26 +66,277 @@ pub enum TrashReason {
     },
 }
 
+pub const TRASH_SCHEMA_VERSION: u32 = 1;
+pub(crate) const METADATA_NAME: &str = "metadata.json";
+pub(crate) const ITEM_PREFIX: &str = "item-";
+pub(crate) const ITEM_ID_LEN: usize = 16;
+pub(crate) const SCRATCH_PREFIX: &str = ".aics-trash-";
+pub(crate) const LEGACY_METADATA_DIR: &str = ".legacy-migration";
+pub(crate) const SCHEMAS_DIR: &str = ".schemas";
+
+/// Paths in the payload are relative to the item directory. A missing original
+/// path represents a legacy item whose destination could not be recovered.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TrashRecord {
-    pub trashed_at: String,
-    pub original_path: String,
-    pub agent: String,
-    pub reason: TrashReason,
+pub struct TrashMember {
+    #[serde(serialize_with = "serialize_stored_path")]
+    pub stored_path: PathBuf,
+    pub original_path: Option<PathBuf>,
 }
 
-impl TrashEntry {
-    pub fn agent(&self) -> Option<Agent> {
-        Agent::from_str(&self.tn).ok()
-    }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrashMetadata {
+    pub schema_version: u32,
+    pub agent: Option<Agent>,
+    pub trashed_at: Option<String>,
+    #[serde(serialize_with = "serialize_session_path")]
+    pub session_path: Option<PathBuf>,
+    pub members: Vec<TrashMember>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<TrashReason>,
+}
 
-    pub fn trash_path(&self, paths: &TrashPaths) -> PathBuf {
-        paths.trash_dir.join(&self.nm)
+fn stored_path_text(path: &Path) -> Option<String> {
+    path.iter()
+        .map(|part| part.to_str())
+        .collect::<Option<Vec<_>>>()
+        .map(|parts| parts.join("/"))
+}
+
+fn serialize_stored_path<S: serde::Serializer>(
+    path: &Path,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let text = stored_path_text(path)
+        .ok_or_else(|| serde::ser::Error::custom("non-UTF-8 payload path"))?;
+    serializer.serialize_str(&text)
+}
+
+fn serialize_session_path<S: serde::Serializer>(
+    path: &Option<PathBuf>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match path {
+        Some(path) => serialize_stored_path(path, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
+impl TrashMetadata {
+    fn empty() -> Self {
+        Self {
+            schema_version: TRASH_SCHEMA_VERSION,
+            agent: None,
+            trashed_at: None,
+            session_path: None,
+            members: Vec::new(),
+            reason: None,
+        }
     }
 
     pub fn original_path(&self) -> Option<PathBuf> {
-        (!self.op.trim().is_empty()).then(|| PathBuf::from(&self.op))
+        let session = self.session_path.as_ref()?;
+        let mut matches = self.members.iter().filter_map(|member| {
+            let suffix = session.strip_prefix(&member.stored_path).ok()?;
+            let original = member.original_path.as_ref()?;
+            Some(if suffix.as_os_str().is_empty() {
+                original.clone()
+            } else {
+                original.join(suffix)
+            })
+        });
+        let original = matches.next()?;
+        matches.next().is_none().then_some(original)
     }
+
+    fn validate_paths(&self) -> Result<()> {
+        if let Some(path) = &self.session_path {
+            ensure_payload_path(path)?;
+        }
+        for (i, member) in self.members.iter().enumerate() {
+            ensure_payload_path(&member.stored_path)?;
+            if let Some(original) = &member.original_path {
+                ensure_original_path(original)?;
+            }
+            anyhow::ensure!(
+                !self.members[..i].iter().any(|other| {
+                    member.stored_path.starts_with(&other.stored_path)
+                        || other.stored_path.starts_with(&member.stored_path)
+                }),
+                "overlapping trash payload mappings"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TrashItem {
+    pub path: PathBuf,
+    pub primary: Option<PathBuf>,
+    pub metadata: TrashMetadata,
+    /// Source and item-relative destination for each legacy payload to copy.
+    pub(crate) legacy_copies: Option<Vec<(PathBuf, PathBuf)>>,
+}
+
+impl TrashItem {
+    pub fn original_path(&self) -> Option<PathBuf> {
+        self.metadata.original_path()
+    }
+
+    pub(crate) fn restore_pairs(&self) -> Result<Vec<(PathBuf, PathBuf)>> {
+        anyhow::ensure!(
+            self.legacy_copies.is_none(),
+            "trash item still needs migration"
+        );
+        let agent = self.metadata.agent.context("unknown trash item provider")?;
+        let source = self.primary.as_ref().context("unknown trash transcript")?;
+        let original = self.original_path().context("original path is unknown")?;
+        anyhow::ensure!(
+            is_native_filename(&original, agent) && source.file_name() == original.file_name(),
+            "original path does not match the native session filename"
+        );
+        let (base, paths) = native_payload(agent, source)?;
+        let original_base = native_base(agent, &original)?;
+        let mut pairs = Vec::new();
+        for path in paths {
+            let suffix = path.strip_prefix(&base)?;
+            let target = if agent != Agent::Antigravity && path == *source {
+                original.clone()
+            } else if agent != Agent::Antigravity {
+                crate::summary::sidecar_path(&original)
+            } else {
+                original_base.join(suffix)
+            };
+            let stored = path.strip_prefix(&self.path)?;
+            let is_summary = path == crate::summary::sidecar_path(source);
+            anyhow::ensure!(
+                self.metadata.members.iter().any(|m| {
+                    m.stored_path == stored && m.original_path.as_ref() == Some(&target)
+                }) || is_summary,
+                "missing or invalid restore mapping for {}",
+                path.display()
+            );
+            pairs.push((path, target));
+        }
+        // A summary may have been generated in trash or removed since the move.
+        // Every other recorded payload must still exist before we retire the item.
+        for member in &self.metadata.members {
+            let path = self.path.join(&member.stored_path);
+            anyhow::ensure!(
+                path == crate::summary::sidecar_path(source)
+                    || pairs.iter().any(|(stored, _)| stored == &path),
+                "unexpected or missing trash payload {}",
+                path.display()
+            );
+        }
+        check_payload_coverage(&self.path.join("payload"), &pairs)?;
+        for path in children(&self.path)? {
+            anyhow::ensure!(
+                path.file_name()
+                    .is_some_and(|name| name == METADATA_NAME || name == "payload"),
+                "unexpected file in trash item {}",
+                path.display()
+            );
+        }
+        Ok(pairs)
+    }
+}
+
+fn check_payload_coverage(path: &Path, pairs: &[(PathBuf, PathBuf)]) -> Result<()> {
+    if pairs.iter().any(|(source, _)| source == path) {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        fs::symlink_metadata(path)?.is_dir(),
+        "unmapped trash payload {}",
+        path.display()
+    );
+    for entry in fs::read_dir(path)? {
+        check_payload_coverage(&entry?.path(), pairs)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_original_path(path: &Path) -> Result<()> {
+    use std::path::Component;
+    anyhow::ensure!(
+        path.is_absolute()
+            && path.to_str().is_some()
+            && !path
+                .components()
+                .any(|c| matches!(c, Component::ParentDir | Component::CurDir)),
+        "invalid original path {}",
+        path.display()
+    );
+    Ok(())
+}
+
+fn ensure_payload_path(path: &Path) -> Result<()> {
+    use std::path::Component;
+    anyhow::ensure!(
+        path.starts_with("payload")
+            && path.components().count() > 1
+            && path.to_str().is_some()
+            && path.components().all(|c| matches!(c, Component::Normal(_))),
+        "invalid trash payload path {}",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Enumerate the exact files or directories covered by the native session.
+pub(crate) fn native_payload(agent: Agent, primary: &Path) -> Result<(PathBuf, Vec<PathBuf>)> {
+    if agent == Agent::Antigravity {
+        let bundle = AntigravityBundlePaths::from_transcript(primary)?;
+        let mut paths = bundle.database_paths()?;
+        paths.insert(0, bundle.conversation_dir);
+        Ok((bundle.home, paths))
+    } else {
+        let mut paths = vec![primary.to_path_buf()];
+        let summary = crate::summary::sidecar_path(primary);
+        if exists(&summary)? {
+            paths.push(summary);
+        }
+        Ok((native_base(agent, primary)?, paths))
+    }
+}
+
+fn native_base(agent: Agent, primary: &Path) -> Result<PathBuf> {
+    if agent == Agent::Antigravity {
+        Ok(AntigravityBundlePaths::from_transcript(primary)?.home)
+    } else {
+        Ok(primary
+            .parent()
+            .context("session has no parent")?
+            .to_path_buf())
+    }
+}
+
+pub(crate) fn new_item(
+    agent: Agent,
+    primary: &Path,
+    reason: TrashReason,
+) -> Result<(TrashMetadata, Vec<PathBuf>)> {
+    ensure_original_path(primary)?;
+    let (base, sources) = native_payload(agent, primary)?;
+    let metadata = TrashMetadata {
+        schema_version: TRASH_SCHEMA_VERSION,
+        agent: Some(agent),
+        trashed_at: Some(chrono::Utc::now().to_rfc3339()),
+        session_path: Some(Path::new("payload").join(primary.strip_prefix(&base)?)),
+        members: sources
+            .iter()
+            .map(|path| {
+                Ok(TrashMember {
+                    stored_path: Path::new("payload").join(path.strip_prefix(&base)?),
+                    original_path: Some(crate::lifecycle::resolved_path(path)),
+                })
+            })
+            .collect::<Result<_>>()?,
+        reason: Some(reason),
+    };
+    metadata.validate_paths()?;
+    Ok((metadata, sources))
 }
 
 #[derive(Debug, Clone)]
@@ -103,389 +345,375 @@ pub struct TrashStore {
 }
 
 impl TrashStore {
-    pub fn discover() -> Result<Self> {
-        Ok(Self::new(TrashPaths::discover()?))
-    }
-
     pub fn new(paths: TrashPaths) -> Self {
         Self { paths }
     }
 
-    pub fn paths(&self) -> &TrashPaths {
-        &self.paths
+    /// Discovery never changes trash. Flat legacy entries can coexist with
+    /// migrated items until the last migration transaction finishes.
+    pub fn snapshot(&self) -> Result<Vec<TrashItem>> {
+        let mut items = self.legacy_items()?;
+        for path in children(&self.paths.trash_dir)? {
+            if is_item(&path) {
+                items.push(read_item(path));
+            }
+        }
+        Ok(items)
     }
 
-    pub fn sync(&self) -> Result<Vec<TrashEntry>> {
-        fs::create_dir_all(&self.paths.data_root)?;
-        let lock = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(self.paths.data_root.join("lifecycle.lock"))?;
-        lock.try_lock()
-            .context("another AICS lifecycle operation is running")?;
-        fs::create_dir_all(&self.paths.trash_dir)
-            .with_context(|| format!("failed to create {}", self.paths.trash_dir.display()))?;
-        if let Some(parent) = self.paths.metadata_file.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+    pub(crate) fn legacy_items(&self) -> Result<Vec<TrashItem>> {
+        let paths = children(&self.paths.trash_dir)?
+            .into_iter()
+            .filter(|path| !is_item(path) && !is_reserved(path))
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            return Ok(Vec::new());
         }
+        let entries = legacy_entries(&self.paths.metadata_file)?;
+        let reasons = legacy_reasons(&self.paths.reasons_file)?;
+        paths
+            .iter()
+            .filter(|path| {
+                let is_paired_summary = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| n.strip_suffix(crate::summary::sidecar::SIDECAR_SUFFIX))
+                    .is_some_and(|name| paths.iter().any(|p| p == &path.with_file_name(name)));
+                !is_paired_summary
+            })
+            .map(|path| {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .context("non-UTF-8 legacy trash name")?;
+                legacy_item(path, entries.get(name), reasons.get(name))
+            })
+            .collect()
+    }
+}
 
-        let entries = self.snapshot()?;
-        write_metadata(&self.paths.metadata_file, &entries)?;
-        Ok(entries)
+pub(crate) fn is_item(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix(ITEM_PREFIX))
+        .is_some_and(|id| id.len() == ITEM_ID_LEN && id.bytes().all(|c| c.is_ascii_alphanumeric()))
+        && fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+}
+
+pub(crate) fn is_reserved(path: &Path) -> bool {
+    path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+        n == LEGACY_METADATA_DIR || n == SCHEMAS_DIR || n.starts_with(SCRATCH_PREFIX)
+    })
+}
+
+pub(crate) fn children(path: &Path) -> Result<Vec<PathBuf>> {
+    let iter = match fs::read_dir(path) {
+        Ok(iter) => iter,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("cannot list {}", path.display())),
+    };
+    let mut paths = iter
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<io::Result<Vec<_>>>()?;
+    paths.sort();
+    Ok(paths)
+}
+
+pub(crate) fn exists(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+fn read_item(path: PathBuf) -> TrashItem {
+    let parsed = (|| -> Result<TrashMetadata> {
+        let metadata_path = path.join(METADATA_NAME);
+        anyhow::ensure!(
+            fs::symlink_metadata(&metadata_path)?.is_file(),
+            "metadata must be a regular file"
+        );
+        let mut value: serde_json::Value = serde_json::from_reader(File::open(metadata_path)?)?;
+        anyhow::ensure!(
+            value["schema_version"].as_u64() == Some(u64::from(TRASH_SCHEMA_VERSION)),
+            "unsupported trash metadata version"
+        );
+        // An invalid reason must not prevent recovery with valid path mappings.
+        if let Some(reason) = value.as_object_mut().and_then(|v| v.get_mut("reason")) {
+            if serde_json::from_value::<Option<TrashReason>>(reason.clone()).is_err() {
+                warn!("ignoring invalid trash reason for {}", path.display());
+                *reason = serde_json::Value::Null;
+            }
+        }
+        let metadata: TrashMetadata = serde_json::from_value(value)?;
+        metadata.validate_paths()?;
+        Ok(metadata)
+    })();
+    let mut metadata = parsed.unwrap_or_else(|e| {
+        warn!("cannot read trash metadata for {}: {e:#}", path.display());
+        TrashMetadata::empty()
+    });
+    let primary = metadata
+        .session_path
+        .as_ref()
+        .and_then(|p| regular_beneath(&path, p));
+    let primary = primary.or_else(|| {
+        let (primary, agent) = infer_primary(&path.join("payload"), metadata.agent)?;
+        // Browsing an inferred transcript must never invent a restore mapping.
+        metadata.session_path = None;
+        metadata.agent = Some(agent);
+        Some(primary)
+    });
+    TrashItem {
+        path,
+        primary,
+        metadata,
+        legacy_copies: None,
+    }
+}
+
+fn infer_primary(base: &Path, known_agent: Option<Agent>) -> Option<(PathBuf, Agent)> {
+    if !fs::symlink_metadata(base).is_ok_and(|m| m.is_dir()) {
+        return None;
+    }
+    let mut candidates = Vec::new();
+    let brain = base.join("brain");
+    if fs::symlink_metadata(&brain).is_ok_and(|m| m.is_dir()) {
+        for dir in children(&brain).ok()? {
+            let transcript = dir.join(".system_generated/logs/transcript.jsonl");
+            if let Some(path) = regular_beneath(base, transcript.strip_prefix(base).ok()?) {
+                candidates.push((path, Agent::Antigravity));
+            }
+        }
+    }
+    for path in children(base).ok()? {
+        if let Some(agent) = infer_file_agent(&path, known_agent) {
+            candidates.push((path, agent));
+        }
+    }
+    candidates.retain(|(_, agent)| known_agent.is_none_or(|known| known == *agent));
+    (candidates.len() == 1).then(|| candidates.remove(0))
+}
+
+fn regular_beneath(base: &Path, relative: &Path) -> Option<PathBuf> {
+    let mut path = base.to_path_buf();
+    let mut parts = relative.components().peekable();
+    while let Some(std::path::Component::Normal(part)) = parts.next() {
+        path.push(part);
+        let meta = fs::symlink_metadata(&path).ok()?;
+        if parts.peek().is_none() {
+            return meta.is_file().then_some(path);
+        }
+        if !meta.is_dir() {
+            return None;
+        }
+    }
+    None
+}
+
+fn infer_file_agent(path: &Path, known_agent: Option<Agent>) -> Option<Agent> {
+    if !fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?;
+    if name.ends_with(".jsonl.zst") {
+        return Some(Agent::Codex);
+    }
+    if !name.ends_with(".jsonl") {
+        return None;
+    }
+    if let Some(agent @ (Agent::Codex | Agent::Claude)) = known_agent {
+        return Some(agent);
+    }
+    let reader = BufReader::new(File::open(path).ok()?);
+    for (i, line) in reader.lines().take(32).enumerate() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line.ok()?) else {
+            continue;
+        };
+        if value["type"] == "session_meta"
+            || (i == 0
+                && value.get("type").is_none()
+                && value["id"].is_string()
+                && value["timestamp"].is_string())
+        {
+            return Some(Agent::Codex);
+        }
+        if value["sessionId"].is_string() {
+            return Some(Agent::Claude);
+        }
+    }
+    name.starts_with("rollout-").then_some(Agent::Codex)
+}
+
+fn legacy_entries(path: &Path) -> Result<BTreeMap<String, serde_json::Value>> {
+    let mut entries = BTreeMap::new();
+    if !exists(path)? {
+        return Ok(entries);
+    }
+    anyhow::ensure!(
+        fs::symlink_metadata(path)?.is_file(),
+        "legacy catalog is not a file"
+    );
+    // Read bytes per line so a bad UTF-8 record cannot hide later good records.
+    for (i, line) in BufReader::new(File::open(path)?).split(b'\n').enumerate() {
+        let line = line?;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_slice(&line) {
+            Ok(value) => value,
+            Err(e) => {
+                warn!(
+                    "invalid legacy trash record {}:{}: {e}",
+                    path.display(),
+                    i + 1
+                );
+                continue;
+            }
+        };
+        if let Some(name) = value["nm"].as_str() {
+            if let Some(previous) = entries.get(name) {
+                if previous != &value {
+                    warn!("conflicting legacy trash records for {name}");
+                    entries.insert(name.to_owned(), serde_json::Value::Null);
+                }
+            } else {
+                entries.insert(name.to_owned(), value);
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn legacy_reasons(path: &Path) -> Result<serde_json::Value> {
+    if !exists(path)? {
+        return Ok(serde_json::Value::Null);
+    }
+    anyhow::ensure!(
+        fs::symlink_metadata(path)?.is_file(),
+        "legacy reason catalog is not a file"
+    );
+    Ok(
+        serde_json::from_reader(File::open(path)?).unwrap_or_else(|e| {
+            warn!("invalid legacy trash reasons {}: {e}", path.display());
+            serde_json::Value::Null
+        }),
+    )
+}
+
+fn legacy_item(
+    path: &Path,
+    catalog: Option<&serde_json::Value>,
+    reason: Option<&serde_json::Value>,
+) -> Result<TrashItem> {
+    let entry = catalog.unwrap_or(&serde_json::Value::Null);
+    let provenance = reason.unwrap_or(&serde_json::Value::Null);
+    let mut metadata = TrashMetadata::empty();
+    let known_agent = entry["tn"].as_str().and_then(|s| Agent::from_str(s).ok());
+    let reason_agent = provenance["agent"]
+        .as_str()
+        .and_then(|s| Agent::from_str(s).ok());
+    let original = |v: &serde_json::Value| {
+        v.as_str()
+            .map(PathBuf::from)
+            .filter(|p| ensure_original_path(p).is_ok())
+    };
+    let catalog_path = original(&entry["op"]);
+    let reason_path = original(&provenance["original_path"]);
+    let consistent = !catalog.is_some_and(serde_json::Value::is_null)
+        && catalog_path
+            .as_ref()
+            .zip(reason_path.as_ref())
+            .is_none_or(|(a, b)| a == b)
+        && known_agent.zip(reason_agent).is_none_or(|(a, b)| a == b);
+    let original = consistent.then(|| catalog_path.or(reason_path)).flatten();
+    metadata.trashed_at = entry["ts"]
+        .as_str()
+        .or_else(|| provenance["trashed_at"].as_str())
+        .filter(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
+        .map(str::to_owned);
+    if consistent {
+        metadata.reason = serde_json::from_value(provenance["reason"].clone()).unwrap_or_default();
     }
 
-    /// Reconcile the catalog in memory. Callers refreshing an index hold the
-    /// shared lifecycle guard; discovery never rewrites the user's trash data.
-    pub fn snapshot(&self) -> Result<Vec<TrashEntry>> {
-        let mut by_name = BTreeMap::new();
-        for entry in read_metadata(&self.paths.metadata_file)? {
-            by_name.insert(entry.nm.clone(), entry);
+    let stat = fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        stat.is_dir() || stat.is_file(),
+        "unsupported legacy trash entry {}",
+        path.display()
+    );
+    let mut copies = Vec::new();
+    let mut primary = None;
+    if stat.is_dir() {
+        let inferred = infer_primary(path, Some(Agent::Antigravity));
+        if let Some((transcript, agent)) = inferred {
+            metadata.agent = Some(agent);
+            let archived = AntigravityBundlePaths::from_transcript(&transcript)?;
+            let orig = original
+                .as_deref()
+                .and_then(|p| AntigravityBundlePaths::from_transcript(p).ok())
+                .filter(|p| p.session_id == archived.session_id);
+            metadata.session_path = Some(Path::new("payload").join(transcript.strip_prefix(path)?));
+            primary = Some(transcript.clone());
+            let (_, parts) = native_payload(agent, &transcript)?;
+            for part in parts {
+                let suffix = part.strip_prefix(path)?;
+                metadata.members.push(TrashMember {
+                    stored_path: Path::new("payload").join(suffix),
+                    original_path: orig.as_ref().map(|b| b.home.join(suffix)),
+                });
+            }
         }
-
-        let discovered = discovered_names(&self.paths.trash_dir)?;
-        by_name.retain(|name, _| discovered.contains(name));
-
-        for name in &discovered {
-            by_name.entry(name.clone()).or_insert_with(|| TrashEntry {
-                ts: now_timestamp(),
-                nm: name.clone(),
-                op: String::new(),
-                tn: String::new(),
-            });
-        }
-
-        Ok(by_name.into_values().collect())
-    }
-
-    pub fn trash_session(
-        &self,
-        path: &Path,
-        agent: Agent,
-        reason: &TrashReason,
-    ) -> Result<TrashEntry> {
-        match agent {
-            Agent::Antigravity => self.trash_antigravity_bundle(path, reason),
-            Agent::Claude | Agent::Codex => self.trash_file(path, agent, reason),
-        }
-    }
-
-    pub fn trash_file(
-        &self,
-        path: &Path,
-        agent: Agent,
-        reason: &TrashReason,
-    ) -> Result<TrashEntry> {
-        let mut entries = self.sync()?;
-        fs::create_dir_all(&self.paths.trash_dir)
-            .with_context(|| format!("failed to create {}", self.paths.trash_dir.display()))?;
-
-        let file_name = path
+        copies.push((path.to_path_buf(), PathBuf::from("payload")));
+    } else {
+        metadata.agent = infer_file_agent(path, known_agent.or(reason_agent));
+        let original = original.filter(|p| {
+            metadata
+                .agent
+                .is_some_and(|agent| is_native_filename(p, agent))
+        });
+        let name = original
+            .as_deref()
+            .unwrap_or(path)
             .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.trim().is_empty())
-            .context("session path has no file name")?;
-        let occupied = entries
-            .iter()
-            .map(|entry| entry.nm.as_str())
-            .collect::<BTreeSet<_>>();
-        let trash_name = disambiguate_name(file_name, &occupied, &self.paths.trash_dir);
-        let trash_path = self.paths.trash_dir.join(&trash_name);
-
-        fs::copy(path, &trash_path).with_context(|| {
-            format!(
-                "failed to copy {} to {}",
-                path.display(),
-                trash_path.display()
-            )
-        })?;
-
-        let original_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let entry = TrashEntry {
-            ts: now_timestamp(),
-            nm: trash_name,
-            op: original_path.to_string_lossy().into_owned(),
-            tn: agent.as_str().to_owned(),
-        };
-        entries.push(entry.clone());
-        write_metadata(&self.paths.metadata_file, &entries)?;
-        self.record_reason(&entry, reason)?;
-        fs::remove_file(path)
-            .with_context(|| format!("failed to delete original {}", path.display()))?;
-        Ok(entry)
-    }
-
-    pub fn restore_file(&self, path: &Path) -> Result<PathBuf> {
-        let mut entries = self.sync()?;
-        let entry_index = find_entry_index(&entries, &self.paths, path)
-            .with_context(|| format!("trash metadata not found for {}", path.display()))?;
-        if entries[entry_index].agent() == Some(Agent::Antigravity) {
-            return self.restore_antigravity_bundle(entries, entry_index);
+            .context("missing trash filename")?;
+        let stored = Path::new("payload").join(name);
+        if metadata.agent.is_some() {
+            primary = Some(path.to_path_buf());
+            metadata.session_path = Some(stored.clone());
         }
-        let target = entries[entry_index]
-            .original_path()
-            .with_context(|| format!("original path is unknown for {}", path.display()))?;
-        let parent = target.parent().with_context(|| {
-            format!(
-                "restore target {} has no parent directory",
-                target.display()
-            )
-        })?;
-
-        if !parent.is_dir() {
-            anyhow::bail!("restore parent does not exist: {}", parent.display());
-        }
-        if target.exists() {
-            anyhow::bail!("restore target already exists: {}", target.display());
-        }
-
-        fs::copy(path, &target).with_context(|| {
-            format!(
-                "failed to restore {} to {}",
-                path.display(),
-                target.display()
-            )
-        })?;
-        if let Err(error) = fs::remove_file(path) {
-            let _ = fs::remove_file(&target);
-            return Err(error).with_context(|| {
-                format!("failed to remove restored trash item {}", path.display())
+        metadata.members.push(TrashMember {
+            stored_path: stored.clone(),
+            original_path: original.clone(),
+        });
+        copies.push((path.to_path_buf(), stored.clone()));
+        let sidecar = crate::summary::sidecar_path(path);
+        if exists(&sidecar)? {
+            let stored_path = crate::summary::sidecar_path(&stored);
+            metadata.members.push(TrashMember {
+                stored_path: stored_path.clone(),
+                original_path: original.as_deref().map(crate::summary::sidecar_path),
             });
-        }
-
-        let removed = entries.remove(entry_index);
-        self.forget_reason(&removed.nm);
-        if let Err(error) = write_metadata(&self.paths.metadata_file, &entries) {
-            warn!(
-                "failed to update trash metadata after restoring {}: {error:#}",
-                target.display()
-            );
-        }
-        Ok(target)
-    }
-
-    pub fn restore_target(&self, path: &Path) -> Result<PathBuf> {
-        let entries = self.sync()?;
-        let entry = find_entry_index(&entries, &self.paths, path)
-            .and_then(|index| entries.get(index))
-            .with_context(|| format!("trash metadata not found for {}", path.display()))?;
-        let original = entry
-            .original_path()
-            .with_context(|| format!("original path is unknown for {}", path.display()))?;
-        if entry.agent() == Some(Agent::Antigravity) {
-            return Ok(AntigravityBundlePaths::from_transcript(&original)?.conversation_dir);
-        }
-        Ok(original)
-    }
-
-    pub fn delete_session(&self, path: &Path, agent: Agent, trashed: bool) -> Result<()> {
-        if trashed {
-            let mut entries = self.sync()?;
-            if let Some(entry_index) = find_entry_index(&entries, &self.paths, path) {
-                let trash_path = entries[entry_index].trash_path(&self.paths);
-                remove_path(&trash_path)?;
-                let removed = entries.remove(entry_index);
-                self.forget_reason(&removed.nm);
-                if let Err(error) = write_metadata(&self.paths.metadata_file, &entries) {
-                    warn!(
-                        "failed to update trash metadata after deleting {}: {error:#}",
-                        trash_path.display()
-                    );
-                }
-                return Ok(());
-            }
-        }
-
-        match agent {
-            Agent::Antigravity => delete_session_immediately(path, agent),
-            Agent::Claude | Agent::Codex => fs::remove_file(path)
-                .with_context(|| format!("failed to delete {}", path.display())),
+            copies.push((sidecar, stored_path));
         }
     }
+    metadata.validate_paths()?;
+    Ok(TrashItem {
+        path: path.to_path_buf(),
+        primary,
+        metadata,
+        legacy_copies: Some(copies),
+    })
+}
 
-    fn trash_antigravity_bundle(&self, path: &Path, reason: &TrashReason) -> Result<TrashEntry> {
-        let bundle = AntigravityBundlePaths::from_transcript(path)?;
-        let original_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let mut entries = self.sync()?;
-        fs::create_dir_all(&self.paths.trash_dir)
-            .with_context(|| format!("failed to create {}", self.paths.trash_dir.display()))?;
-
-        let base_name = format!("{}.antigravity", bundle.session_id);
-        let occupied = entries
-            .iter()
-            .map(|entry| entry.nm.as_str())
-            .collect::<BTreeSet<_>>();
-        let trash_name = disambiguate_name(&base_name, &occupied, &self.paths.trash_dir);
-        let archive = self.paths.trash_dir.join(&trash_name);
-        let archived_bundle = AntigravityBundlePaths::in_archive(&archive, &bundle.session_id);
-
-        let mut moves = vec![(
-            bundle.conversation_dir.clone(),
-            archived_bundle.conversation_dir.clone(),
-        )];
-        let database_paths = bundle.database_paths()?;
-        moves.extend(database_paths.iter().map(|source| {
-            (
-                source.clone(),
-                archived_bundle
-                    .conversations_dir
-                    .join(source.file_name().expect("database path has a file name")),
-            )
-        }));
-
-        let entry = TrashEntry {
-            ts: now_timestamp(),
-            nm: trash_name,
-            op: original_path.to_string_lossy().into_owned(),
-            tn: Agent::Antigravity.as_str().to_owned(),
-        };
-        entries.push(entry.clone());
-        write_metadata(&self.paths.metadata_file, &entries)
-            .context("failed to record Antigravity trash metadata")?;
-        self.record_reason(&entry, reason)?;
-
-        if let Err(error) = move_all_or_rollback(&moves) {
-            if moves
-                .iter()
-                .all(|(source, target)| source.exists() && !target.exists())
-            {
-                entries.pop();
-                self.forget_reason(&entry.nm);
-                let _ = fs::remove_dir_all(&archive);
-                if let Err(metadata_error) = write_metadata(&self.paths.metadata_file, &entries) {
-                    warn!(
-                        "failed to remove rolled-back Antigravity trash metadata for {}: {metadata_error:#}",
-                        bundle.session_id
-                    );
-                }
-            }
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to move Antigravity conversation {} to Trash",
-                    bundle.session_id
-                )
-            });
-        }
-
-        Ok(entry)
-    }
-
-    fn restore_antigravity_bundle(
-        &self,
-        mut entries: Vec<TrashEntry>,
-        entry_index: usize,
-    ) -> Result<PathBuf> {
-        let entry = &entries[entry_index];
-        let original = entry.original_path().with_context(|| {
-            format!(
-                "original path is unknown for {}",
-                entry.trash_path(&self.paths).display()
-            )
-        })?;
-        let bundle = AntigravityBundlePaths::from_transcript(&original)?;
-        let archive = entry.trash_path(&self.paths);
-        let archived_bundle = AntigravityBundlePaths::in_archive(&archive, &bundle.session_id);
-        if bundle.conversation_dir.exists() {
-            anyhow::bail!(
-                "restore target already exists: {}",
-                bundle.conversation_dir.display()
-            );
-        }
-
-        if let Some(target) = bundle.database_paths()?.first() {
-            anyhow::bail!("restore target already exists: {}", target.display());
-        }
-        let archived_databases = archived_bundle.database_paths()?;
-
-        let mut moves = vec![(
-            archived_bundle.conversation_dir,
-            bundle.conversation_dir.clone(),
-        )];
-        moves.extend(archived_databases.into_iter().map(|source| {
-            let target = bundle
-                .conversations_dir
-                .join(source.file_name().expect("database path has a file name"));
-            (source, target)
-        }));
-        move_all_or_rollback(&moves).with_context(|| {
-            format!(
-                "failed to restore Antigravity conversation {}",
-                bundle.session_id
-            )
-        })?;
-
-        let _ = fs::remove_dir_all(&archive);
-        let removed = entries.remove(entry_index);
-        self.forget_reason(&removed.nm);
-        if let Err(error) = write_metadata(&self.paths.metadata_file, &entries) {
-            warn!(
-                "failed to update trash metadata after restoring {}: {error:#}",
-                bundle.conversation_dir.display()
-            );
-        }
-        Ok(original)
-    }
-
-    /// Older trash items have no reason record. Restoration uses trash.jsonl
-    /// independently, so missing or unreadable reasons never prevent recovery.
-    pub fn reasons(&self) -> Result<BTreeMap<String, TrashRecord>> {
-        match fs::read_to_string(&self.paths.reasons_file) {
-            Ok(contents) => serde_json::from_str(&contents)
-                .with_context(|| format!("failed to parse {}", self.paths.reasons_file.display())),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(BTreeMap::new()),
-            Err(error) => Err(error)
-                .with_context(|| format!("failed to read {}", self.paths.reasons_file.display())),
-        }
-    }
-
-    fn update_reasons(
-        &self,
-        update: impl FnOnce(&mut BTreeMap<String, TrashRecord>),
-    ) -> Result<()> {
-        fs::create_dir_all(&self.paths.data_root)?;
-        // Atomic replacement changes the JSON inode; serialize updates using
-        // a stable sibling so separate AICS processes preserve each other's records.
-        let lock = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(self.paths.reasons_file.with_extension("json.lock"))?;
-        lock.lock().context("failed to lock trash reasons")?;
-        let mut records = self.reasons()?;
-        update(&mut records);
-        crate::settings::write_atomic(
-            &self.paths.reasons_file,
-            &serde_json::to_string_pretty(&records)?,
-        )
-    }
-
-    fn record_reason(&self, entry: &TrashEntry, reason: &TrashReason) -> Result<()> {
-        self.update_reasons(|records| {
-            records.insert(
-                entry.nm.clone(),
-                TrashRecord {
-                    trashed_at: entry.ts.clone(),
-                    original_path: entry.op.clone(),
-                    agent: entry.tn.clone(),
-                    reason: reason.clone(),
-                },
-            );
-        })
-    }
-
-    fn forget_reason(&self, name: &str) {
-        if !self.paths.reasons_file.exists() {
-            return;
-        }
-        if let Err(error) = self.update_reasons(|records| {
-            records.remove(name);
-        }) {
-            warn!("failed to remove trash reason for {name}: {error:#}");
-        }
-    }
+pub(crate) fn is_native_filename(path: &Path, agent: Agent) -> bool {
+    path.extension().is_some_and(|e| e == "jsonl")
+        || (agent == Agent::Codex
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".jsonl.zst")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -528,28 +756,14 @@ impl AntigravityBundlePaths {
         })
     }
 
-    pub fn in_archive(archive: &Path, session_id: &str) -> Self {
-        let conversation_dir = archive.join("brain").join(session_id);
-        Self {
-            session_id: session_id.to_owned(),
-            home: archive.to_path_buf(),
-            conversations_dir: archive.join("conversations"),
-            transcript: conversation_dir.join(".system_generated/logs/transcript.jsonl"),
-            conversation_dir,
-        }
-    }
-
     pub fn database_paths(&self) -> Result<Vec<PathBuf>> {
         let mut paths = Vec::new();
         let base = format!("{}.db", self.session_id);
         for suffix in ["", "-wal", "-shm", "-journal"] {
             let path = self.conversations_dir.join(format!("{base}{suffix}"));
-            match fs::metadata(&path) {
+            match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.is_file() => paths.push(path),
-                Ok(_) => warn!(
-                    "skipping non-file Antigravity database companion {}",
-                    path.display()
-                ),
+                Ok(_) => anyhow::bail!("invalid Antigravity database companion {}", path.display()),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(error)
@@ -568,564 +782,4 @@ fn named_parent<'a>(path: &'a Path, name: &str, parent_name: &str) -> Result<&'a
     path.parent()
         .filter(|parent| parent.file_name().and_then(|value| value.to_str()) == Some(parent_name))
         .with_context(|| format!("{name} is not under a {parent_name} directory"))
-}
-
-fn find_entry_index(entries: &[TrashEntry], paths: &TrashPaths, path: &Path) -> Option<usize> {
-    entries.iter().position(|entry| {
-        let trash_path = entry.trash_path(paths);
-        trash_path == path
-            || (entry.agent() == Some(Agent::Antigravity) && path.starts_with(&trash_path))
-    })
-}
-
-pub fn delete_session_immediately(path: &Path, agent: Agent) -> Result<()> {
-    match agent {
-        Agent::Antigravity => delete_antigravity_bundle(path),
-        Agent::Claude | Agent::Codex => {
-            fs::remove_file(path).with_context(|| format!("failed to delete {}", path.display()))
-        }
-    }
-}
-
-fn delete_antigravity_bundle(path: &Path) -> Result<()> {
-    let bundle = AntigravityBundlePaths::from_transcript(path)?;
-    let database_paths = bundle.database_paths()?;
-    let mut removed = false;
-
-    match fs::remove_dir_all(&bundle.conversation_dir) {
-        Ok(()) => removed = true,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed to delete {}", bundle.conversation_dir.display()))
-        }
-    }
-    for database in database_paths {
-        fs::remove_file(&database)
-            .with_context(|| format!("failed to delete {}", database.display()))?;
-        removed = true;
-    }
-
-    if !removed {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Antigravity conversation {} is missing", bundle.session_id),
-        ))
-        .with_context(|| format!("failed to delete {}", path.display()));
-    }
-    Ok(())
-}
-
-fn move_all_or_rollback(moves: &[(PathBuf, PathBuf)]) -> Result<()> {
-    for (completed, (source, target)) in moves.iter().enumerate() {
-        if let Err(error) = move_path(source, target) {
-            let rollback_error = rollback_moves(&moves[..completed]).err();
-            if let Some(rollback_error) = rollback_error {
-                return Err(error).context(format!("rollback also failed: {rollback_error:#}"));
-            }
-            return Err(error);
-        }
-    }
-    Ok(())
-}
-
-fn rollback_moves(moves: &[(PathBuf, PathBuf)]) -> Result<()> {
-    for (source, target) in moves.iter().rev() {
-        move_path(target, source).with_context(|| {
-            format!(
-                "failed to roll back {} to {}",
-                target.display(),
-                source.display()
-            )
-        })?;
-    }
-    Ok(())
-}
-
-fn move_path(source: &Path, target: &Path) -> Result<()> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    match fs::rename(source, target) {
-        Ok(()) => return Ok(()),
-        Err(error) if error.kind() != io::ErrorKind::CrossesDevices => {
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to move {} to {}",
-                    source.display(),
-                    target.display()
-                )
-            })
-        }
-        Err(_) => {}
-    }
-
-    let metadata = fs::symlink_metadata(source)
-        .with_context(|| format!("failed to inspect {}", source.display()))?;
-    if metadata.file_type().is_symlink() {
-        anyhow::bail!(
-            "refusing to move symlink across filesystems: {}",
-            source.display()
-        );
-    }
-    if metadata.is_dir() {
-        copy_directory(source, target)?;
-        if let Err(error) = fs::remove_dir_all(source) {
-            let _ = fs::remove_dir_all(target);
-            return Err(error)
-                .with_context(|| format!("failed to remove {} after copy", source.display()));
-        }
-    } else if metadata.is_file() {
-        fs::copy(source, target).with_context(|| {
-            format!(
-                "failed to copy {} to {}",
-                source.display(),
-                target.display()
-            )
-        })?;
-        if let Err(error) = fs::remove_file(source) {
-            let _ = fs::remove_file(target);
-            return Err(error)
-                .with_context(|| format!("failed to remove {} after copy", source.display()));
-        }
-    } else {
-        anyhow::bail!("unsupported Antigravity bundle entry: {}", source.display());
-    }
-    Ok(())
-}
-
-fn copy_directory(source: &Path, target: &Path) -> Result<()> {
-    fs::create_dir(target)
-        .with_context(|| format!("failed to create directory {}", target.display()))?;
-    let result = (|| {
-        for entry in fs::read_dir(source)
-            .with_context(|| format!("failed to read directory {}", source.display()))?
-        {
-            let entry = entry.with_context(|| format!("failed to read {}", source.display()))?;
-            let source_path = entry.path();
-            let target_path = target.join(entry.file_name());
-            let file_type = entry.file_type().with_context(|| {
-                format!("failed to inspect bundle entry {}", source_path.display())
-            })?;
-            if file_type.is_symlink() {
-                anyhow::bail!(
-                    "refusing to copy symlink in Antigravity bundle: {}",
-                    source_path.display()
-                );
-            }
-            if file_type.is_dir() {
-                copy_directory(&source_path, &target_path)?;
-            } else if file_type.is_file() {
-                fs::copy(&source_path, &target_path).with_context(|| {
-                    format!(
-                        "failed to copy {} to {}",
-                        source_path.display(),
-                        target_path.display()
-                    )
-                })?;
-            } else {
-                anyhow::bail!("unsupported bundle entry: {}", source_path.display());
-            }
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(target);
-    }
-    result
-}
-
-fn remove_path(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("failed to inspect {}", path.display()))?;
-    if metadata.is_dir() {
-        fs::remove_dir_all(path).with_context(|| format!("failed to delete {}", path.display()))
-    } else {
-        fs::remove_file(path).with_context(|| format!("failed to delete {}", path.display()))
-    }
-}
-
-fn read_metadata(path: &Path) -> Result<Vec<TrashEntry>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let raw =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut entries = Vec::new();
-    for (index, line) in raw.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<TrashEntry>(line) {
-            Ok(entry) if !entry.nm.trim().is_empty() => entries.push(entry),
-            Ok(_) => warn!(
-                "skipping trash metadata entry with empty name at {}:{}",
-                path.display(),
-                index + 1
-            ),
-            Err(error) => warn!(
-                "skipping malformed trash metadata at {}:{}: {error}",
-                path.display(),
-                index + 1
-            ),
-        }
-    }
-    Ok(entries)
-}
-
-fn write_metadata(path: &Path, entries: &[TrashEntry]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let mut buffer = Vec::new();
-    for entry in entries {
-        serde_json::to_writer(&mut buffer, entry).context("failed to serialize trash metadata")?;
-        buffer.write_all(b"\n")?;
-    }
-    fs::write(path, buffer).with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
-}
-
-fn discovered_names(trash_dir: &Path) -> Result<BTreeSet<String>> {
-    let mut names = BTreeSet::new();
-    let entries = match fs::read_dir(trash_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(names),
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to read {}", trash_dir.display()))
-        }
-    };
-
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                warn!(
-                    "skipping unreadable trash entry in {}: {error}",
-                    trash_dir.display()
-                );
-                continue;
-            }
-        };
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(error) => {
-                warn!(
-                    "skipping trash entry with unreadable file type {}: {error}",
-                    entry.path().display()
-                );
-                continue;
-            }
-        };
-        if !file_type.is_file()
-            && !(file_type.is_dir()
-                && entry
-                    .path()
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    == Some("antigravity"))
-        {
-            continue;
-        }
-        if let Some(name) = entry
-            .file_name()
-            .to_str()
-            .filter(|name| !name.trim().is_empty())
-        {
-            names.insert(name.to_owned());
-        }
-    }
-
-    Ok(names)
-}
-
-fn disambiguate_name(base: &str, occupied: &BTreeSet<&str>, trash_dir: &Path) -> String {
-    if !occupied.contains(base) && !trash_dir.join(base).exists() {
-        return base.to_owned();
-    }
-
-    let path = Path::new(base);
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or(base);
-    let extension = path.extension().and_then(|value| value.to_str());
-    for index in 1usize.. {
-        let candidate = match extension {
-            Some(extension) if !extension.is_empty() => format!("{stem}-{index}.{extension}"),
-            _ => format!("{stem}-{index}"),
-        };
-        if !occupied.contains(candidate.as_str()) && !trash_dir.join(&candidate).exists() {
-            return candidate;
-        }
-    }
-    unreachable!("unbounded disambiguation loop must return")
-}
-
-fn now_timestamp() -> String {
-    Utc::now().to_rfc3339()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::{Path, PathBuf};
-
-    use super::{delete_session_immediately, TrashPaths, TrashReason, TrashStore};
-    use crate::parse::Agent;
-    use anyhow::Result;
-    use tempfile::TempDir;
-
-    #[test]
-    fn sync_adds_discovered_files_and_removes_missing_metadata() -> Result<()> {
-        let temp = TempDir::new()?;
-        let paths = TrashPaths::from_data_root(temp.path());
-        std::fs::create_dir_all(&paths.trash_dir)?;
-        std::fs::write(paths.trash_dir.join("kept.jsonl"), "{}\n")?;
-        std::fs::write(
-            &paths.metadata_file,
-            r#"{"ts":"old","nm":"missing.jsonl","op":"/tmp/missing.jsonl","tn":"claude"}"#,
-        )?;
-
-        let entries = TrashStore::new(paths.clone()).sync()?;
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].nm, "kept.jsonl");
-        assert_eq!(entries[0].op, "");
-        assert_eq!(entries[0].tn, "");
-        Ok(())
-    }
-
-    #[test]
-    fn trash_file_copies_metadata_then_removes_original() -> Result<()> {
-        let temp = TempDir::new()?;
-        let paths = TrashPaths::from_data_root(temp.path().join("data"));
-        let original = temp.path().join("session.jsonl");
-        std::fs::write(&original, "{}\n")?;
-        let expected_original = original.canonicalize()?;
-
-        let entry =
-            TrashStore::new(paths.clone()).trash_file(&original, Agent::Codex, &test_reason())?;
-
-        assert!(!original.exists());
-        assert_eq!(entry.nm, "session.jsonl");
-        assert_eq!(entry.op, expected_original.to_string_lossy());
-        assert_eq!(entry.tn, "codex");
-        let records = TrashStore::new(paths.clone()).reasons()?;
-        assert_eq!(records[&entry.nm].reason, test_reason());
-        assert_eq!(records[&entry.nm].trashed_at, entry.ts);
-        assert_eq!(records[&entry.nm].original_path, entry.op);
-        assert_eq!(records[&entry.nm].agent, "codex");
-        assert_eq!(
-            std::fs::read_to_string(paths.trash_dir.join(entry.nm))?,
-            "{}\n"
-        );
-        let metadata = std::fs::read_to_string(paths.metadata_file)?;
-        assert!(metadata.contains(r#""tn":"codex""#));
-        Ok(())
-    }
-
-    #[test]
-    fn restore_file_returns_session_to_original_path() -> Result<()> {
-        let temp = TempDir::new()?;
-        let paths = TrashPaths::from_data_root(temp.path().join("data"));
-        let original = temp.path().join("session.jsonl");
-        std::fs::write(&original, "{}\n")?;
-        let store = TrashStore::new(paths.clone());
-        let entry = store.trash_file(&original, Agent::Codex, &test_reason())?;
-        let trashed = entry.trash_path(&paths);
-
-        let restored = store.restore_file(&trashed)?;
-
-        assert_eq!(restored, original.canonicalize()?);
-        assert_eq!(std::fs::read_to_string(&restored)?, "{}\n");
-        assert!(!trashed.exists());
-        assert!(store.reasons()?.is_empty());
-        assert_eq!(std::fs::read_to_string(paths.metadata_file)?, "");
-        Ok(())
-    }
-
-    #[test]
-    fn trash_and_restore_antigravity_bundle_preserves_database_and_artifacts() -> Result<()> {
-        let temp = TempDir::new()?;
-        let paths = TrashPaths::from_data_root(temp.path().join("data"));
-        let transcript = create_antigravity_bundle(temp.path(), "conversation-123")?;
-        let expected_transcript = transcript.canonicalize()?;
-        let conversation = temp.path().join("brain/conversation-123");
-        let database = temp.path().join("conversations/conversation-123.db");
-        let wal = temp.path().join("conversations/conversation-123.db-wal");
-        let store = TrashStore::new(paths.clone());
-
-        let entry = store.trash_session(&transcript, Agent::Antigravity, &test_reason())?;
-        assert_eq!(store.reasons()?[&entry.nm].reason, test_reason());
-        let archive = entry.trash_path(&paths);
-        let archived_transcript =
-            archive.join("brain/conversation-123/.system_generated/logs/transcript.jsonl");
-
-        assert!(!conversation.exists());
-        assert!(!database.exists());
-        assert!(!wal.exists());
-        assert!(archived_transcript.exists());
-        assert!(archive.join("brain/conversation-123/artifact.md").exists());
-        assert!(archive.join("conversations/conversation-123.db").exists());
-        assert!(archive
-            .join("conversations/conversation-123.db-wal")
-            .exists());
-
-        let restored = store.restore_file(&archived_transcript)?;
-
-        assert_eq!(restored, expected_transcript);
-        assert!(conversation.join("artifact.md").exists());
-        assert_eq!(std::fs::read_to_string(database)?, "database");
-        assert_eq!(std::fs::read_to_string(wal)?, "wal");
-        assert!(!archive.exists());
-        assert!(store.reasons()?.is_empty());
-        assert_eq!(std::fs::read_to_string(paths.metadata_file)?, "");
-        Ok(())
-    }
-
-    #[test]
-    fn delete_antigravity_session_removes_bundle_and_database_companions() -> Result<()> {
-        let temp = TempDir::new()?;
-        let transcript = create_antigravity_bundle(temp.path(), "conversation-456")?;
-
-        delete_session_immediately(&transcript, Agent::Antigravity)?;
-
-        assert!(!temp.path().join("brain/conversation-456").exists());
-        assert!(!temp
-            .path()
-            .join("conversations/conversation-456.db")
-            .exists());
-        assert!(!temp
-            .path()
-            .join("conversations/conversation-456.db-wal")
-            .exists());
-        Ok(())
-    }
-
-    #[test]
-    fn delete_trashed_antigravity_session_removes_archive_and_metadata() -> Result<()> {
-        let temp = TempDir::new()?;
-        let paths = TrashPaths::from_data_root(temp.path().join("data"));
-        let transcript = create_antigravity_bundle(temp.path(), "conversation-789")?;
-        let store = TrashStore::new(paths.clone());
-        let entry = store.trash_session(&transcript, Agent::Antigravity, &test_reason())?;
-        let archive = entry.trash_path(&paths);
-        let archived_transcript =
-            archive.join("brain/conversation-789/.system_generated/logs/transcript.jsonl");
-
-        store.delete_session(&archived_transcript, Agent::Antigravity, true)?;
-
-        assert!(!archive.exists());
-        assert!(store.reasons()?.is_empty());
-        assert_eq!(std::fs::read_to_string(paths.metadata_file)?, "");
-        assert!(!temp.path().join("brain/conversation-789").exists());
-        assert!(!temp
-            .path()
-            .join("conversations/conversation-789.db")
-            .exists());
-        Ok(())
-    }
-
-    #[test]
-    fn legacy_trash_restores_with_missing_reason_file_or_entry() -> Result<()> {
-        for contents in [None, Some("{}"), Some("malformed JSON")] {
-            let temp = TempDir::new()?;
-            let paths = TrashPaths::from_data_root(temp.path().join("data"));
-            let original = temp.path().join("session.jsonl");
-            std::fs::write(&original, "legacy session")?;
-            let store = TrashStore::new(paths.clone());
-            let entry = store.trash_file(&original, Agent::Codex, &test_reason())?;
-            if let Some(contents) = contents {
-                std::fs::write(&paths.reasons_file, contents)?;
-            } else {
-                std::fs::remove_file(&paths.reasons_file)?;
-            }
-            assert_eq!(store.sync()?.len(), 1);
-            store.restore_file(&entry.trash_path(&paths))?;
-            assert_eq!(std::fs::read_to_string(&original)?, "legacy session");
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn reasons_follow_collision_names_and_survive_failed_restore() -> Result<()> {
-        let temp = TempDir::new()?;
-        let paths = TrashPaths::from_data_root(temp.path().join("data"));
-        let original = temp.path().join("session.jsonl");
-        let store = TrashStore::new(paths.clone());
-        std::fs::write(&original, "first")?;
-        let first = store.trash_file(&original, Agent::Codex, &test_reason())?;
-        std::fs::write(&original, "second")?;
-        let menu_reason = TrashReason::ActionMenu {
-            action: "Move session to Trash".to_owned(),
-        };
-        let second = store.trash_file(&original, Agent::Codex, &menu_reason)?;
-        assert_ne!(first.nm, second.nm);
-        let records = store.reasons()?;
-        assert_eq!(records[&first.nm].reason, test_reason());
-        assert_eq!(records[&second.nm].reason, menu_reason);
-
-        std::fs::write(&original, "occupied")?;
-        assert!(store.restore_file(&second.trash_path(&paths)).is_err());
-        assert_eq!(store.reasons()?, records);
-        store.delete_session(&first.trash_path(&paths), Agent::Codex, true)?;
-        let records = store.reasons()?;
-        assert_eq!(records.len(), 1);
-        assert!(records.contains_key(&second.nm));
-        std::fs::remove_file(&original)?;
-        store.restore_file(&second.trash_path(&paths))?;
-        assert_eq!(std::fs::read_to_string(&original)?, "second");
-        assert!(store.reasons()?.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn failed_reason_write_preserves_original_and_existing_record() -> Result<()> {
-        let temp = TempDir::new()?;
-        let paths = TrashPaths::from_data_root(temp.path().join("data"));
-        let store = TrashStore::new(paths.clone());
-        std::fs::create_dir_all(&paths.data_root)?;
-        std::fs::write(&paths.reasons_file, "malformed JSON")?;
-        let original = temp.path().join("session.jsonl");
-        std::fs::write(&original, "keep me")?;
-        assert!(store
-            .trash_file(&original, Agent::Codex, &test_reason())
-            .is_err());
-        assert_eq!(std::fs::read_to_string(&original)?, "keep me");
-        assert_eq!(
-            std::fs::read_to_string(&paths.reasons_file)?,
-            "malformed JSON"
-        );
-
-        let transcript = create_antigravity_bundle(temp.path(), "failed")?;
-        assert!(store
-            .trash_session(&transcript, Agent::Antigravity, &test_reason())
-            .is_err());
-        assert!(transcript.exists());
-        assert!(temp.path().join("conversations/failed.db").exists());
-        Ok(())
-    }
-
-    fn test_reason() -> TrashReason {
-        TrashReason::KeyBinding {
-            key: "^T".to_owned(),
-        }
-    }
-
-    fn create_antigravity_bundle(home: &Path, session_id: &str) -> Result<PathBuf> {
-        let conversation = home.join("brain").join(session_id);
-        let transcript = conversation.join(".system_generated/logs/transcript.jsonl");
-        let conversations = home.join("conversations");
-        std::fs::create_dir_all(transcript.parent().expect("transcript has a parent"))?;
-        std::fs::create_dir_all(&conversations)?;
-        std::fs::write(&transcript, "{}\n")?;
-        std::fs::write(conversation.join("artifact.md"), "artifact")?;
-        std::fs::write(conversations.join(format!("{session_id}.db")), "database")?;
-        std::fs::write(conversations.join(format!("{session_id}.db-wal")), "wal")?;
-        Ok(transcript)
-    }
 }

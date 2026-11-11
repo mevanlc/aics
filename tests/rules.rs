@@ -10,6 +10,9 @@ use aics::rules::{
 };
 use aics::scan::SessionRoots;
 use aics::trash::{TrashPaths, TrashReason, TrashStore};
+
+#[path = "support/trash.rs"]
+mod trash_fixture;
 use anyhow::Result;
 use tempfile::TempDir;
 
@@ -553,9 +556,13 @@ fn apply_rules_moves_matching_session_to_trash() -> Result<()> {
     let trash_entries = fs::read_dir(&trash_dir)?.collect::<Result<Vec<_>, _>>()?;
     assert_eq!(trash_entries.len(), 1);
 
-    let metadata = fs::read_to_string(data_root.join("trash.jsonl"))?;
-    assert!(metadata.contains("basic_session.jsonl"));
-    assert!(metadata.contains("\"tn\":\"claude\""));
+    let entries = TrashStore::new(TrashPaths::from_data_root(&data_root)).snapshot()?;
+    assert_eq!(entries[0].metadata.agent, Some(Agent::Claude));
+    assert!(entries[0]
+        .primary
+        .as_ref()
+        .unwrap()
+        .ends_with("basic_session.jsonl"));
 
     let stdout = String::from_utf8(output.stdout)?;
     let lines = stdout
@@ -576,14 +583,22 @@ fn apply_rules_restores_matching_trashed_session() -> Result<()> {
     let original = roots.claude_session.clone();
     let data_root = temp.path().join("data");
     let trash_paths = TrashPaths::from_data_root(&data_root);
-    let entry = TrashStore::new(trash_paths.clone()).trash_file(
+    let session_roots = SessionRoots {
+        live_sessions: Default::default(),
+        claude_projects: roots.claude_projects.clone(),
+        codex_sessions: roots.codex_sessions.clone(),
+        antigravity_home: temp.path().join("antigravity"),
+        trash: Some(trash_paths.clone()),
+    };
+    let entry = trash_fixture::trash_session(
+        &session_roots,
         &original,
         Agent::Claude,
-        &TrashReason::KeyBinding {
+        TrashReason::KeyBinding {
             key: "F8".to_owned(),
         },
     )?;
-    let trashed = entry.trash_path(&trash_paths);
+    let trashed = entry.primary.unwrap();
     let rules = write_rules(
         &temp,
         r#"
@@ -621,7 +636,7 @@ fn apply_rules_restores_matching_trashed_session() -> Result<()> {
         String::from_utf8_lossy(&output.stdout)
     );
     assert!(!trashed.exists());
-    assert_eq!(fs::read_to_string(data_root.join("trash.jsonl"))?, "");
+    assert!(TrashStore::new(trash_paths).snapshot()?.is_empty());
 
     let stdout = String::from_utf8(output.stdout)?;
     let value: serde_json::Value = serde_json::from_str(stdout.trim())?;
@@ -717,22 +732,15 @@ fn rule_proposals_trash_and_untrash_antigravity_bundles() -> Result<()> {
     assert!(skipped.is_empty());
     assert!(!transcript.exists());
     assert!(!database.exists());
-    let records = TrashStore::new(trash_paths.clone()).reasons()?;
+    let entries = TrashStore::new(trash_paths.clone()).snapshot()?;
     assert_eq!(
-        records["conversation-123.antigravity"].reason,
-        TrashReason::Rule {
+        entries[0].metadata.reason,
+        Some(TrashReason::Rule {
             name: "trash antigravity".to_owned(),
             reason: Some("cleanup".to_owned()),
-        }
+        })
     );
-    let entry = TrashStore::new(trash_paths.clone())
-        .sync()?
-        .into_iter()
-        .next()
-        .expect("Antigravity trash entry");
-    let trashed_transcript = entry
-        .trash_path(&trash_paths)
-        .join("brain/conversation-123/.system_generated/logs/transcript.jsonl");
+    let trashed_transcript = entries[0].primary.clone().unwrap();
     let untrash_proposal = RuleProposal {
         reviewed_group: None,
         source: None,
@@ -754,7 +762,7 @@ fn rule_proposals_trash_and_untrash_antigravity_bundles() -> Result<()> {
     assert!(skipped.is_empty());
     assert!(transcript.exists());
     assert!(database.exists());
-    assert!(TrashStore::new(trash_paths).reasons()?.is_empty());
+    assert!(TrashStore::new(trash_paths).snapshot()?.is_empty());
     Ok(())
 }
 

@@ -411,6 +411,9 @@ where
             display_rules_path(&options.rules_path)
         );
     }
+    if options.mode == RulesMode::Apply {
+        crate::lifecycle::initialize_trash(roots)?;
+    }
 
     let mut cache = options.cache_path.clone().and_then(|path| {
         match RulesCache::open(path, &options.rules_path) {

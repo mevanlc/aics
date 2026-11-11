@@ -25,6 +25,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Multiple themes (lazygit, aics, sunset, late), configurable via settings modal
 - Configurable Claude, Codex, and Antigravity launch commands so `aics` can hand off to resume a session
 - AICS trash, restore, and permanent deletion for session files and complete Antigravity bundles, with recorded trash reasons
+- Self-contained ZIP exports and archives of trash with `--export-trash` and `--archive-trash`
 - Compact `--json` discovery (20 results by default), `--json=full` metadata, and `--export DIR` Markdown transcripts
 - Embedded agent guidance through `--print-skill`, with no skill installation required
 - Dependency-aware session removal and restore, with related-session review and per-rule skip/include policies

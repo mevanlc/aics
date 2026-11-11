@@ -279,6 +279,27 @@ struct Cli {
 
     // === Index & Storage Management ===
     #[arg(
+        long,
+        value_name = "ZIPFILE",
+        help_heading = "Index & Storage Management",
+        help = "Write a ZIP copy of trash and keep the items"
+    )]
+    export_trash: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "ZIPFILE",
+        conflicts_with = "export_trash",
+        help_heading = "Index & Storage Management",
+        help = "Write a verified trash ZIP, then remove the archived items"
+    )]
+    archive_trash: Option<PathBuf>,
+    #[arg(
+        long,
+        help_heading = "Index & Storage Management",
+        help = "Allow the trash ZIP command to overwrite an existing file"
+    )]
+    yes: bool,
+    #[arg(
         long = "rebuild-index",
         help_heading = "Index & Storage Management",
         help = "Rebuild local search index before searching",
@@ -481,6 +502,8 @@ impl Cli {
     fn will_enter_tui(&self) -> bool {
         self.json.is_none()
             && self.export.is_none()
+            && self.export_trash.is_none()
+            && self.archive_trash.is_none()
             && !self.apply_rules
             && !self.benchmark_rules
             && !self.write_rules_dts
@@ -505,8 +528,47 @@ impl Cli {
 }
 
 fn main() -> Result<()> {
-    let matches = Cli::command().get_matches();
+    let command = Cli::command();
+    let matches = command.clone().get_matches();
     let mut cli = Cli::from_arg_matches(&matches)?;
+    if let Some(destination) = cli.export_trash.as_ref().or(cli.archive_trash.as_ref()) {
+        for arg in command.get_arguments() {
+            let id = arg.get_id();
+            if matches.value_source(id.as_str()) == Some(clap::parser::ValueSource::CommandLine)
+                && !matches!(
+                    id.as_str(),
+                    "export_trash"
+                        | "archive_trash"
+                        | "yes"
+                        | "claude_home"
+                        | "codex_home"
+                        | "antigravity_home"
+                )
+            {
+                bail!(
+                    "trash ZIP commands do not accept {}",
+                    id.as_str().replace('_', "-")
+                );
+            }
+        }
+        let _logging = aics::logging::init(LoggingMode::Command)?;
+        let paths = ResolvedPaths::discover(
+            cli.claude_home.as_deref(),
+            cli.codex_home.as_deref(),
+            cli.antigravity_home.as_deref(),
+        )?;
+        let count = aics::lifecycle::archive_trash(
+            &paths.roots,
+            destination,
+            cli.archive_trash.is_some(),
+            cli.yes,
+        )?;
+        println!("{} trash items in {}", count, destination.display());
+        return Ok(());
+    }
+    if cli.yes {
+        bail!("--yes requires --export-trash or --archive-trash");
+    }
     // Combine both option streams in their actual argv order.
     let mut ordered = Vec::new();
     for (name, hidden) in [("hide", true), ("show", false)] {
@@ -546,8 +608,9 @@ fn main() -> Result<()> {
         cli.codex_home.as_deref(),
         cli.antigravity_home.as_deref(),
     )?;
-    if cli.json.is_none() || cli.apply_rules {
-        aics::lifecycle::recover(&resolved_paths.roots)?;
+    validate_terminal_mode(&cli)?;
+    if cli.will_enter_tui() || cli.apply_rules {
+        aics::lifecycle::initialize_trash(&resolved_paths.roots)?;
     }
     let index_paths = aics::index::IndexPaths::discover_for_roots(&resolved_paths.roots)?;
     let startup_preview = cli.has_preview_option(CliRulesPreview::Startup);
@@ -562,7 +625,6 @@ fn main() -> Result<()> {
         manager.delete_index()?;
         return Ok(());
     }
-    validate_terminal_mode(&cli)?;
     let LoadedSettings { settings, warning } = Settings::load_with_recovery();
     let mut settings_warning = combine_startup_warnings(&logging, warning.clone());
     if let Some(warning) = warning.as_deref() {

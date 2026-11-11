@@ -7,7 +7,10 @@ use aics::parse::{
     SessionCell,
 };
 use aics::scan::{scan_session_files, SessionRoots};
-use aics::trash::{TrashPaths, TrashReason, TrashStore};
+use aics::trash::{TrashPaths, TrashReason};
+
+#[path = "support/trash.rs"]
+mod trash_fixture;
 use anyhow::Result;
 use tempfile::TempDir;
 
@@ -185,16 +188,17 @@ fn trashed_antigravity_bundle_remains_searchable_with_original_metadata() -> Res
         .join(".system_generated/logs/transcript.jsonl");
     let expected_original = transcript.canonicalize()?;
 
-    let entry = TrashStore::new(trash_paths.clone()).trash_session(
+    let mut roots = roots_for(antigravity_home);
+    roots.trash = Some(trash_paths);
+    let entry = trash_fixture::trash_session(
+        &roots,
         &transcript,
         Agent::Antigravity,
-        &TrashReason::KeyBinding {
+        TrashReason::KeyBinding {
             key: "F8".to_owned(),
         },
     )?;
-    let archived_brain = trash_paths.trash_dir.join(&entry.nm).join("brain");
-    let mut roots = roots_for(antigravity_home);
-    roots.trash = Some(trash_paths);
+    let archived_brain = entry.path.join("payload/brain");
     let files = scan_session_files(&roots)?;
 
     assert_eq!(files.len(), 1);

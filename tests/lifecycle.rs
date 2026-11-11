@@ -71,12 +71,20 @@ impl Fixture {
         )
     }
     fn trash_path(&self, path: &Path) -> PathBuf {
-        self.roots
-            .trash
-            .as_ref()
+        let original = path
+            .parent()
             .unwrap()
-            .trash_dir
-            .join(path.file_name().unwrap())
+            .canonicalize()
+            .unwrap()
+            .join(path.file_name().unwrap());
+        TrashStore::new(self.roots.trash.clone().unwrap())
+            .snapshot()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.original_path().as_ref() == Some(&original))
+            .unwrap()
+            .primary
+            .unwrap()
     }
 }
 
@@ -121,7 +129,7 @@ fn replacement_rollouts_move_and_restore_as_one_thread() -> Result<()> {
     f.execute(&restore)?;
     assert!(original.exists() && replacement.exists());
     assert!(TrashStore::new(f.roots.trash.clone().unwrap())
-        .reasons()?
+        .snapshot()?
         .is_empty());
     Ok(())
 }
@@ -254,10 +262,10 @@ fn rules_skip_unsafe_singles_and_include_unmatched_dependents() -> Result<()> {
     assert!(skipped.is_empty(), "{skipped:?}");
     assert_eq!(applied.len(), 2);
     assert!(!a.exists() && !b.exists());
-    let reasons = TrashStore::new(f.roots.trash.clone().unwrap()).reasons()?;
+    let reasons = TrashStore::new(f.roots.trash.clone().unwrap()).snapshot()?;
     assert!(reasons
-        .values()
-        .all(|r| matches!(r.reason, TrashReason::DependencyGroup { .. })));
+        .iter()
+        .all(|r| matches!(r.metadata.reason, Some(TrashReason::DependencyGroup { .. }))));
     Ok(())
 }
 
@@ -490,13 +498,8 @@ fn removal_follows_active_descendants_through_a_previously_trashed_intermediate(
     let f = Fixture::new()?;
     let a = f.rollout("a", "a", None)?;
     let b = f.rollout("b", "b", Some("a"))?;
+    f.execute(&f.plan(std::slice::from_ref(&b), Operation::Trash)?)?;
     let c = f.rollout("c", "c", Some("b"))?;
-    // Simulate an incomplete group left by an older AICS version.
-    TrashStore::new(f.roots.trash.clone().unwrap()).trash_file(
-        &b,
-        Agent::Codex,
-        &TrashReason::KeyBinding { key: "old".into() },
-    )?;
     let plan = f.plan(std::slice::from_ref(&a), Operation::Trash)?;
     assert_eq!(
         plan.members.keys().cloned().collect::<BTreeSet<_>>(),

@@ -43,50 +43,47 @@ On platforms without stable file identity support, destination cleanup during
 rollback also requires manual recovery. These checks cannot stop external tools
 that ignore session locks from changing files.
 
-## Recorded reasons
+## Trash items and migration
 
-AICS stores `trash.json` beside `trash.jsonl` and the `trash/` directory in its
-data directory. On macOS this is `~/Library/Application Support/aics/`; use
-`AICS_DATA_ROOT` to override it.
+On macOS the default data directory is `~/Library/Application Support/aics/`.
+Set `AICS_DATA_ROOT` to use another location. Each item under `trash/` holds
+its native session files, any AICS summary, and a `metadata.json` sidecar.
+Antigravity items include the conversation directory and database companions.
 
-`trash.json` is an object keyed by the actual trash filename (or Antigravity
-archive directory name). Each record includes the time, original path, agent,
-and cause:
+The sidecar records the metadata version, provider, trash time, reason, and
+where each payload belongs. See the [version 1 schema](schemas/trash-item-v1.schema.json).
+Reasons identify the keyboard shortcut, menu action, or JavaScript rule that
+moved the session. Grouped operations also record the triggers and how the
+session is related to the selection. An unknown reason does not block restore.
 
-```json
-{
-  "rollout-example.jsonl": {
-    "trashed_at": "2026-09-19T00:02:29+00:00",
-    "original_path": "/home/user/.codex/sessions/rollout-example.jsonl",
-    "agent": "codex",
-    "reason": {
-      "source": "key_binding",
-      "key": "^T"
-    }
-  }
-}
+AICS migrates flat trash items automatically on TUI startup and before applying
+rules or running a trash ZIP command. It retains the old catalogs under
+`trash/.legacy-migration/` for manual recovery. Read-only searches can read both
+layouts. Items with missing or damaged destination metadata can still be
+browsed when their transcript is identifiable and included in a ZIP export.
+
+## Export or archive trash
+
+```bash
+aics --export-trash trash-backup.zip
+aics --archive-trash trash-archive.zip
 ```
 
-The other causes are `{"source":"action_menu","action":"Move session to Trash"}`
-and `{"source":"rule","name":"rule name","reason":"rule explanation"}`.
-Grouped operations use `source: "dependency_group"` with `triggers`,
-`selected_paths`, and each member's `relation`. The rule explanation is omitted
-when the rule provides none. Startup rules,
-explicit rule application, and processing proposals in the TUI all record the
-rule that caused the move.
+Export keeps the items in trash. Archive publishes and verifies the ZIP before
+removing its items. Archive uses the same dependency checks as permanent deletion.
+If any item cannot safely be removed, use export to save a copy. Either command
+prompts before overwriting an existing ZIP. Pass `--yes` to allow overwrite in a
+script. Both commands can migrate legacy trash on first use.
 
-This records currently trashed items, rather than keeping an event history.
-Successful restoration or permanent deletion through AICS removes the record;
-a failed restoration keeps it. Files removed outside AICS can leave stale records.
+The ZIP contains a `trash/` directory with payloads, metadata, and the schema.
+To browse an archive separately, extract it to an empty directory and use that
+directory as `AICS_DATA_ROOT`. Undo Trash restores to the recorded paths when
+they match the configured provider homes. On another machine, or when a
+recorded destination is missing, use the extracted payloads for manual recovery.
+A Codex conversation may still need history that was outside trash at archive time.
 
-Existing trash items may have no record, which means their reason is unknown.
-AICS does not invent reasons for them. `trash.jsonl` continues to provide the
-original paths for recovery, independently of `trash.json`. Missing reason
-records never prevent browsing, restoration, or deletion.
-
-Reason updates use a lock and atomic file replacement. AICS preserves an
-unreadable or malformed reason file and refuses new trash operations that cannot
-record their reason before removing the original. Lifecycle operations preserve malformed metadata and report the problem before
-changing session files.
+Prefer the built-in ZIP commands. Manually zip `trash/` only while AICS is stopped.
+Trash and restore operations require native exclusive rename support on the
+filesystems involved.
 
 [Back to the README.](../README.md)

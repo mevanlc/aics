@@ -1,56 +1,388 @@
-//! Recoverable, no-overwrite publication of approved lifecycle groups.
+//! Recoverable publication and retirement of session files and trash items.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tempfile::{Builder, TempDir};
 
 use super::file_identity::{identity, FileIdentity};
 use super::{DependencyGraph, LifecyclePlan, Operation};
 use crate::live::LiveSessionTracker;
 use crate::parse::Agent;
 use crate::scan::SessionRoots;
-use crate::trash::{AntigravityBundlePaths, TrashEntry, TrashReason, TrashRecord};
+use crate::trash::{self, exists, AntigravityBundlePaths, TrashMetadata, TrashReason, TrashStore};
 
-#[derive(Serialize, Deserialize)]
-struct Transfer {
-    source: PathBuf,
-    target: Option<PathBuf>,
-    backup: PathBuf,
-    digest: String,
-    published_identity: Option<FileIdentity>,
+mod archive;
+mod legacy;
+pub use archive::archive_trash;
+
+const JOURNAL: &str = "moves.json";
+const JOURNAL_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Stamp {
+    identity: FileIdentity,
+    digest: [u8; 32],
+}
+
+impl Stamp {
+    fn read(path: &Path) -> Result<Self> {
+        Ok(Self {
+            identity: entry_identity(path)?,
+            digest: digest(path)?,
+        })
+    }
+
+    fn verify(&self, path: &Path) -> Result<()> {
+        ensure!(
+            entry_identity(path)? == self.identity && digest(path)? == self.digest,
+            "entry changed: {}",
+            path.display()
+        );
+        Ok(())
+    }
+}
+
+fn entry_identity(path: &Path) -> Result<FileIdentity> {
+    identity(path)?.with_context(|| format!("file identity unavailable for {}", path.display()))
 }
 
 #[derive(Serialize, Deserialize)]
-struct MetadataChange {
+struct Move {
+    from: PathBuf,
+    to: PathBuf,
+    stamp: Stamp,
+}
+
+impl Move {
+    fn apply(&self) -> Result<()> {
+        self.stamp.verify(&self.from)?;
+        move_exclusive(&self.from, &self.to)?;
+        self.stamp.verify(&self.to)
+    }
+
+    fn undo(&self, retired_source: bool) -> Result<()> {
+        if !exists(&self.to)? {
+            ensure!(
+                !retired_source || exists(&self.from)?,
+                "original and staged backup are both missing: {}",
+                self.from.display()
+            );
+            return Ok(());
+        }
+        if exists(&self.from)? {
+            // The rename never happened if the stamped object is still at its
+            // original path. In particular, leave a competing destination alone.
+            return self.stamp.verify(&self.from);
+        }
+        self.stamp.verify(&self.to)?;
+        move_exclusive(&self.to, &self.from)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Scratch {
     path: PathBuf,
-    before: Option<Vec<u8>>,
-    after: Vec<u8>,
+    identity: FileIdentity,
+}
+
+#[derive(Serialize, Deserialize)]
+struct VerifiedArchive {
+    path: PathBuf,
+    stamp: Stamp,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Journal {
+    version: u32,
     committed: bool,
-    plan: LifecyclePlan,
-    transfers: Vec<Transfer>,
-    metadata: Vec<MetadataChange>,
+    plans: Vec<LifecyclePlan>,
+    publications: Vec<Move>,
+    retirements: Vec<Move>,
+    scratch: Vec<Scratch>,
+    archive: Option<VerifiedArchive>,
 }
 
-fn lock(roots: &SessionRoots) -> Result<(File, PathBuf)> {
-    let paths = roots
-        .trash
-        .as_ref()
-        .context("trash store is unavailable; refusing unprotected removal")?;
+impl Journal {
+    fn save(&self, directory: &Path) -> Result<()> {
+        atomic_write(&directory.join(JOURNAL), &serde_json::to_vec(self)?)
+    }
+
+    fn rollback(&self) -> Result<()> {
+        for entry in self.retirements.iter().rev() {
+            entry.undo(true)?;
+        }
+        for entry in self.publications.iter().rev() {
+            entry.undo(false)?;
+        }
+        Ok(())
+    }
+
+    fn cleanup(&self, directory: &Path) -> Result<()> {
+        // After an archive purge commits, its ZIP is the surviving copy.
+        // Preserve any remaining backups if that copy is no longer verifiable.
+        if let Some(archive) = &self.archive {
+            if self.committed && self.scratch.iter().any(|s| s.path.exists()) {
+                archive.stamp.verify(&archive.path)?;
+            }
+        }
+        for scratch in &self.scratch {
+            if exists(&scratch.path)? {
+                ensure!(
+                    entry_identity(&scratch.path)? == scratch.identity,
+                    "scratch directory changed: {}",
+                    scratch.path.display()
+                );
+                remove(&scratch.path)?;
+            }
+        }
+        remove(directory)
+    }
+}
+
+struct Staging {
+    journal: Journal,
+    temporary: Vec<TempDir>,
+}
+
+impl Staging {
+    fn new(plans: Vec<LifecyclePlan>) -> Self {
+        Self {
+            journal: Journal {
+                version: JOURNAL_VERSION,
+                committed: false,
+                plans,
+                publications: Vec::new(),
+                retirements: Vec::new(),
+                scratch: Vec::new(),
+                archive: None,
+            },
+            temporary: Vec::new(),
+        }
+    }
+
+    fn scratch(&mut self, parent: &Path) -> Result<PathBuf> {
+        let temp = scratch_directory(parent)?;
+        let path = temp.path().to_path_buf();
+        self.journal.scratch.push(Scratch {
+            identity: entry_identity(&path)?,
+            path: path.clone(),
+        });
+        self.temporary.push(temp);
+        Ok(path)
+    }
+
+    fn publish(&mut self, from: PathBuf, to: PathBuf) -> Result<()> {
+        ensure!(
+            !exists(&to)?,
+            "destination already exists: {}",
+            to.display()
+        );
+        ensure!(
+            !self.journal.publications.iter().any(|entry| entry.to == to),
+            "duplicate publication destination {}",
+            to.display()
+        );
+        self.journal.publications.push(Move {
+            stamp: Stamp::read(&from)?,
+            from,
+            to,
+        });
+        Ok(())
+    }
+
+    fn publish_copy(&mut self, source: &Path, target: PathBuf) -> Result<Stamp> {
+        let scratch = self.scratch(parent(&target)?)?;
+        let staged = scratch.join("payload");
+        let stamp = copy_verified(source, &staged)?;
+        self.publish(staged, target)?;
+        Ok(stamp)
+    }
+
+    fn retire(&mut self, source: PathBuf, stamp: Stamp) -> Result<()> {
+        ensure!(
+            !self
+                .journal
+                .retirements
+                .iter()
+                .any(|entry| entry.from == source),
+            "duplicate retirement source {}",
+            source.display()
+        );
+        let scratch = self.scratch(parent(&source)?)?;
+        self.journal.retirements.push(Move {
+            from: source,
+            to: scratch.join("original"),
+            stamp,
+        });
+        Ok(())
+    }
+
+    fn publish_item(
+        &mut self,
+        root: &Path,
+        metadata: &TrashMetadata,
+        copies: &[(PathBuf, PathBuf)],
+    ) -> Result<()> {
+        let scratch = self.scratch(root)?;
+        let staged = scratch.join("item");
+        create_directories(&staged)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staged, fs::Permissions::from_mode(0o700))?;
+        }
+        let mut sources = Vec::new();
+        for (source, relative) in copies {
+            sources.push((
+                source.clone(),
+                copy_verified(source, &staged.join(relative))?,
+            ));
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(staged.join(trash::METADATA_NAME))?;
+        serde_json::to_writer_pretty(&mut file, metadata)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        drop(file);
+        sync_directory(&staged)?;
+        let suffix = scratch
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix(trash::SCRATCH_PREFIX))
+            .context("invalid scratch name")?;
+        self.publish(staged, root.join(format!("{}{suffix}", trash::ITEM_PREFIX)))?;
+        for (source, stamp) in sources {
+            self.retire(source, stamp)?;
+        }
+        Ok(())
+    }
+
+    fn persist(mut self, operations: &Path) -> Result<(PathBuf, Journal)> {
+        let directory = Builder::new().prefix("txn-").tempdir_in(operations)?;
+        sync_directory(operations)?;
+        // Once the record is durable, scratch must survive unwinding and exit.
+        // Keep before saving so an uncertain fsync result cannot discard it.
+        let directory = directory.keep();
+        for temp in self.temporary.drain(..) {
+            let _ = temp.keep();
+        }
+        self.journal.save(&directory).with_context(|| {
+            format!(
+                "could not persist lifecycle journal at {}",
+                directory.display()
+            )
+        })?;
+        Ok((directory, self.journal))
+    }
+
+    fn execute(self, operations: &Path) -> Result<()> {
+        if self.journal.publications.is_empty() && self.journal.retirements.is_empty() {
+            return Ok(());
+        }
+        let (directory, mut journal) = self.persist(operations)?;
+        let apply = (|| -> Result<()> {
+            if let Some(archive) = &journal.archive {
+                archive.stamp.verify(&archive.path)?;
+            }
+            for entry in &journal.publications {
+                entry.apply()?;
+            }
+            for entry in &journal.retirements {
+                entry.apply()?;
+                #[cfg(test)]
+                if FAIL_AFTER_RETIREMENT.with(|flag| flag.get()) {
+                    bail!("injected removal failure");
+                }
+            }
+            if let Some(archive) = &journal.archive {
+                archive.stamp.verify(&archive.path)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = apply {
+            journal
+                .rollback()
+                .and_then(|()| journal.cleanup(&directory))
+                .with_context(|| {
+                    format!(
+                        "{error:#}; rollback incomplete, recovery record at {}",
+                        directory.display()
+                    )
+                })?;
+            return Err(error.context("operation rolled back"));
+        }
+        journal.committed = true;
+        // If saving fails, the on-disk journal determines recovery. Both
+        // originals and publications are still recoverable at this point.
+        journal.save(&directory)?;
+        journal
+            .cleanup(&directory)
+            .context("operation committed; cleanup will retry on next startup")
+    }
+}
+
+fn parent(path: &Path) -> Result<&Path> {
+    path.parent()
+        .with_context(|| format!("no parent for {}", path.display()))
+}
+
+fn scratch_directory(parent: &Path) -> Result<TempDir> {
+    create_directories(parent)?;
+    let scratch = Builder::new()
+        .prefix(trash::SCRATCH_PREFIX)
+        .rand_bytes(trash::ITEM_ID_LEN)
+        .tempdir_in(parent)?;
+    sync_directory(parent)?;
+    Ok(scratch)
+}
+
+fn move_exclusive(from: &Path, to: &Path) -> Result<()> {
+    renamest::rename_exclusive(from, to).with_context(|| {
+        format!(
+            "cannot rename {} to {} without overwriting",
+            from.display(),
+            to.display()
+        )
+    })?;
+    sync_directory(parent(to)?)?;
+    if parent(from)? != parent(to)? {
+        sync_directory(parent(from)?)?;
+    }
+    Ok(())
+}
+
+fn copy_verified(source: &Path, target: &Path) -> Result<Stamp> {
+    let stamp = Stamp::read(source)?;
+    copy_new(source, target)?;
+    ensure!(
+        digest(target)? == stamp.digest,
+        "staged copy differs from {}",
+        source.display()
+    );
+    stamp.verify(source)?;
+    Ok(stamp)
+}
+
+fn open_lock(paths: &trash::TrashPaths) -> Result<File> {
     create_directories(&paths.data_root)?;
-    let file = OpenOptions::new()
+    Ok(OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(paths.data_root.join("lifecycle.lock"))?;
+        .open(paths.data_root.join("lifecycle.lock"))?)
+}
+
+fn lock(roots: &SessionRoots) -> Result<(File, PathBuf)> {
+    let paths = roots.trash.as_ref().context("trash store is unavailable")?;
+    let file = open_lock(paths)?;
     file.try_lock()
         .context("another AICS lifecycle operation is running")?;
     let operations = paths.data_root.join("operations");
@@ -68,45 +400,37 @@ impl std::fmt::Display for RecoveryRequired {
 }
 impl std::error::Error for RecoveryRequired {}
 
-/// Readers share this guard while refreshing, and never recover source files.
 pub(crate) fn read_guard(roots: &SessionRoots, wait: bool) -> Result<Option<File>> {
-    let Some(paths) = &roots.trash else {
-        return Ok(None);
-    };
-    create_directories(&paths.data_root)?;
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(paths.data_root.join("lifecycle.lock"))?;
+    roots
+        .trash
+        .as_ref()
+        .map(|paths| read_trash_guard(paths, wait))
+        .transpose()
+}
+
+pub(crate) fn read_trash_guard(paths: &trash::TrashPaths, wait: bool) -> Result<File> {
+    let file = open_lock(paths)?;
     if wait {
         file.lock_shared()?;
     } else {
         file.try_lock_shared()?;
     }
-    match fs::read_dir(paths.data_root.join("operations")) {
-        Ok(mut entries) => {
-            if entries.next().transpose()?.is_some() {
-                return Err(RecoveryRequired.into());
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+    if !trash::children(&paths.data_root.join("operations"))?.is_empty() {
+        return Err(RecoveryRequired.into());
     }
-    Ok(Some(file))
+    Ok(file)
 }
 
 fn guards(
     roots: &SessionRoots,
-    plan: &LifecyclePlan,
+    plans: &[LifecyclePlan],
 ) -> Result<Vec<crate::live::LiveSessionGuard>> {
     let tracker = LiveSessionTracker::new(roots.live_sessions.clone());
     let mut guards = Vec::new();
     for agent in [Agent::Claude, Agent::Codex, Agent::Antigravity] {
-        let ids = plan
-            .members
-            .values()
+        let ids = plans
+            .iter()
+            .flat_map(|p| p.members.values())
             .filter(|m| m.agent == agent)
             .map(|m| m.thread_id.clone())
             .collect::<Vec<_>>();
@@ -125,44 +449,83 @@ pub fn recover(roots: &SessionRoots) -> Result<()> {
     let Some(paths) = &roots.trash else {
         return Ok(());
     };
-    match fs::read_dir(paths.data_root.join("operations")) {
-        Ok(mut entries) => {
-            if entries.next().transpose()?.is_none() {
-                return Ok(());
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
+    if trash::children(&paths.data_root.join("operations"))?.is_empty() {
+        return Ok(());
     }
     let (_lock, operations) = lock(roots)?;
     recover_locked(roots, &operations)
 }
 
 fn recover_locked(roots: &SessionRoots, operations: &Path) -> Result<()> {
-    for entry in fs::read_dir(operations)? {
-        let path = entry?.path();
-        let journal_path = path.join("operation.json");
-        if !journal_path.exists() {
-            // Staging did not reach the durable journal; no originals were touched.
-            if path.is_dir() {
-                fs::remove_dir_all(&path)?;
+    for directory in trash::children(operations)? {
+        (|| -> Result<()> {
+            let path = directory.join(JOURNAL);
+            if exists(&path)? {
+                let journal: Journal = serde_json::from_reader(File::open(path)?)?;
+                ensure!(
+                    journal.version == JOURNAL_VERSION,
+                    "unsupported lifecycle journal version"
+                );
+                if !journal.committed {
+                    let _guards = guards(roots, &journal.plans)?;
+                    journal.rollback()?;
+                }
+                journal.cleanup(&directory)?;
+            } else if exists(&directory.join("operation.json"))? {
+                legacy::recover_legacy(roots, &directory)?;
+            } else {
+                // Nothing could have been published before the first journal.
+                remove(&directory)?;
             }
-            continue;
-        }
-        let journal: Journal = serde_json::from_slice(&fs::read(&journal_path)?)
-            .with_context(|| format!("unreadable recovery record {}", journal_path.display()))?;
-        if !journal.committed {
-            let _guards = guards(roots, &journal.plan)?;
-            rollback(&journal).with_context(|| {
-                format!(
-                    "incomplete lifecycle recovery; preserved backups at {}",
-                    path.display()
-                )
-            })?;
-        }
-        fs::remove_dir_all(path)?;
+            Ok(())
+        })()
+        .with_context(|| format!("lifecycle recovery incomplete at {}", directory.display()))?;
     }
     Ok(())
+}
+
+pub fn initialize_trash(roots: &SessionRoots) -> Result<()> {
+    let Some(paths) = &roots.trash else {
+        return Ok(());
+    };
+    if !paths.data_root.exists() {
+        return Ok(());
+    }
+    let (_lock, operations) = lock(roots)?;
+    recover_locked(roots, &operations)?;
+    migrate_locked(paths, &operations)
+}
+
+fn migrate_locked(paths: &trash::TrashPaths, operations: &Path) -> Result<()> {
+    let legacy = TrashStore::new(paths.clone()).legacy_items()?;
+    for item in legacy {
+        let mut staging = Staging::new(Vec::new());
+        staging.publish_item(
+            &paths.trash_dir,
+            &item.metadata,
+            &item.legacy_copies.context("missing legacy payload")?,
+        )?;
+        staging
+            .execute(operations)
+            .with_context(|| format!("migrating {}", item.path.display()))?;
+    }
+    let mut staging = Staging::new(Vec::new());
+    for source in [&paths.metadata_file, &paths.reasons_file] {
+        if exists(source)? {
+            ensure!(
+                fs::symlink_metadata(source)?.is_file(),
+                "invalid legacy catalog {}",
+                source.display()
+            );
+            let target = paths
+                .trash_dir
+                .join(trash::LEGACY_METADATA_DIR)
+                .join(source.file_name().context("missing catalog name")?);
+            let stamp = staging.publish_copy(source, target)?;
+            staging.retire(source.clone(), stamp)?;
+        }
+    }
+    staging.execute(operations)
 }
 
 pub fn execute(
@@ -173,7 +536,12 @@ pub fn execute(
     approved.require_safe()?;
     let (_lock, operations) = lock(roots)?;
     recover_locked(roots, &operations)?;
-    let _guards = guards(roots, approved)?;
+    let _guards = guards(roots, std::slice::from_ref(approved))?;
+    recheck(roots, approved)?;
+    prepare(roots, approved, reasons)?.execute(&operations)
+}
+
+fn recheck(roots: &SessionRoots, approved: &LifecyclePlan) -> Result<()> {
     let agent = approved
         .members
         .values()
@@ -184,348 +552,124 @@ pub fn execute(
     let fresh = DependencyGraph::discover(roots, agent, &seeds)?
         .plan(approved.seeds.clone(), approved.operation);
     fresh.require_safe()?;
-    if &fresh != approved {
-        bail!("session group changed; review the updated group before trying again");
-    }
-    let id = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos()
+    ensure!(
+        &fresh == approved,
+        "session group changed; review the updated group before trying again"
     );
-    let directory = operations.join(id);
-    fs::create_dir(&directory)?;
-    sync_directory(&operations)?;
-    let result = prepare(roots, approved, reasons, &directory);
-    let mut journal = match result {
-        Ok(journal) => journal,
-        Err(e) => {
-            let _ = fs::remove_dir_all(&directory);
-            return Err(e);
-        }
-    };
-    save(&directory, &journal)?;
-    let result = apply(&mut journal, &directory);
-    if let Err(error) = result {
-        if let Err(recovery) = rollback(&journal) {
-            bail!(
-                "{error:#}; rollback incomplete: {recovery:#}; backups retained at {}",
-                directory.display()
-            );
-        }
-        fs::remove_dir_all(&directory)?;
-        return Err(error.context("group operation rolled back"));
-    }
-    journal.committed = true;
-    save(&directory, &journal)?;
-    cleanup_archives(roots, &journal.plan);
-    fs::remove_dir_all(directory)
-        .context("operation completed; staged backup cleanup will retry on next startup")?;
     Ok(())
-}
-
-fn cleanup_archives(roots: &SessionRoots, plan: &LifecyclePlan) {
-    if plan.operation != Operation::Restore {
-        return;
-    }
-    let Some(paths) = &roots.trash else {
-        return;
-    };
-    for m in plan
-        .members
-        .values()
-        .filter(|m| m.agent == Agent::Antigravity)
-    {
-        if let Ok(bundle) = AntigravityBundlePaths::from_transcript(&m.path) {
-            if let Some(archive) = bundle.conversation_dir.parent().and_then(Path::parent) {
-                if archive.parent() == Some(paths.trash_dir.as_path()) {
-                    let _ = fs::remove_dir(archive.join("brain"));
-                    let _ = fs::remove_dir(archive.join("conversations"));
-                    let _ = fs::remove_dir(archive);
-                }
-            }
-        }
-    }
-}
-
-fn bytes(path: &Path) -> Result<Option<Vec<u8>>> {
-    match fs::read(path) {
-        Ok(b) => Ok(Some(b)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
-    }
 }
 
 fn prepare(
     roots: &SessionRoots,
     plan: &LifecyclePlan,
     reasons: &BTreeMap<PathBuf, TrashReason>,
-    dir: &Path,
-) -> Result<Journal> {
+) -> Result<Staging> {
     let paths = roots.trash.as_ref().context("trash store unavailable")?;
-    let old_entries = bytes(&paths.metadata_file)?;
-    let mut entries: Vec<TrashEntry> = match &old_entries {
-        Some(data) => std::str::from_utf8(data)?
-            .lines()
-            .filter(|s| !s.trim().is_empty())
-            .map(serde_json::from_str)
-            .collect::<std::result::Result<_, _>>()?,
-        None => Vec::new(),
+    let mut staging = Staging::new(vec![plan.clone()]);
+    let items = if plan.operation == Operation::Trash {
+        Vec::new()
+    } else {
+        TrashStore::new(paths.clone()).snapshot()?
     };
-    let old_reasons = bytes(&paths.reasons_file)?;
-    let mut records: BTreeMap<String, TrashRecord> = old_reasons
-        .as_deref()
-        .map(serde_json::from_slice)
-        .transpose()?
-        .unwrap_or_default();
-    let mut occupied = entries
-        .iter()
-        .map(|e| e.nm.clone())
-        .collect::<BTreeSet<_>>();
-    let mut transfers = Vec::new();
-    for m in plan.members.values() {
-        let existing = entries
-            .iter()
-            .find(|e| {
-                m.path == e.trash_path(paths)
-                    || (m.agent == Agent::Antigravity && m.path.starts_with(e.trash_path(paths)))
-            })
-            .cloned();
-        let target = match plan.operation {
+    for member in plan.members.values() {
+        match plan.operation {
             Operation::Trash => {
-                let base = if m.agent == Agent::Antigravity {
-                    format!("{}.antigravity", m.thread_id)
-                } else {
-                    m.path
-                        .file_name()
-                        .context("missing filename")?
-                        .to_string_lossy()
-                        .into_owned()
-                };
-                let mut name = base.clone();
-                let mut n = 1;
-                while occupied.contains(&name) || paths.trash_dir.join(&name).try_exists()? {
-                    name = format!("{n}-{base}");
-                    n += 1;
-                }
-                occupied.insert(name.clone());
-                let entry = TrashEntry {
-                    ts: chrono::Utc::now().to_rfc3339(),
-                    nm: name.clone(),
-                    op: m.original_path.display().to_string(),
-                    tn: m.agent.as_str().into(),
-                };
-                records.insert(
-                    name,
-                    TrashRecord {
-                        trashed_at: entry.ts.clone(),
-                        original_path: entry.op.clone(),
-                        agent: entry.tn.clone(),
-                        reason: reasons
-                            .get(&m.path)
-                            .cloned()
-                            .context("missing action provenance")?,
-                    },
+                let reason = reasons
+                    .get(&member.path)
+                    .cloned()
+                    .context("missing action provenance")?;
+                let (metadata, sources) = trash::new_item(member.agent, &member.path, reason)?;
+                let copies = sources
+                    .into_iter()
+                    .zip(metadata.members.iter().map(|p| p.stored_path.clone()))
+                    .collect::<Vec<_>>();
+                staging.publish_item(&paths.trash_dir, &metadata, &copies)?;
+            }
+            Operation::Restore | Operation::Delete if member.trashed => {
+                let item = items
+                    .iter()
+                    .find(|i| i.primary.as_ref() == Some(&member.path))
+                    .context("trash item disappeared")?;
+                ensure!(
+                    item.legacy_copies.is_none(),
+                    "trash item still needs migration"
                 );
-                let target = entry.trash_path(paths);
-                entries.push(entry);
-                Some(target)
-            }
-            Operation::Restore => Some(m.original_path.clone()),
-            Operation::Delete => None,
-        };
-        if plan.operation != Operation::Trash && m.trashed {
-            let entry = existing.as_ref().context("trash metadata disappeared")?;
-            entries.retain(|e| e.nm != entry.nm);
-            records.remove(&entry.nm);
-        }
-        let mut pairs = Vec::new();
-        if m.agent == Agent::Antigravity {
-            let source = AntigravityBundlePaths::from_transcript(&m.path)?;
-            match plan.operation {
-                Operation::Trash => {
-                    let dest = AntigravityBundlePaths::in_archive(
-                        target.as_ref().context("missing bundle target")?,
-                        &m.thread_id,
+                let stamp = Stamp::read(&item.path)?;
+                if plan.operation == Operation::Restore {
+                    ensure!(
+                        item.original_path().as_ref() == Some(&member.original_path),
+                        "restore destination changed"
                     );
-                    pairs.push((source.conversation_dir.clone(), Some(dest.conversation_dir)));
-                    for db in source.database_paths()? {
-                        pairs.push((
-                            db.clone(),
-                            Some(
-                                dest.conversations_dir
-                                    .join(db.file_name().context("invalid database filename")?),
-                            ),
-                        ));
+                    for (source, target) in item.restore_pairs()? {
+                        ensure!(
+                            super::in_provider_root(roots, member.agent, &target),
+                            "restore destination is outside the provider home: {}",
+                            target.display()
+                        );
+                        staging.publish_copy(&source, target)?;
                     }
                 }
-                Operation::Restore => {
-                    let dest = AntigravityBundlePaths::from_transcript(&m.original_path)?;
-                    pairs.push((source.conversation_dir.clone(), Some(dest.conversation_dir)));
-                    for db in source.database_paths()? {
-                        pairs.push((
-                            db.clone(),
-                            Some(
-                                dest.conversations_dir
-                                    .join(db.file_name().context("invalid database filename")?),
-                            ),
-                        ));
-                    }
-                }
-                Operation::Delete => {
-                    if let Some(entry) = existing {
-                        pairs.push((entry.trash_path(paths), None));
-                    } else {
-                        pairs.push((source.conversation_dir.clone(), None));
-                        for db in source.database_paths()? {
-                            pairs.push((db, None));
-                        }
-                    }
+                staging.retire(item.path.clone(), stamp)?;
+            }
+            Operation::Delete => {
+                let (_, sources) = trash::native_payload(member.agent, &member.path)?;
+                for source in sources {
+                    let stamp = Stamp::read(&source)?;
+                    staging.retire(source, stamp)?;
                 }
             }
-        } else {
-            pairs.push((m.path.clone(), target));
-        }
-        for (source, target) in pairs {
-            if let Some(target) = &target {
-                if target.try_exists()? {
-                    bail!("destination already exists: {}", target.display());
-                }
-            }
-            let backup = dir.join(format!("source-{}", transfers.len()));
-            let before = digest(&source)?;
-            copy_new(&source, &backup)?;
-            if digest(&backup)? != before || digest(&source)? != before {
-                bail!("source changed while staging {}", source.display());
-            }
-            transfers.push(Transfer {
-                source,
-                target,
-                backup,
-                digest: before,
-                published_identity: None,
-            });
+            Operation::Restore => bail!("cannot restore an active session"),
         }
     }
-    let mut after_entries = Vec::new();
-    for entry in entries {
-        serde_json::to_writer(&mut after_entries, &entry)?;
-        after_entries.push(b'\n');
-    }
-    Ok(Journal {
-        committed: false,
-        plan: plan.clone(),
-        transfers,
-        metadata: vec![
-            MetadataChange {
-                path: paths.metadata_file.clone(),
-                before: old_entries,
-                after: after_entries,
-            },
-            MetadataChange {
-                path: paths.reasons_file.clone(),
-                before: old_reasons,
-                after: serde_json::to_vec_pretty(&records)?,
-            },
-        ],
-    })
+    Ok(staging)
 }
 
-fn apply(journal: &mut Journal, directory: &Path) -> Result<()> {
-    // All originals remain available until every destination is published and verified.
-    for index in 0..journal.transfers.len() {
-        let transfer = &mut journal.transfers[index];
-        if digest(&transfer.source)? != transfer.digest {
-            bail!("source changed: {}", transfer.source.display());
+fn digest(path: &Path) -> Result<[u8; 32]> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_dir() {
+        let children = trash::children(path)?;
+        let mut output = directory_digest(children.len());
+        for child in children {
+            hash_child(&mut output, &child, digest(&child)?)?;
         }
-        if let Some(target) = &transfer.target {
-            copy_new(&transfer.backup, target)?;
-            transfer.published_identity = identity(target)?;
-            save(directory, journal)?;
-        }
+        Ok(output.finalize().into())
+    } else if metadata.is_file() {
+        let (size, bytes) = copy_hash(File::open(path)?, io::sink())?;
+        ensure!(
+            size == metadata.len(),
+            "file changed while reading {}",
+            path.display()
+        );
+        Ok(file_digest(size, bytes))
+    } else {
+        bail!("unsupported source {}", path.display());
     }
-    for change in &journal.metadata {
-        if bytes(&change.path)? != change.before {
-            bail!("trash metadata changed during operation");
-        }
-        atomic_write(&change.path, &change.after)?;
-    }
-    for (index, transfer) in journal.transfers.iter().enumerate() {
-        if digest(&transfer.source)? != transfer.digest {
-            bail!(
-                "source changed before removal: {}",
-                transfer.source.display()
-            );
-        }
-        remove(&transfer.source)?;
-        #[cfg(test)]
-        if FAIL_AFTER_REMOVAL.with(|value| value.get()) == Some(index) {
-            bail!("injected removal failure");
-        }
-        #[cfg(not(test))]
-        let _ = index;
-    }
+}
+
+fn directory_digest(children: usize) -> Sha256 {
+    let mut output = Sha256::new();
+    output.update(b"dir\0");
+    output.update((children as u64).to_le_bytes());
+    output
+}
+
+fn hash_child(output: &mut Sha256, path: &Path, digest: [u8; 32]) -> Result<()> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .with_context(|| format!("non-UTF-8 name in {}", path.display()))?;
+    output.update((name.len() as u64).to_le_bytes());
+    output.update(name.as_bytes());
+    output.update(digest);
     Ok(())
 }
 
-fn rollback(journal: &Journal) -> Result<()> {
-    for transfer in &journal.transfers {
-        if digest(&transfer.backup)? != transfer.digest {
-            bail!("staged backup changed: {}", transfer.backup.display());
-        }
-        if transfer.source.try_exists()? {
-            if digest(&transfer.source)? != transfer.digest {
-                bail!(
-                    "source was changed externally: {}",
-                    transfer.source.display()
-                );
-            }
-        } else {
-            copy_new(&transfer.backup, &transfer.source)?;
-        }
-    }
-    for transfer in &journal.transfers {
-        if let Some(target) = &transfer.target {
-            if target.try_exists()? {
-                if transfer.published_identity.is_none()
-                    || identity(target)? != transfer.published_identity
-                    || digest(target)? != transfer.digest
-                {
-                    bail!(
-                        "destination changed or is incomplete; preserved {}",
-                        target.display()
-                    );
-                }
-                remove(target)?;
-            }
-        }
-    }
-    for change in &journal.metadata {
-        let current = bytes(&change.path)?;
-        if current == change.before {
-            continue;
-        }
-        if current.as_deref() != Some(change.after.as_slice()) {
-            bail!(
-                "trash metadata changed externally: {}",
-                change.path.display()
-            );
-        }
-        if let Some(before) = &change.before {
-            atomic_write(&change.path, before)?;
-        } else {
-            fs::remove_file(&change.path)?;
-        }
-    }
-    Ok(())
-}
-
-fn save(directory: &Path, journal: &Journal) -> Result<()> {
-    atomic_write(
-        &directory.join("operation.json"),
-        &serde_json::to_vec_pretty(journal)?,
-    )
+fn file_digest(size: u64, bytes: [u8; 32]) -> [u8; 32] {
+    let mut output = Sha256::new();
+    output.update(b"file\0");
+    output.update(size.to_le_bytes());
+    output.update(bytes);
+    output.finalize().into()
 }
 
 fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
@@ -614,54 +758,31 @@ fn remove(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn digest(path: &Path) -> Result<String> {
-    fn hash(path: &Path, output: &mut Sha256) -> Result<()> {
-        let metadata = fs::symlink_metadata(path)?;
-        if metadata.is_symlink() {
-            bail!("refusing symlink {}", path.display());
+#[cfg(test)]
+thread_local! {
+    static FAIL_AFTER_RETIREMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn copy_hash(mut input: impl Read, mut output: impl Write) -> Result<(u64, [u8; 32])> {
+    let mut digest = Sha256::new();
+    let mut size = 0;
+    let mut buffer = [0; 65536];
+    loop {
+        let count = input.read(&mut buffer)?;
+        if count == 0 {
+            break;
         }
-        if metadata.is_dir() {
-            output.update(b"dir\0");
-            let mut entries = fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
-            entries.sort_by_key(|e| e.file_name());
-            for entry in entries {
-                output.update(entry.file_name().as_encoded_bytes());
-                output.update(b"\0");
-                hash(&entry.path(), output)?;
-            }
-        } else if metadata.is_file() {
-            output.update(b"file\0");
-            let mut input = File::open(path)?;
-            let mut buffer = [0; 65536];
-            loop {
-                let n = input.read(&mut buffer)?;
-                if n == 0 {
-                    break;
-                }
-                output.update(&buffer[..n]);
-            }
-        } else {
-            bail!("unsupported source {}", path.display());
-        }
-        Ok(())
+        output.write_all(&buffer[..count])?;
+        digest.update(&buffer[..count]);
+        size += count as u64;
     }
-    let mut output = Sha256::new();
-    hash(path, &mut output)?;
-    Ok(output
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok((size, digest.finalize().into()))
 }
 
 #[cfg(test)]
-thread_local! { static FAIL_AFTER_REMOVAL: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
-
-#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::trash::TrashPaths;
-    use tempfile::TempDir;
 
     fn fixture() -> Result<(TempDir, SessionRoots, LifecyclePlan)> {
         let temp = TempDir::new()?;
@@ -683,7 +804,7 @@ mod tests {
             r#"{"type":"session_meta","payload":{"id":"child","history_base":{"thread_id":"parent"}}}"#,
         )?;
         let plan = DependencyGraph::discover(&roots, Agent::Codex, &[])?
-            .plan(BTreeSet::from([parent]), Operation::Trash);
+            .plan([parent].into(), Operation::Trash);
         Ok((temp, roots, plan))
     }
 
@@ -695,83 +816,161 @@ mod tests {
     }
 
     #[test]
-    fn failures_after_removal_roll_back_trash_restore_and_purge() -> Result<()> {
-        let (_temp, roots, plan) = fixture()?;
+    fn rollback_after_retirement_preserves_trash_restore_and_purge_sources() -> Result<()> {
+        let (_temp, roots, trash_plan) = fixture()?;
+        let store = TrashStore::new(roots.trash.clone().unwrap());
         for operation in [Operation::Trash, Operation::Restore, Operation::Delete] {
             let plan = if operation == Operation::Trash {
-                plan.clone()
+                trash_plan.clone()
             } else {
-                DependencyGraph::discover(&roots, Agent::Codex, &[])?.plan(
-                    BTreeSet::from([roots.trash.as_ref().unwrap().trash_dir.join("parent.jsonl")]),
-                    operation,
-                )
+                let item = store.snapshot()?.into_iter().next().unwrap();
+                DependencyGraph::discover(&roots, Agent::Codex, &[])?
+                    .plan([item.primary.unwrap()].into(), operation)
             };
-            let before = plan
+            let originals = plan
                 .members
                 .keys()
                 .map(|p| Ok((p.clone(), fs::read(p)?)))
                 .collect::<Result<BTreeMap<_, _>>>()?;
-            let metadata_before = bytes(&roots.trash.as_ref().unwrap().metadata_file)?;
-            FAIL_AFTER_REMOVAL.with(|value| value.set(Some(0)));
+            let before = store
+                .snapshot()?
+                .into_iter()
+                .map(|i| Ok((i.path.clone(), digest(&i.path)?)))
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            FAIL_AFTER_RETIREMENT.with(|flag| flag.set(true));
             let result = execute(&roots, &plan, &reasons(&plan));
-            FAIL_AFTER_REMOVAL.with(|value| value.set(None));
+            FAIL_AFTER_RETIREMENT.with(|flag| flag.set(false));
             assert!(result.unwrap_err().to_string().contains("rolled back"));
-            for (path, contents) in before {
-                assert_eq!(fs::read(path)?, contents);
+            for (p, contents) in originals {
+                assert_eq!(fs::read(p)?, contents);
             }
-            assert_eq!(
-                bytes(&roots.trash.as_ref().unwrap().metadata_file)?,
-                metadata_before
-            );
+            let after = store
+                .snapshot()?
+                .into_iter()
+                .map(|i| Ok((i.path.clone(), digest(&i.path)?)))
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            assert_eq!(after, before);
             if operation == Operation::Trash {
-                let fresh = DependencyGraph::discover(&roots, Agent::Codex, &[])?
-                    .plan(plan.seeds, operation);
-                execute(&roots, &fresh, &reasons(&fresh))?;
+                execute(&roots, &plan, &reasons(&plan))?;
             }
         }
         Ok(())
     }
 
     #[test]
-    fn startup_recovers_a_durable_journal_after_partial_removal() -> Result<()> {
+    fn startup_rolls_back_a_rename_even_without_a_post_rename_journal_write() -> Result<()> {
         let (_temp, roots, plan) = fixture()?;
-        let (_lock, operations) = lock(&roots)?;
-        let directory = operations.join("interrupted");
-        fs::create_dir(&directory)?;
-        let mut journal = prepare(&roots, &plan, &reasons(&plan), &directory)?;
-        save(&directory, &journal)?;
-        FAIL_AFTER_REMOVAL.with(|value| value.set(Some(0)));
-        let result = apply(&mut journal, &directory);
-        FAIL_AFTER_REMOVAL.with(|value| value.set(None));
-        assert!(result.is_err());
-        assert!(!journal.transfers[0].source.exists());
-        drop(_lock);
+        let (lock, operations) = lock(&roots)?;
+        let (directory, journal) = prepare(&roots, &plan, &reasons(&plan))?.persist(&operations)?;
+        // Simulate a stop after publish and the first source retirement.
+        journal.publications[0].apply()?;
+        journal.retirements[0].apply()?;
+        assert!(!journal.retirements[0].from.exists());
+        drop(lock);
         recover(&roots)?;
-        for transfer in &journal.transfers {
-            assert_eq!(digest(&transfer.source)?, transfer.digest);
-            assert!(!transfer.target.as_ref().unwrap().exists());
+        for entry in &journal.retirements {
+            entry.stamp.verify(&entry.from)?;
         }
+        assert!(journal.publications.iter().all(|entry| !entry.to.exists()));
         assert!(!directory.exists());
         Ok(())
     }
 
     #[test]
-    fn rollback_preserves_an_external_destination_even_with_identical_bytes() -> Result<()> {
+    fn collision_rolls_back_without_removing_an_identical_foreign_item() -> Result<()> {
         let (_temp, roots, plan) = fixture()?;
-        let (_lock, operations) = lock(&roots)?;
-        let directory = operations.join("collision");
-        fs::create_dir(&directory)?;
-        let mut journal = prepare(&roots, &plan, &reasons(&plan), &directory)?;
-        save(&directory, &journal)?;
-        let target = journal.transfers[0].target.clone().unwrap();
-        copy_new(&journal.transfers[0].backup, &target)?;
-        assert!(apply(&mut journal, &directory).is_err());
-        assert!(rollback(&journal).is_err());
-        assert!(target.exists());
-        assert!(journal
-            .transfers
-            .iter()
-            .all(|t| t.source.exists() && t.backup.exists()));
+        let (lock, operations) = lock(&roots)?;
+        let (directory, journal) = prepare(&roots, &plan, &reasons(&plan))?.persist(&operations)?;
+        let publication = &journal.publications[0];
+        copy_new(&publication.from, &publication.to)?;
+        let foreign = entry_identity(&publication.to)?;
+        assert!(publication.apply().is_err());
+        drop(lock);
+        recover(&roots)?;
+        assert_eq!(entry_identity(&publication.to)?, foreign);
+        assert!(journal.retirements.iter().all(|entry| entry.from.exists()));
+        assert!(!directory.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_preserves_a_changed_published_item() -> Result<()> {
+        let (_temp, roots, plan) = fixture()?;
+        let (lock, operations) = lock(&roots)?;
+        let (directory, journal) = prepare(&roots, &plan, &reasons(&plan))?.persist(&operations)?;
+        let publication = &journal.publications[0];
+        publication.apply()?;
+        journal.retirements[0].apply()?;
+        let external = publication.to.join("external.txt");
+        fs::write(&external, "external edit")?;
+        drop(lock);
+        assert!(recover(&roots).is_err());
+        assert_eq!(fs::read_to_string(external)?, "external edit");
+        assert!(journal.retirements[0].from.exists());
+        assert!(directory.join(JOURNAL).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn committed_archive_recovery_keeps_backups_when_the_zip_is_missing() -> Result<()> {
+        let (temp, roots, plan) = fixture()?;
+        execute(&roots, &plan, &reasons(&plan))?;
+        let item = TrashStore::new(roots.trash.clone().unwrap())
+            .snapshot()?
+            .pop()
+            .unwrap();
+        let zip = temp.path().join("published.zip");
+        fs::write(&zip, b"verified archive fixture")?;
+        let (lock, operations) = lock(&roots)?;
+        let mut staging = Staging::new(Vec::new());
+        staging.journal.archive = Some(VerifiedArchive {
+            path: zip.clone(),
+            stamp: Stamp::read(&zip)?,
+        });
+        staging.retire(item.path.clone(), Stamp::read(&item.path)?)?;
+        let (directory, mut journal) = staging.persist(&operations)?;
+        journal.retirements[0].apply()?;
+        journal.committed = true;
+        journal.save(&directory)?;
+        fs::remove_file(zip)?;
+        drop(lock);
+        assert!(recover(&roots).is_err());
+        journal.retirements[0]
+            .stamp
+            .verify(&journal.retirements[0].to)?;
+        assert!(directory.join(JOURNAL).is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn archive_cleanup_failure_keeps_both_the_zip_and_the_trash_items() -> Result<()> {
+        let (temp, roots, plan) = fixture()?;
+        execute(&roots, &plan, &reasons(&plan))?;
+        let store = TrashStore::new(roots.trash.clone().unwrap());
+        let before = store
+            .snapshot()?
+            .into_iter()
+            .map(|item| Ok((item.path.clone(), digest(&item.path)?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let zip = temp.path().join("archive.zip");
+        FAIL_AFTER_RETIREMENT.with(|flag| flag.set(true));
+        let result = archive_trash(&roots, &zip, true, false);
+        FAIL_AFTER_RETIREMENT.with(|flag| flag.set(false));
+        assert!(result.unwrap_err().to_string().contains("rolled back"));
+        let after = store
+            .snapshot()?
+            .into_iter()
+            .map(|item| Ok((item.path.clone(), digest(&item.path)?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        assert_eq!(before, after);
+        let extracted = temp.path().join("extracted");
+        zip::ZipArchive::new(File::open(zip)?)?.extract(&extracted)?;
+        for (path, expected) in before {
+            assert_eq!(
+                digest(&extracted.join("trash").join(path.file_name().unwrap()))?,
+                expected
+            );
+        }
         Ok(())
     }
 }

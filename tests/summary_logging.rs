@@ -21,6 +21,7 @@ fn summary_failure_is_flushed_even_when_rust_log_is_off() -> Result<()> {
     let worker = SummaryWorker::spawn()?;
     worker.send(SummaryCommand {
         jsonl_path: missing_session.clone(),
+        trash_paths: None,
         source: None,
         backend: SummarizeBackend::Custom,
         command_template: "unused".to_owned(),

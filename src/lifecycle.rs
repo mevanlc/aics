@@ -13,12 +13,12 @@ use crate::live::{LiveSessionSnapshot, LiveSessionTracker};
 use crate::parse::session::fallback_session_id;
 use crate::parse::{parse_session_file, Agent};
 use crate::scan::SessionRoots;
-use crate::trash::{TrashEntry, TrashReason};
+use crate::trash::{TrashReason, TrashStore};
 
 mod file_identity;
 mod transaction;
-pub use transaction::{execute, recover};
-pub(crate) use transaction::{read_guard, RecoveryRequired};
+pub use transaction::{archive_trash, execute, initialize_trash, recover};
+pub(crate) use transaction::{read_guard, read_trash_guard, RecoveryRequired};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -188,6 +188,23 @@ pub(crate) fn resolved_path(path: &Path) -> PathBuf {
         (Some(parent), Some(name)) => resolved_path(parent).join(name),
         _ => path.to_path_buf(),
     }
+}
+
+fn in_provider_root(roots: &SessionRoots, agent: Agent, path: &Path) -> bool {
+    let root = match agent {
+        Agent::Claude => &roots.claude_projects,
+        Agent::Codex => &roots.codex_sessions,
+        Agent::Antigravity => &roots.antigravity_home,
+    };
+    if !path.is_absolute() || root.as_os_str().is_empty() {
+        return false;
+    }
+    let path = resolved_path(path);
+    path.starts_with(resolved_path(root))
+        || (agent == Agent::Codex
+            && root
+                .parent()
+                .is_some_and(|p| path.starts_with(resolved_path(&p.join("archived_sessions")))))
 }
 
 /// Walks active and archived session trees.
@@ -442,47 +459,34 @@ impl DependencyGraph {
             graph.insert(path, agent, member);
         }
         if let Some(trash) = &roots.trash {
-            match File::open(&trash.metadata_file) {
-                Ok(file) => {
-                    for line in BufReader::new(file).lines() {
-                        let entry: TrashEntry = serde_json::from_str(&line?)?;
-                        if entry.agent() != Some(agent) {
-                            continue;
-                        }
-                        let original = PathBuf::from(&entry.op);
-                        if !resolved_path(&original).starts_with(resolved_path(root))
-                            && !(agent == Agent::Codex
-                                && archive.as_ref().is_some_and(|p| {
-                                    resolved_path(&original).starts_with(resolved_path(p))
-                                }))
-                        {
-                            continue;
-                        }
-                        let mut path = entry.trash_path(trash);
-                        if agent == Agent::Antigravity {
-                            let bundle =
-                                crate::trash::AntigravityBundlePaths::from_transcript(&original)?;
-                            path = crate::trash::AntigravityBundlePaths::in_archive(
-                                &path,
-                                &bundle.session_id,
-                            )
-                            .transcript;
-                        }
-                        match path.try_exists() {
-                            Ok(true) => graph.add(&path, &original, agent, true, false),
-                            Ok(false) => {}
-                            Err(e) => graph.record_error(
-                                &path,
-                                agent,
-                                format!("cannot verify {}: {e}", path.display()),
-                            ),
-                        }
-                    }
+            for item in TrashStore::new(trash.clone()).snapshot()? {
+                if item.metadata.agent != Some(agent) {
+                    continue;
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => graph
-                    .errors
-                    .push(format!("cannot inspect trash metadata: {e}")),
+                let original = item.original_path();
+                if original
+                    .as_ref()
+                    .is_some_and(|path| !in_provider_root(roots, agent, path))
+                {
+                    continue;
+                }
+                if let Some(path) = &item.primary {
+                    // Keep readable transcripts with unknown destinations in
+                    // dependency analysis. Their existing path blocks restore.
+                    graph.add(
+                        path,
+                        original.as_deref().unwrap_or(path),
+                        agent,
+                        true,
+                        false,
+                    );
+                } else {
+                    graph.record_error(
+                        &item.path,
+                        agent,
+                        format!("cannot locate trash transcript in {}", item.path.display()),
+                    );
+                }
             }
         }
         for path in seeds {

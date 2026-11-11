@@ -57,7 +57,7 @@ use crate::summary::{
     AicsSummaryPreview, ClaudeAutosummaryPreview, CodexAutosummaryPreview, SummaryCommand,
     SummaryEvent, SummarySidecar, SummarySources, SummaryWorker,
 };
-use crate::trash::{TrashReason, TrashStore};
+use crate::trash::{AntigravityBundlePaths, TrashReason};
 use crate::tui::actions::{self, ActionMenuState, ActionOutcome, SessionAction};
 use crate::tui::ansi::strip_terminal_escapes;
 use crate::tui::filter::{FilterModalState, FilterOutcome, FilterUpdate};
@@ -3330,6 +3330,7 @@ impl App {
 
         let command = SummaryCommand {
             jsonl_path: path.clone(),
+            trash_paths: self.roots.trash.clone(),
             source: hit.session.source.clone(),
             backend: crate::summary::SummarizeBackend::Custom,
             command_template: template,
@@ -3620,14 +3621,8 @@ impl App {
             return Ok(());
         };
         let target = if hit.session.agent == Agent::Antigravity {
-            let Some(paths) = self.roots.trash.clone() else {
-                self.statusline = Some(statusline::Entry::failed(
-                    "cannot restore Antigravity bundle: trash store is unavailable",
-                ));
-                return Ok(());
-            };
-            match TrashStore::new(paths).restore_target(&hit.session.file_path) {
-                Ok(target) => target,
+            match AntigravityBundlePaths::from_transcript(&original_path) {
+                Ok(bundle) => bundle.conversation_dir,
                 Err(error) => {
                     self.statusline = Some(statusline::Entry::failed(format!("{error:#}")));
                     return Ok(());
@@ -5676,16 +5671,13 @@ mod tests {
         assert!(!source.exists());
         let trash_entries = fs::read_dir(data_root.join("trash")).unwrap().count();
         assert_eq!(trash_entries, 1);
-        let metadata = fs::read_to_string(data_root.join("trash.jsonl")).unwrap();
-        assert!(metadata.contains("\"tn\":\"claude\""));
-        let records = TrashStore::new(TrashPaths::from_data_root(&data_root))
-            .reasons()
+        let items = TrashStore::new(TrashPaths::from_data_root(&data_root))
+            .snapshot()
             .unwrap();
+        assert_eq!(items[0].metadata.agent, Some(Agent::Claude));
         assert_eq!(
-            records["session.jsonl"].reason,
-            super::TrashReason::KeyBinding {
-                key: "^T".to_owned()
-            }
+            items[0].metadata.reason,
+            Some(super::TrashReason::KeyBinding { key: "^T".into() })
         );
     }
 
@@ -5709,14 +5701,14 @@ mod tests {
         app.handle_key(crossterm_key(KeyCode::Char('d'))).unwrap();
         assert!(!source.exists());
         let store = TrashStore::new(paths.clone());
+        let items = store.snapshot().unwrap();
         assert_eq!(
-            store.reasons().unwrap()["session.jsonl"].reason,
-            super::TrashReason::ActionMenu {
-                action: "Move session to Trash".to_owned(),
-            }
+            items[0].metadata.reason,
+            Some(super::TrashReason::ActionMenu {
+                action: "Move session to Trash".into(),
+            })
         );
-
-        let trashed = paths.trash_dir.join("session.jsonl");
+        let trashed = items[0].primary.clone().unwrap();
         let mut hit = sample_hit_with_path(Agent::Codex, trashed.clone());
         hit.session.trashed = true;
         app.results = vec![hit];
@@ -5724,7 +5716,7 @@ mod tests {
         app.handle_key(crossterm_key(KeyCode::Char('d'))).unwrap();
         app.handle_key(crossterm_key(KeyCode::Char('y'))).unwrap();
         assert!(!trashed.exists());
-        assert!(store.reasons().unwrap().is_empty());
+        assert!(store.snapshot().unwrap().is_empty());
     }
 
     #[test]
@@ -5785,15 +5777,16 @@ mod tests {
 
         assert!(!source.exists());
         assert!(!database.exists());
-        assert!(data_root
-            .join("trash/session-123.antigravity/brain/session-123/.system_generated/logs/transcript.jsonl")
-            .exists());
-        assert!(data_root
-            .join("trash/session-123.antigravity/conversations/session-123.db")
+        let items = TrashStore::new(TrashPaths::from_data_root(&data_root))
+            .snapshot()
+            .unwrap();
+        assert_eq!(items[0].metadata.agent, Some(Agent::Antigravity));
+        assert!(items[0].primary.as_ref().unwrap().exists());
+        assert!(items[0]
+            .path
+            .join("payload/conversations/session-123.db")
             .exists());
         assert!(app.results.is_empty());
-        let metadata = fs::read_to_string(data_root.join("trash.jsonl")).unwrap();
-        assert!(metadata.contains("\"tn\":\"antigravity\""));
     }
 
     #[test]
@@ -7587,12 +7580,10 @@ mod tests {
         let target = temp.path().join("restore/session.jsonl");
         fs::create_dir_all(trash_source.parent().unwrap()).unwrap();
         fs::write(&trash_source, r#"{"type":"user","sessionId":"session-123","message":{"role":"user","content":"fixture"}}"#).unwrap();
-        let entry = crate::trash::TrashEntry {
-            ts: "2026-10-11T00:00:00Z".into(),
-            nm: "session.jsonl".into(),
-            op: target.display().to_string(),
-            tn: "claude".into(),
-        };
+        let entry = serde_json::json!({
+            "ts": "2026-10-11T00:00:00Z", "nm": "session.jsonl",
+            "op": target, "tn": "claude",
+        });
         fs::write(
             temp.path().join("data/trash.jsonl"),
             serde_json::to_string(&entry).unwrap() + "\n",
@@ -7601,6 +7592,14 @@ mod tests {
         let mut app = test_app();
         app.roots.claude_projects = temp.path().join("restore");
         app.roots.trash = Some(TrashPaths::from_data_root(temp.path().join("data")));
+        crate::lifecycle::initialize_trash(&app.roots).unwrap();
+        let trash_source = TrashStore::new(app.roots.trash.clone().unwrap())
+            .snapshot()
+            .unwrap()
+            .pop()
+            .unwrap()
+            .primary
+            .unwrap();
         app.results = vec![sample_trashed_hit_with_paths(
             Agent::Claude,
             trash_source.clone(),
@@ -7640,21 +7639,36 @@ mod tests {
         fs::write(&database, "database").unwrap();
         let original = transcript.canonicalize().unwrap();
         let trash_paths = TrashPaths::from_data_root(temp.path().join("data"));
-        let entry = TrashStore::new(trash_paths.clone())
-            .trash_session(
-                &transcript,
-                Agent::Antigravity,
-                &super::TrashReason::KeyBinding {
-                    key: "^T".to_owned(),
-                },
-            )
-            .unwrap();
-        let archive = entry.trash_path(&trash_paths);
-        let trash_source =
-            archive.join("brain/session-123/.system_generated/logs/transcript.jsonl");
         let mut app = test_app();
         app.roots.antigravity_home = temp.path().join("antigravity");
-        app.roots.trash = Some(trash_paths);
+        app.roots.trash = Some(trash_paths.clone());
+        let plan = crate::lifecycle::DependencyGraph::discover(
+            &app.roots,
+            Agent::Antigravity,
+            std::slice::from_ref(&transcript),
+        )
+        .unwrap()
+        .plan(
+            [transcript.clone()].into(),
+            crate::lifecycle::Operation::Trash,
+        );
+        crate::lifecycle::execute(
+            &app.roots,
+            &plan,
+            &[(
+                transcript,
+                super::TrashReason::KeyBinding { key: "^T".into() },
+            )]
+            .into(),
+        )
+        .unwrap();
+        let item = TrashStore::new(trash_paths)
+            .snapshot()
+            .unwrap()
+            .pop()
+            .unwrap();
+        let archive = item.path;
+        let trash_source = item.primary.unwrap();
         app.results = vec![sample_trashed_hit_with_paths(
             Agent::Antigravity,
             trash_source,

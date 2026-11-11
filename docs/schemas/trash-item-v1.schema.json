@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AICS trash item, version 1",
+  "type": "object",
+  "required": ["schema_version", "agent", "trashed_at", "session_path", "members"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "agent": { "enum": ["claude", "codex", "antigravity", null] },
+    "trashed_at": { "type": ["string", "null"], "format": "date-time" },
+    "session_path": { "anyOf": [{ "$ref": "#/$defs/payloadPath" }, { "type": "null" }] },
+    "members": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["stored_path", "original_path"],
+        "properties": {
+          "stored_path": { "$ref": "#/$defs/payloadPath" },
+          "original_path": { "type": ["string", "null"], "description": "Absolute path on the original machine." }
+        }
+      }
+    },
+    "reason": { "$ref": "#/$defs/reason" }
+  },
+  "$defs": {
+    "payloadPath": {
+      "type": "string",
+      "description": "Path relative to the item directory, inside payload.",
+      "pattern": "^payload/.+"
+    },
+    "reason": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["source", "key"],
+          "properties": { "source": { "const": "key_binding" }, "key": { "type": "string" } }
+        },
+        {
+          "type": "object",
+          "required": ["source", "action"],
+          "properties": { "source": { "const": "action_menu" }, "action": { "type": "string" } }
+        },
+        {
+          "type": "object",
+          "required": ["source", "name"],
+          "properties": {
+            "source": { "const": "rule" },
+            "name": { "type": "string" },
+            "reason": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["source", "triggers", "selected_paths", "relation"],
+          "properties": {
+            "source": { "const": "dependency_group" },
+            "triggers": { "type": "array", "items": { "$ref": "#/$defs/reason" } },
+            "selected_paths": { "type": "array", "items": { "type": "string" } },
+            "relation": { "type": "string" }
+          }
+        }
+      ]
+    }
+  }
+}

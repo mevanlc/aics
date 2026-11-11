@@ -27,6 +27,7 @@ use crate::summary::SummarizeBackend;
 #[derive(Debug, Clone)]
 pub struct SummaryCommand {
     pub jsonl_path: PathBuf,
+    pub trash_paths: Option<crate::trash::TrashPaths>,
     pub source: Option<std::sync::Arc<crate::conversation::ConversationSource>>,
     pub backend: SummarizeBackend,
     /// Shell template to execute. For built-in backends, caller should pass
@@ -215,12 +216,20 @@ fn run_one(command: &SummaryCommand) -> Result<PathBuf> {
         bail!("summarizer produced empty output");
     }
 
+    let _guard = command
+        .trash_paths
+        .as_ref()
+        .map(|paths| crate::lifecycle::read_trash_guard(paths, true))
+        .transpose()?;
     if command
         .source
         .as_ref()
         .is_some_and(|source| !source.is_current())
     {
         bail!("conversation history changed while the summary was generated");
+    }
+    if command.source.is_none() && fingerprint(jsonl_path)? != fp {
+        bail!("session changed while the summary was generated");
     }
     let sidecar = SummarySidecar::new(jsonl_path, &fp, command.backend, body);
     let target = sidecar_path(jsonl_path);
@@ -325,6 +334,7 @@ mod tests {
         worker
             .send(SummaryCommand {
                 jsonl_path: jsonl.clone(),
+                trash_paths: None,
                 source: None,
                 backend: SummarizeBackend::Custom,
                 command_template: template.to_owned(),
@@ -380,6 +390,7 @@ mod tests {
         worker
             .send(SummaryCommand {
                 jsonl_path: jsonl,
+                trash_paths: None,
                 source: None,
                 backend: SummarizeBackend::Custom,
                 command_template: template.to_owned(),

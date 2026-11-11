@@ -51,9 +51,11 @@ transcripts. Redirecting or piping without one of these flags is rejected.
 
 | Command / Flag | Primary End Result | Filesystem Side-Effects / Mutations | Safe for Read-Only Automation? |
 | --- | --- | --- | --- |
-| `aics [QUERY]` | Launches interactive TUI | None (updates index cache if needed) | No (requires interactive TTY) |
+| `aics [QUERY]` | Launches interactive TUI | Can migrate legacy trash and apply startup rules | No (requires interactive TTY) |
 | `aics --json [FILTERS] [QUERY]` | Streams JSONL records to stdout | None (updates index cache if needed) | **Yes** (primary automation command) |
 | `aics --export DIR [FILTERS]` | Writes Markdown files to DIR | Creates directory and writes Markdown files | Modifies filesystem (writes files) |
+| `aics --export-trash ZIPFILE` | Writes a ZIP of the whole trash store | Writes ZIP and migrates legacy trash if present | Modifies filesystem (keeps trash items) |
+| `aics --archive-trash ZIPFILE` | Writes a verified ZIP and removes its items | Writes ZIP and removes archived items | Mutates trash |
 | `aics --preview-rules` | Reviews proposed JS rule actions | None (evaluates rules read-only) | **Yes** (when combined with `--json`) |
 | `aics --apply-rules` | Evaluates and executes JS rules | Mutates session files (trash, delete, tag) | **Mutating** (alters session files) |
 | `aics --rebuild-index` | Rebuilds search index and continues | Rewrites index cache files | Safe (re-indexes existing files) |
@@ -145,6 +147,12 @@ Ordinary JSON searches skip automatic startup cleanup rules and lifecycle
 recovery; they may refresh the index cache. Explicit `--apply-rules --json`
 still applies rules. Exports retain automatic startup rules; use
 `--no-apply-rules` when exporting without cleanup actions.
+
+Use `--export-trash ZIPFILE` to copy trash or `--archive-trash ZIPFILE` to
+remove the items after verifying and publishing the ZIP. Pass `--yes` to
+overwrite an existing destination without an interactive prompt. Both commands
+operate on the entire store and accept the provider home overrides.
+See [trash recovery and archives](trash.md).
 
 ### Compact discovery records
 

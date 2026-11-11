@@ -701,13 +701,29 @@ fn logical_cleanup_and_restore_include_owned_pages_and_keep_full_history() -> Re
 fn active_conversation_reports_trashed_ancestor_and_allows_inspection() -> Result<()> {
     let mut fixture = Fixture::new()?;
     let trash = crate::trash::TrashPaths::from_data_root(fixture.temp.path().join("data"));
-    fixture.roots.trash = Some(trash.clone());
+    fixture.roots.trash = Some(trash);
     let root = fixture.write(
         "parent",
         "parent",
         None,
         None,
         &[message("u", "user", "recoverable history")],
+    )?;
+    let plan = crate::lifecycle::DependencyGraph::discover(&fixture.roots, Agent::Codex, &[])?
+        .plan(
+            [root.path.clone()].into(),
+            crate::lifecycle::Operation::Trash,
+        );
+    crate::lifecycle::execute(
+        &fixture.roots,
+        &plan,
+        &[(
+            root.path.clone(),
+            crate::trash::TrashReason::KeyBinding {
+                key: "fixture".into(),
+            },
+        )]
+        .into(),
     )?;
     fixture.write(
         "child",
@@ -716,14 +732,7 @@ fn active_conversation_reports_trashed_ancestor_and_allows_inspection() -> Resul
         Some(("parent", 2, root.offsets[1])),
         &[message("a", "assistant", "surviving answer")],
     )?;
-    // Simulate a partial removal left by an older version, bypassing lifecycle planning.
-    crate::trash::TrashStore::new(trash).trash_file(
-        &root.path,
-        Agent::Codex,
-        &crate::trash::TrashReason::KeyBinding {
-            key: "fixture".into(),
-        },
-    )?;
+
     let files = fixture.logical()?;
     let child = files.iter().find(|file| !file.trashed).unwrap();
     let session = parse_scanned_session_file(child)?.unwrap();
@@ -1127,6 +1136,7 @@ fn summary_worker_receives_inherited_history_and_keeps_sidecar_at_selected_rollo
     let worker = SummaryWorker::spawn()?;
     worker.send(SummaryCommand {
         jsonl_path: tip.path.clone(),
+        trash_paths: None,
         source: Some(source.clone()),
         backend: SummarizeBackend::Custom,
         command_template: "cat '{{jsonl_path}}' > '{{output_file}}'".into(),

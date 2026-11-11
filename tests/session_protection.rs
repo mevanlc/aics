@@ -13,6 +13,9 @@ use aics::rules::{
 };
 use aics::scan::SessionRoots;
 use aics::trash::{TrashPaths, TrashReason, TrashStore};
+
+#[path = "support/trash.rs"]
+mod trash_fixture;
 use anyhow::Result;
 use tempfile::TempDir;
 
@@ -301,8 +304,8 @@ fn proposals_recheck_activity_and_preserve_files_and_trash_metadata() -> Result<
     assert_eq!(report.proposals.len(), 3);
     let original_bytes = [&fixtures.claude, &fixtures.codex, &fixtures.antigravity]
         .map(|path| fs::read(path).unwrap());
-    let metadata_path = &fixtures.roots.trash.as_ref().unwrap().metadata_file;
-    let metadata_before = fs::read(metadata_path).ok();
+    let store = TrashStore::new(fixtures.roots.trash.clone().unwrap());
+    assert!(store.snapshot()?.is_empty());
     fixtures.marker(serde_json::json!({"pid":std::process::id(),"sessionId":ID}))?;
     fixtures.coordinate_codex()?;
     let codex = HeldLock::new(&fixtures.codex_lock());
@@ -319,7 +322,7 @@ fn proposals_recheck_activity_and_preserve_files_and_trash_metadata() -> Result<
     {
         assert_eq!(fs::read(path)?, bytes);
     }
-    assert_eq!(fs::read(metadata_path).ok(), metadata_before);
+    assert!(store.snapshot()?.is_empty());
     drop(codex);
     drop(antigravity);
     Ok(())
@@ -434,16 +437,17 @@ fn active_session_prevents_restoring_its_trashed_copy_for_each_provider() -> Res
             Agent::Codex => &fixtures.codex,
             Agent::Antigravity => &fixtures.antigravity,
         };
-        let store = TrashStore::new(fixtures.roots.trash.clone().unwrap());
-        let entry = store.trash_session(
+        let entry = trash_fixture::trash_session(
+            &fixtures.roots,
             original,
             agent,
-            &TrashReason::KeyBinding {
+            TrashReason::KeyBinding {
                 key: "test".to_owned(),
             },
         )?;
-        let trash_path = entry.trash_path(store.paths());
-        let metadata_before = fs::read(&store.paths().metadata_file)?;
+        let trash_path = entry.primary.unwrap();
+        let metadata_path = entry.path.join("metadata.json");
+        let metadata_before = fs::read(&metadata_path)?;
         fixtures.marker(serde_json::json!({"pid":std::process::id(),"sessionId":ID}))?;
         fixtures.coordinate_codex()?;
         let codex = HeldLock::new(&fixtures.codex_lock());
@@ -463,7 +467,7 @@ fn active_session_prevents_restoring_its_trashed_copy_for_each_provider() -> Res
         let (applied, skipped) = apply_rule_proposals(&fixtures.roots, &[proposal]);
         assert!(applied.is_empty());
         assert_eq!(skipped.len(), 1);
-        assert_eq!(fs::read(&store.paths().metadata_file)?, metadata_before);
+        assert_eq!(fs::read(&metadata_path)?, metadata_before);
         assert!(trash_path.exists());
         assert!(!original.exists());
         fixtures.options.filters.trashed = TrashFilter::Both;

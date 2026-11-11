@@ -231,7 +231,7 @@ pub(crate) fn scan_session_files_with_progress<P: ScanProgressObserver>(
     scan_agent_root(&roots.codex_sessions, Agent::Codex, &mut files, progress)?;
     scan_antigravity_root(&roots.antigravity_home, &mut files, progress)?;
     if let Some(trash) = roots.trash.as_ref() {
-        scan_trash_root(trash, &mut files, progress)?;
+        scan_trash_root(trash, &roots.antigravity_home, &mut files, progress)?;
     }
     files.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(files)
@@ -623,6 +623,7 @@ fn update_source_signature(hasher: &mut Sha256, path: &Path, metadata: &fs::Meta
 
 fn scan_trash_root<P: ScanProgressObserver>(
     paths: &TrashPaths,
+    antigravity_home: &Path,
     output: &mut Vec<SessionFile>,
     progress: &mut P,
 ) -> Result<()> {
@@ -630,49 +631,40 @@ fn scan_trash_root<P: ScanProgressObserver>(
     let entries = store.snapshot()?;
 
     for entry in entries {
-        let Some(agent) = entry.agent() else {
+        let Some(agent) = entry.metadata.agent else {
             continue;
         };
+        let original_path = entry.original_path();
+        let Some(path) = entry.primary else { continue };
         if agent == Agent::Antigravity {
-            let Some(original_path) = entry.original_path() else {
-                warn!(
-                    "skipping trashed Antigravity bundle with unknown original path {}",
-                    entry.trash_path(store.paths()).display()
-                );
-                continue;
-            };
-            let original = match AntigravityBundlePaths::from_transcript(&original_path) {
-                Ok(original) => original,
-                Err(error) => {
-                    warn!(
-                        "skipping trashed Antigravity bundle with invalid original path {}: {error:#}",
-                        original_path.display()
-                    );
-                    continue;
-                }
-            };
-            let archive = entry.trash_path(store.paths());
-            let archived = AntigravityBundlePaths::in_archive(&archive, &original.session_id);
-            let mut metadata = load_antigravity_metadata(&original.home);
-            apply_antigravity_history(&original.home, &mut metadata);
-            let session_metadata = metadata.remove(&original.session_id).unwrap_or_default();
-            let Some(mut file) =
-                build_antigravity_session_file(archived.transcript, session_metadata)
-            else {
+            let session_metadata = original_path
+                .as_deref()
+                .and_then(|path| {
+                    let original = AntigravityBundlePaths::from_transcript(path).ok()?;
+                    if crate::lifecycle::resolved_path(&original.home)
+                        != crate::lifecycle::resolved_path(antigravity_home)
+                    {
+                        return None;
+                    }
+                    let mut metadata = load_antigravity_metadata(&original.home);
+                    apply_antigravity_history(&original.home, &mut metadata);
+                    metadata.remove(&original.session_id)
+                })
+                .unwrap_or_default();
+            let Some(mut file) = build_antigravity_session_file(path, session_metadata) else {
                 warn!(
                     "skipping trashed Antigravity bundle without a readable transcript {}",
-                    archive.display()
+                    entry.path.display()
                 );
                 continue;
             };
             file.trashed = true;
-            file.original_path = Some(original_path);
+            file.original_path = original_path;
             output.push(file);
             progress.on_discovered(output.len());
             continue;
         }
 
-        let path = entry.trash_path(store.paths());
         if !is_session_filename(&path, agent) {
             continue;
         }
@@ -695,7 +687,7 @@ fn scan_trash_root<P: ScanProgressObserver>(
             modified: system_time_or_epoch(metadata.modified().ok()),
             size: metadata.len(),
             trashed: true,
-            original_path: entry.original_path(),
+            original_path,
             companion_paths: Vec::new(),
             source_signature: 0,
             antigravity_metadata: None,
