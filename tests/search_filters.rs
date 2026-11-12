@@ -219,6 +219,7 @@ fn live_only_filter_uses_live_session_markers() -> Result<()> {
 #[test]
 fn trashed_filter_defaults_to_normal_sessions_and_can_include_trash() -> Result<()> {
     let temp = TempDir::new()?;
+    let original_path = temp.path().join("original/basic_session.jsonl");
     let trash_paths = TrashPaths::from_data_root(temp.path().join("data"));
     fs::create_dir_all(&trash_paths.trash_dir)?;
     let trashed = copy_fixture(
@@ -233,7 +234,7 @@ fn trashed_filter_defaults_to_normal_sessions_and_can_include_trash() -> Result<
             serde_json::json!({
                 "ts": "2026-05-01T00:00:00Z",
                 "nm": "basic_session.jsonl",
-                "op": "/tmp/original/basic_session.jsonl",
+                "op": original_path,
                 "tn": "claude",
             })
         ),
@@ -275,7 +276,7 @@ fn trashed_filter_defaults_to_normal_sessions_and_can_include_trash() -> Result<
     assert!(trashed_hits[0].session.trashed);
     assert_eq!(
         trashed_hits[0].session.original_path.as_deref(),
-        Some(Path::new("/tmp/original/basic_session.jsonl"))
+        Some(original_path.as_path())
     );
 
     let both_hits = engine.search(&SearchRequest {
