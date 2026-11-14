@@ -88,6 +88,39 @@ fn assert_success(output: Output) {
 }
 
 #[test]
+fn trash_zip_modes_warn_for_global_and_still_reject_filters() -> Result<()> {
+    for operation in ["--export-trash", "--archive-trash"] {
+        for global in ["-g", "--global"] {
+            let f = Fixture::new()?;
+            let source = f.codex("codex", None)?;
+            let item = trash_fixture::trash_session(&f.roots, &source, Agent::Codex, reason())?;
+            let zip = f.temp.path().join("trash.zip");
+
+            let rejected = f.cli(&[global, "--dir", ".", operation], Some(&zip))?;
+            assert!(!rejected.status.success());
+            assert!(String::from_utf8_lossy(&rejected.stderr)
+                .contains("trash ZIP commands do not accept dir"));
+            assert!(!zip.exists() && item.path.is_dir());
+
+            let output = f.cli(&[global, operation], Some(&zip))?;
+            assert!(String::from_utf8_lossy(&output.stderr).contains(&format!(
+                "warning: {operation} always operates on all trash items: --global has no effect on it"
+            )));
+            assert_success(output);
+            let extracted = f.temp.path().join("extracted");
+            ZipArchive::new(File::open(zip)?)?.extract(&extracted)?;
+            assert!(extracted
+                .join("trash")
+                .join(item.path.file_name().unwrap())
+                .join("metadata.json")
+                .is_file());
+            assert_eq!(item.path.exists(), operation == "--export-trash");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn both_zip_modes_preserve_complete_items_and_archived_items_restore() -> Result<()> {
     let f = Fixture::new()?;
     let codex = f.codex("codex", None)?;

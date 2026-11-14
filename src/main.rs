@@ -306,7 +306,7 @@ struct Cli {
         long,
         value_name = "ZIPFILE",
         help_heading = "Index & Storage Management",
-        help = "Write a ZIP copy of trash and keep the items"
+        help = "Write a ZIP copy of all trash and keep the items"
     )]
     export_trash: Option<PathBuf>,
     #[arg(
@@ -314,7 +314,7 @@ struct Cli {
         value_name = "ZIPFILE",
         conflicts_with = "export_trash",
         help_heading = "Index & Storage Management",
-        help = "Write a verified trash ZIP, then remove the archived items"
+        help = "Write a verified ZIP of all trash, then remove the archived items"
     )]
     archive_trash: Option<PathBuf>,
     #[arg(
@@ -570,6 +570,7 @@ fn main() -> Result<()> {
                     id.as_str(),
                     "export_trash"
                         | "archive_trash"
+                        | "global"
                         | "yes"
                         | "claude_home"
                         | "codex_home"
@@ -581,6 +582,16 @@ fn main() -> Result<()> {
                     id.as_str().replace('_', "-")
                 );
             }
+        }
+        if cli.global {
+            let operation = if cli.archive_trash.is_some() {
+                "--archive-trash"
+            } else {
+                "--export-trash"
+            };
+            eprintln!(
+                "warning: {operation} always operates on all trash items: --global has no effect on it"
+            );
         }
         let _logging = aics::logging::init(LoggingMode::Command)?;
         let paths = ResolvedPaths::discover(

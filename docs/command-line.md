@@ -158,6 +158,9 @@ Use `--export-trash ZIPFILE` to copy trash or `--archive-trash ZIPFILE` to
 remove the items after verifying and publishing the ZIP. Pass `--yes` to
 overwrite an existing destination without an interactive prompt. Both commands
 operate on the entire store and accept the provider home overrides.
+Adding `-g` / `--global` prints a warning that it has no effect, then proceeds.
+Search filters such as `--dir` remain unsupported; use `--export-sessions` or
+`--archive-sessions` with `--trashed yes` for a filtered subset.
 See [trash recovery and archives](trash.md).
 
 ### Compact discovery records

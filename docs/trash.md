@@ -75,6 +75,10 @@ If any item cannot safely be removed, use export to save a copy. Either command
 prompts before overwriting an existing ZIP. Pass `--yes` to allow overwrite in a
 script. Both commands can migrate legacy trash on first use.
 
+Both commands operate on all trash items regardless of the current directory.
+Adding `-g` / `--global` prints a warning explaining that it has no effect, then
+proceeds. Other search filters are rejected.
+
 The ZIP contains a `trash/` directory with payloads, metadata, and the schema.
 To browse an archive separately, extract it to an empty directory and use that
 directory as `AICS_DATA_ROOT`. Undo Trash restores to the recorded paths when
