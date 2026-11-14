@@ -15,24 +15,7 @@ pub fn archive_trash(
     yes: bool,
 ) -> Result<usize> {
     let paths = roots.trash.as_ref().context("trash store is unavailable")?;
-    let destination = std::path::absolute(destination)?;
-    let resolved_parent = super::super::resolved_path(parent(&destination)?);
-    let destination = resolved_parent.join(
-        destination
-            .file_name()
-            .context("ZIP path has no filename")?,
-    );
-    ensure!(
-        !destination.starts_with(super::super::resolved_path(&paths.trash_dir))
-            && !destination.starts_with(super::super::resolved_path(
-                &paths.data_root.join("operations")
-            ))
-            && destination != super::super::resolved_path(&paths.data_root.join("lifecycle.lock"))
-            && destination != super::super::resolved_path(&paths.metadata_file)
-            && destination != super::super::resolved_path(&paths.reasons_file),
-        "ZIP destination overlaps the trash store: {}",
-        destination.display()
-    );
+    let destination = destination_path(paths, destination)?;
     let overwrite = confirm_destination(&destination, yes)?;
 
     let (_lock, operations) = lock(roots)?;
@@ -61,19 +44,7 @@ pub fn archive_trash(
         before.verify(path)?;
     }
 
-    if let Some(before) = overwrite {
-        ensure!(
-            Destination::read(&destination)? == before,
-            "ZIP destination changed: {}",
-            destination.display()
-        );
-        fs::rename(&staged, &destination)?;
-        sync_directory(parent(&destination)?)?;
-        sync_directory(scratch.path())?;
-    } else {
-        move_exclusive(&staged, &destination)?;
-    }
-    stamp.verify(&destination)?;
+    publish_zip(&staged, &destination, overwrite.as_ref(), &stamp)?;
 
     if purge {
         // Only retire the exact item directories that the verified ZIP contains.
@@ -94,8 +65,50 @@ pub fn archive_trash(
     Ok(items.len())
 }
 
+pub(super) fn destination_path(paths: &trash::TrashPaths, destination: &Path) -> Result<PathBuf> {
+    let destination = std::path::absolute(destination)?;
+    let destination = super::super::resolved_path(parent(&destination)?).join(
+        destination
+            .file_name()
+            .context("ZIP path has no filename")?,
+    );
+    ensure!(
+        !destination.starts_with(super::super::resolved_path(&paths.trash_dir))
+            && !destination.starts_with(super::super::resolved_path(
+                &paths.data_root.join("operations")
+            ))
+            && destination != super::super::resolved_path(&paths.data_root.join("lifecycle.lock"))
+            && destination != super::super::resolved_path(&paths.metadata_file)
+            && destination != super::super::resolved_path(&paths.reasons_file),
+        "ZIP destination overlaps the trash store: {}",
+        destination.display()
+    );
+    Ok(destination)
+}
+
+pub(super) fn publish_zip(
+    staged: &Path,
+    destination: &Path,
+    overwrite: Option<&Destination>,
+    stamp: &Stamp,
+) -> Result<()> {
+    if let Some(before) = overwrite {
+        ensure!(
+            &Destination::read(destination)? == before,
+            "ZIP destination changed: {}",
+            destination.display()
+        );
+        fs::rename(staged, destination)?;
+        sync_directory(parent(destination)?)?;
+        sync_directory(parent(staged)?)?;
+    } else {
+        move_exclusive(staged, destination)?;
+    }
+    stamp.verify(destination)
+}
+
 #[derive(PartialEq, Eq)]
-struct Destination {
+pub(super) struct Destination {
     identity: FileIdentity,
     length: u64,
     modified: std::time::SystemTime,
@@ -117,7 +130,7 @@ impl Destination {
     }
 }
 
-fn confirm_destination(path: &Path, yes: bool) -> Result<Option<Destination>> {
+pub(super) fn confirm_destination(path: &Path, yes: bool) -> Result<Option<Destination>> {
     if !exists(path)? {
         return Ok(None);
     }
@@ -174,7 +187,7 @@ fn purge_plans(roots: &SessionRoots, items: &[trash::TrashItem]) -> Result<Vec<L
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct ZipEntry {
+pub(super) struct ZipEntry {
     name: String,
     content: Option<(u64, [u8; 32])>,
 }
@@ -183,6 +196,26 @@ fn write_zip(
     paths: &trash::TrashPaths,
     snapshot: &[(PathBuf, Stamp)],
     staged: &Path,
+) -> Result<()> {
+    write_verified_zip(staged, |writer, entries| {
+        for (path, before) in snapshot {
+            ensure!(
+                add_tree(writer, entries, &paths.trash_dir, path)? == before.digest,
+                "trash item changed while archiving {}",
+                path.display()
+            );
+        }
+        let legacy = paths.trash_dir.join(trash::LEGACY_METADATA_DIR);
+        if exists(&legacy)? {
+            add_tree(writer, entries, &paths.trash_dir, &legacy)?;
+        }
+        Ok(())
+    })
+}
+
+pub(super) fn write_verified_zip(
+    staged: &Path,
+    contents: impl FnOnce(&mut ZipWriter<File>, &mut Vec<ZipEntry>) -> Result<()>,
 ) -> Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -203,17 +236,7 @@ fn write_zip(
         SCHEMA.len() as u64,
         SCHEMA,
     )?;
-    for (path, before) in snapshot {
-        ensure!(
-            add_tree(&mut writer, &mut entries, &paths.trash_dir, path)? == before.digest,
-            "trash item changed while archiving {}",
-            path.display()
-        );
-    }
-    let legacy = paths.trash_dir.join(trash::LEGACY_METADATA_DIR);
-    if exists(&legacy)? {
-        add_tree(&mut writer, &mut entries, &paths.trash_dir, &legacy)?;
-    }
+    contents(&mut writer, &mut entries)?;
     writer.finish()?.sync_all()?;
     sync_directory(parent(staged)?)?;
 
@@ -249,8 +272,17 @@ fn add_tree<W: Write + Seek>(
     root: &Path,
     path: &Path,
 ) -> Result<[u8; 32]> {
-    let mut name = String::from("trash");
-    for component in path.strip_prefix(root)?.components() {
+    add_tree_as(
+        writer,
+        entries,
+        path,
+        zip_name("trash", path.strip_prefix(root)?)?,
+    )
+}
+
+pub(super) fn zip_name(prefix: &str, relative: &Path) -> Result<String> {
+    let mut name = prefix.to_owned();
+    for component in relative.components() {
         let part = component
             .as_os_str()
             .to_str()
@@ -259,22 +291,39 @@ fn add_tree<W: Write + Seek>(
             matches!(component, std::path::Component::Normal(_))
                 && !part.contains(['\\', ':', '\0']),
             "unsafe ZIP entry name: {}",
-            path.display()
+            relative.display()
         );
         name.push('/');
         name.push_str(part);
     }
+    Ok(name)
+}
+
+pub(super) fn add_tree_as<W: Write + Seek>(
+    writer: &mut ZipWriter<W>,
+    entries: &mut Vec<ZipEntry>,
+    path: &Path,
+    mut name: String,
+) -> Result<[u8; 32]> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_dir() {
         name.push('/');
-        add_directory(writer, entries, name)?;
+        add_directory(writer, entries, name.clone())?;
         let children = trash::children(path)?;
         let mut digest = directory_digest(children.len());
         for child in children {
             hash_child(
                 &mut digest,
                 &child,
-                add_tree(writer, entries, root, &child)?,
+                add_tree_as(
+                    writer,
+                    entries,
+                    &child,
+                    zip_name(
+                        name.trim_end_matches('/'),
+                        Path::new(child.file_name().context("missing ZIP filename")?),
+                    )?,
+                )?,
             )?;
         }
         Ok(digest.finalize().into())
@@ -286,7 +335,7 @@ fn add_tree<W: Write + Seek>(
     }
 }
 
-fn add_directory<W: Write + Seek>(
+pub(super) fn add_directory<W: Write + Seek>(
     writer: &mut ZipWriter<W>,
     entries: &mut Vec<ZipEntry>,
     name: String,
@@ -299,7 +348,7 @@ fn add_directory<W: Write + Seek>(
     Ok(())
 }
 
-fn add_file<W: Write + Seek>(
+pub(super) fn add_file<W: Write + Seek>(
     writer: &mut ZipWriter<W>,
     entries: &mut Vec<ZipEntry>,
     name: String,

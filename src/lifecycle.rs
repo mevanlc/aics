@@ -15,9 +15,12 @@ use crate::parse::{parse_session_file, Agent};
 use crate::scan::SessionRoots;
 use crate::trash::{TrashReason, TrashStore};
 
-mod file_identity;
+pub(crate) mod file_identity;
 mod transaction;
-pub use transaction::{archive_trash, execute, initialize_trash, recover};
+pub use transaction::{
+    archive_sessions, archive_trash, execute, initialize_trash, recover, SessionArchiveOptions,
+    SessionArchiveReport, SessionArchiveSkip,
+};
 pub(crate) use transaction::{read_guard, read_trash_guard, RecoveryRequired};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

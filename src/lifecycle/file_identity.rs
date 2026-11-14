@@ -2,9 +2,9 @@ use std::io;
 use std::path::Path;
 
 // Volume/device plus a 128-bit file identifier (64-bit inode on Unix).
-pub(super) type FileIdentity = (u64, u64, u64);
+pub(crate) type FileIdentity = (u64, u64, u64);
 
-pub(super) fn identity(path: &Path) -> io::Result<Option<FileIdentity>> {
+pub(crate) fn identity(path: &Path) -> io::Result<Option<FileIdentity>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -14,16 +14,36 @@ pub(super) fn identity(path: &Path) -> io::Result<Option<FileIdentity>> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FileIdInfo, GetFileInformationByHandleEx, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_INFO,
-        };
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
         let file = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .open(path)?;
+        identity_of(&file)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        // Without stable file identity, leave destinations for manual recovery.
+        Ok(None)
+    }
+}
+
+pub(crate) fn identity_of(file: &std::fs::File) -> io::Result<Option<FileIdentity>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        Ok(Some((metadata.dev(), metadata.ino(), 0)))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
+        };
         let mut info = FILE_ID_INFO::default();
-        // SAFETY: file owns a live handle and info is a writable buffer of the
+        // SAFETY: file provides a live handle and info is a writable buffer of the
         // exact size and type requested by FileIdInfo, including for directories.
         let success = unsafe {
             GetFileInformationByHandleEx(
@@ -45,8 +65,7 @@ pub(super) fn identity(path: &Path) -> io::Result<Option<FileIdentity>> {
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = path;
-        // Without stable file identity, leave destinations for manual recovery.
+        let _ = file;
         Ok(None)
     }
 }

@@ -83,6 +83,13 @@ recorded destination is missing, use the extracted payloads for manual recovery.
 A Codex conversation may still need history that was outside trash at archive time.
 
 Prefer the built-in ZIP commands. Manually zip `trash/` only while AICS is stopped.
+For regular sessions or a filtered subset of trash, use `--export-sessions` or
+`--archive-sessions` with the normal search flags, including `--trashed yes/both`.
+These commands skip live or locked sessions and use the same recoverable item
+layout. They process all matches unless `-n` is supplied. Required ancestor
+history is copied automatically; archiving additional dependent sessions requires
+`--include-related`. See [session recovery ZIPs](command-line.md#session-recovery-zips).
+
 Trash and restore operations require native exclusive rename support on the
 filesystems involved.
 

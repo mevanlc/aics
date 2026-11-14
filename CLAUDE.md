@@ -23,6 +23,13 @@ the default config dir must call `crate::settings::isolate_config_root_for_tests
 before constructing the app or touching settings; this sets `AICS_CONFIG_ROOT`
 to a process-lifetime temp directory.
 
+Keep path-sensitive tests portable: derive absolute filesystem/recovery fixture
+paths from `TempDir::path()` (for example, `temp.path().join("original/session.jsonl")`).
+On Windows, `/tmp/...` is rooted on the current drive but is not absolute, so
+absolute-path validation correctly rejects it. Compare paths with `Path` APIs
+rather than slash-specific strings. Serialize JSON paths with serde and construct
+file URIs with `url::Url::from_file_path` to handle native separators and escaping.
+
 Binary name: `aics`
 
 ## Conventions

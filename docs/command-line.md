@@ -6,7 +6,7 @@ aics [OPTIONS] [QUERY]
 
 `QUERY` is optional. In interactive mode it runs the initial search and remains
 in the TUI search field. With `--json`, it selects the search results written as
-JSONL. Rules modes do not accept a text query.
+JSONL. It also selects Markdown and session ZIP exports. Rules modes do not accept a text query.
 
 Run `aics -h` for a summary, `aics --help` for full command-line help, or
 `aics --manpage` to print this reference manual directly from the CLI.
@@ -44,8 +44,8 @@ aics --preview-rules --json -g
 
 By default, `aics` launches an interactive terminal UI (TUI). When stdout is not
 a terminal (e.g. in automated scripts, subagents, or shell pipelines), you must
-pass `--json` for streaming JSONL search results or `--export DIR` to export Markdown
-transcripts. Redirecting or piping without one of these flags is rejected.
+pass `--json` for streaming JSONL search results, `--export DIR` for Markdown
+transcripts, or an explicit ZIP command. Redirecting a TUI invocation is rejected.
 
 ### Side-effect and safety matrix
 
@@ -54,6 +54,8 @@ transcripts. Redirecting or piping without one of these flags is rejected.
 | `aics [QUERY]` | Launches interactive TUI | Can migrate legacy trash and apply startup rules | No (requires interactive TTY) |
 | `aics --json [FILTERS] [QUERY]` | Streams JSONL records to stdout | None (updates index cache if needed) | **Yes** (primary automation command) |
 | `aics --export DIR [FILTERS]` | Writes Markdown files to DIR | Creates directory and writes Markdown files | Modifies filesystem (writes files) |
+| `aics --export-sessions ZIPFILE [FILTERS]` | Writes a recovery ZIP of matching inactive sessions | Writes ZIP; recovers operations and migrates legacy trash if needed | Modifies filesystem (keeps originals) |
+| `aics --archive-sessions ZIPFILE [FILTERS]` | Writes a verified ZIP and removes archived originals | Writes ZIP and transactionally removes sessions | Mutates session files |
 | `aics --export-trash ZIPFILE` | Writes a ZIP of the whole trash store | Writes ZIP and migrates legacy trash if present | Modifies filesystem (keeps trash items) |
 | `aics --archive-trash ZIPFILE` | Writes a verified ZIP and removes its items | Writes ZIP and removes archived items | Mutates trash |
 | `aics --preview-rules` | Reviews proposed JS rule actions | None (evaluates rules read-only) | **Yes** (when combined with `--json`) |
@@ -90,7 +92,7 @@ indexed content.
 
 | Option | Meaning |
 | --- | --- |
-| `-n N`, `--num-results N` | Load or emit at most `N` results; default: `20` for JSON and `2000` for TUI/export; minimum effective value: `1` |
+| `-n N`, `--num-results N` | Select at most `N` results; default: `20` for JSON, `2000` for TUI/Markdown, all matches for session ZIPs; minimum effective value: `1` |
 | `--agent AGENT` | Include only `claude`, `codex`, or `antigravity` sessions; `agy` is accepted as an Antigravity alias |
 | `--after DATE` | Include sessions on or after a date or timestamp |
 | `--before DATE` | Include sessions on or before a date or timestamp |
@@ -134,19 +136,23 @@ status and source paths as `session.history`.
 | `--sort-by MODE` | Select `time` or `relevance` ordering; command-line default: `time` |
 | `--json[=compact\|full]` | Write compact search hits (default) or unabridged hit records as JSONL; rules keep their own schema |
 | `--export DIR` | Write every matching session to `DIR` as Markdown instead of opening the TUI |
+| `--export-sessions ZIPFILE` | Copy matching inactive sessions and required history into a recovery ZIP |
+| `--archive-sessions ZIPFILE` | Publish a verified recovery ZIP, then remove archived originals |
+| `--include-related` | With `--archive-sessions`, include dependent sessions required for safe removal outside the filters |
 | `--progress STREAM` | Select `none`, `stderr`, or `stdout`; default: `stderr` |
 
 Progress is drawn only when its selected stream is a terminal. `--progress stdout`
-conflicts with `--json` and `--export` because stdout is reserved for their
+conflicts with `--json`, `--export`, and session ZIP commands because stdout is reserved for their
 output; use the default stderr progress or `--progress none` in scripts.
 
 Outside rules mode, redirecting or piping a TUI invocation is rejected. Add
-`--json` or `--export` when non-interactive stdout is required.
+`--json`, `--export`, or a session ZIP command when non-interactive stdout is required.
 
 Ordinary JSON searches skip automatic startup cleanup rules and lifecycle
 recovery; they may refresh the index cache. Explicit `--apply-rules --json`
-still applies rules. Exports retain automatic startup rules; use
-`--no-apply-rules` when exporting without cleanup actions.
+still applies rules. Markdown exports retain automatic startup rules; use
+`--no-apply-rules` when exporting Markdown without cleanup actions. Session ZIP
+commands always skip startup rules and saved TUI filters.
 
 Use `--export-trash ZIPFILE` to copy trash or `--archive-trash ZIPFILE` to
 remove the items after verifying and publishing the ZIP. Pass `--yes` to
@@ -228,6 +234,61 @@ result, exec, patch, reasoning block, and plan the parser produced, regardless o
 the viewer display options under `Ctrl+F`. They also ignore saved startup filter
 defaults, so a scripted export selects exactly what its flags asked for. Use
 `--hide` when a smaller export is wanted.
+
+## Session recovery ZIPs
+
+`--export-sessions ZIPFILE` copies the sessions selected by the CLI into a
+self-contained recovery ZIP. `--archive-sessions ZIPFILE` publishes and verifies
+that ZIP, then transactionally removes the archived originals, including selected
+trash items. Both use normal query, scope, agent, date, branch, session-kind,
+supersession, and trash filters. The default scope is the current directory and
+`--trashed no`; add `-g`, `--dir`, or `--trashed yes/both` as appropriate.
+
+```bash
+aics --dir /path/to/project --export-sessions project.zip
+aics -g --agent claude --before 2026-03-01 --archive-sessions older.zip
+aics -g --trashed yes --after 2026-03-01 --export-sessions selected-trash.zip
+aics -g --session SESSIONID --include-related --archive-sessions conversation.zip
+```
+
+Session ZIPs include **all matches** unless `-n` sets a cap. The cap applies to
+search results before protection skips or dependency expansion; skipped results
+are not replaced. Saved filters and automatic startup rules are ignored. Query
+matching defaults to All content; `--show`, `--hide`, and query visibility
+modifiers affect matching only. Every ZIP payload retains the complete original
+files, including reasoning and tool results.
+
+Live, locked, or indeterminately protected sessions are always skipped. A
+conversation whose required history is protected is also skipped. Archive skips
+an entire removal group if it would affect a protected session, while processing
+independent eligible groups. Skip reasons and counts go to stderr. If no eligible
+sessions remain, the command succeeds without creating or replacing the ZIP.
+
+Codex physical pages belonging to a selected conversation and required ancestor
+history are included automatically. Copy-only ancestors stay in place. If safe
+removal requires another session outside the selection, archive fails before
+publication and lists it. Select those sessions explicitly or pass
+`--include-related` to archive the required dependents too, even outside the
+filters or `-n` cap. Fork metadata alone does not cause expansion. Missing or
+ambiguous required history and source changes abort the batch.
+
+ZIPs contain original payloads, summary sidecars, full Antigravity conversation
+directories and database companions, restore mappings, and the v1 item schema.
+Regular sessions are packaged directly as recovery items with no trash timestamp
+or reason; existing trash item metadata is preserved. Extract to an empty
+directory and use it as `AICS_DATA_ROOT` to browse and use Undo Trash, as described
+in [trash recovery](trash.md). Existing original paths must be clear before restore.
+
+The completed ZIP path goes to stdout. Existing destinations require interactive
+overwrite confirmation or `--yes`; source payloads and lifecycle storage cannot
+be destinations. Removal happens only after hash verification and atomic ZIP
+publication, with journaled rollback/recovery. A verified ZIP remains available
+if subsequent removal fails. Session ZIP modes conflict with JSON, Markdown
+export, other ZIP commands, explicit rules modes, and informational/exit commands.
+
+`--export-trash` and `--archive-trash` remain whole-store operations, including
+damaged items that are not searchable. A filtered `--trashed yes` ZIP is useful
+for selected sessions; it is not a complete trash-store backup.
 
 ## Hiding transcript parts
 

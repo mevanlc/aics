@@ -317,12 +317,20 @@ pub(crate) fn new_item(
     primary: &Path,
     reason: TrashReason,
 ) -> Result<(TrashMetadata, Vec<PathBuf>)> {
+    let (mut metadata, sources) = recovery_item(agent, primary)?;
+    metadata.trashed_at = Some(chrono::Utc::now().to_rfc3339());
+    metadata.reason = Some(reason);
+    Ok((metadata, sources))
+}
+
+/// Describe a native payload without claiming it has been moved to trash.
+pub(crate) fn recovery_item(agent: Agent, primary: &Path) -> Result<(TrashMetadata, Vec<PathBuf>)> {
     ensure_original_path(primary)?;
     let (base, sources) = native_payload(agent, primary)?;
     let metadata = TrashMetadata {
         schema_version: TRASH_SCHEMA_VERSION,
         agent: Some(agent),
-        trashed_at: Some(chrono::Utc::now().to_rfc3339()),
+        trashed_at: None,
         session_path: Some(Path::new("payload").join(primary.strip_prefix(&base)?)),
         members: sources
             .iter()
@@ -333,7 +341,7 @@ pub(crate) fn new_item(
                 })
             })
             .collect::<Result<_>>()?,
-        reason: Some(reason),
+        reason: None,
     };
     metadata.validate_paths()?;
     Ok((metadata, sources))

@@ -18,7 +18,11 @@ use crate::trash::{self, exists, AntigravityBundlePaths, TrashMetadata, TrashRea
 
 mod archive;
 mod legacy;
+mod sessions;
 pub use archive::archive_trash;
+pub use sessions::{
+    archive_sessions, SessionArchiveOptions, SessionArchiveReport, SessionArchiveSkip,
+};
 
 const JOURNAL: &str = "moves.json";
 const JOURNAL_VERSION: u32 = 1;

@@ -26,6 +26,7 @@ It builds a local Tantivy index over your session JSONL files and gives you an i
 - Configurable Claude, Codex, and Antigravity launch commands so `aics` can hand off to resume a session
 - AICS trash, restore, and permanent deletion for session files and complete Antigravity bundles, with recorded trash reasons
 - Self-contained ZIP exports and archives of trash with `--export-trash` and `--archive-trash`
+- Filtered recovery ZIPs of regular or trashed sessions with `--export-sessions` and `--archive-sessions`, skipping live or locked sessions
 - Compact `--json` discovery (20 results by default), `--json=full` metadata, and `--export DIR` Markdown transcripts
 - Embedded agent guidance through `--print-skill`, with no skill installation required
 - Dependency-aware session removal and restore, with related-session review and per-rule skip/include policies
@@ -71,6 +72,12 @@ aics --print-skill
 # Export matching sessions to a directory as Markdown
 aics -g --export ./transcripts "vector db"
 
+# Copy matching original sessions and their required history into a recovery ZIP
+aics -g --export-sessions ./sessions.zip "vector db"
+
+# Archive matching inactive sessions, then remove their originals
+aics --dir /path/to/project --before 2026-03-01 --archive-sessions ./older-sessions.zip
+
 # Include superseded sources and equivalent fork duplicates hidden by default
 aics -g --superseded both
 
@@ -90,7 +97,9 @@ override. JSON searches use a fixed visibility preset: conversation and tool cal
 injections, thinking, and tool results are hidden. They default to Visible searches
 and 20 hits, ignore saved TUI filters, and skip automatic startup cleanup. Use
 `--show`/`--hide` to adjust visibility or `all:` to broaden a query. Exports default
-to All, retain their archival behavior, and ignore saved filters.
+to All and ignore saved filters. Session ZIP commands also skip automatic startup
+rules and have no default result limit; `-n` sets an explicit cap. Archive requires
+`--include-related` when removal needs additional dependent sessions.
 
 [See command-line usage, filters, modes, and the complete flag reference.](docs/command-line.md)
 

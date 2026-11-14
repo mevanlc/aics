@@ -48,7 +48,7 @@ fn clap_styles() -> Styles {
     about = "Search local Claude Code, Codex CLI, and Antigravity session history",
     styles = clap_styles(),
     next_line_help = true,
-    before_long_help = "NOTE FOR AI AGENTS & SCRIPTS:\n  `aics` launches an interactive TUI by default. In non-interactive contexts\n  or shell pipelines, you MUST pass `--json` (compact JSONL hits; default limit: 20) or\n  `--export <DIR>` (Markdown files); otherwise aics will exit with an error.\n",
+    before_long_help = "NOTE FOR AI AGENTS & SCRIPTS:\n  `aics` launches an interactive TUI by default. In non-interactive contexts\n  or shell pipelines, pass `--json` (compact JSONL hits; default limit: 20),\n  `--export <DIR>` (Markdown), or an explicit ZIP export/archive command.\n",
     after_help = "Use 'aics --help' for full help, side-effect notes, and examples.\nUse 'aics --manpage' for the comprehensive Markdown manual.",
     after_long_help = "Examples:\n  aics deploy\n      Search sessions for the current directory and open the TUI.\n\n  aics -g --agent claude --after 2026-03-01 deploy\n      Search all Claude sessions after 2026-03-01.\n\n  aics --json -g --sort-by relevance \"vector db\"\n      Print matching sessions as JSONL instead of launching the TUI.\n\n  aics -g --export ./transcripts \"vector db\"\n      Write every matching session to ./transcripts as Markdown.\n\nDate filters:\n  --after and --before accept YYYY-MM-DD or RFC3339 timestamps.\n\nScope:\n  By default, searches are scoped to the current directory.\n  Use --global to search everything, --no-global to override a saved global startup scope,\n  or --dir PATH[:BRANCH] to target a project.\n\nFull manual:\n  Run `aics --manpage` to view the comprehensive Markdown reference manual.\n  Run `aics --print-skill` for the embedded agent guide."
 )]
@@ -71,6 +71,30 @@ struct Cli {
         long_help = "[Side-effect: writes files] Write every matching session to DIR as Markdown instead of launching the TUI"
     )]
     export: Option<PathBuf>,
+    #[arg(
+        long, value_name = "ZIPFILE",
+        help_heading = "Non-Interactive / Scripting (No TUI)",
+        conflicts_with_all = ["json", "export", "archive_sessions", "export_trash", "archive_trash", "preview_rules", "apply_rules", "benchmark_rules", "rules", "delete_index", "write_rules_dts", "manpage", "print_skill", "print_palettes"],
+        help = "Write a recovery ZIP of all matching inactive sessions",
+        long_help = "[Side-effect: writes ZIP] Export original session files, summaries, and required history. Honors CLI filters, ignores saved filters and startup rules, and skips live/locked sessions. Includes all matches unless -n is supplied. Visibility options affect matching only; payloads are complete originals."
+    )]
+    export_sessions: Option<PathBuf>,
+    #[arg(
+        long, value_name = "ZIPFILE",
+        help_heading = "Non-Interactive / Scripting (No TUI)",
+        conflicts_with_all = ["json", "export", "export_sessions", "export_trash", "archive_trash", "preview_rules", "apply_rules", "benchmark_rules", "rules", "delete_index", "write_rules_dts", "manpage", "print_skill", "print_palettes"],
+        help = "Write a verified session ZIP, then remove archived originals",
+        long_help = "[Side-effect: removes session files] Select sessions exactly as --export-sessions, publish a verified recovery ZIP, then transactionally remove the selected originals. Required ancestors are copied and retained. Additional dependent sessions require --include-related. Protected groups are skipped."
+    )]
+    archive_sessions: Option<PathBuf>,
+    #[arg(
+        long,
+        requires = "archive_sessions",
+        conflicts_with_all = ["export_sessions", "export_trash", "archive_trash"],
+        help_heading = "Non-Interactive / Scripting (No TUI)",
+        help = "Also archive dependent sessions required for safe removal, outside the filters"
+    )]
+    include_related: bool,
     #[arg(
         long = "progress",
         help_heading = "Non-Interactive / Scripting (No TUI)",
@@ -163,7 +187,7 @@ struct Cli {
         short = 'n',
         long = "num-results",
         help_heading = "Search Filters (Read-Only)",
-        help = "Maximum results: JSON defaults to 20; TUI/export to 2000"
+        help = "Maximum results: JSON defaults to 20; TUI/Markdown to 2000; session ZIPs to all"
     )]
     num_results: Option<usize>,
     #[arg(
@@ -296,7 +320,7 @@ struct Cli {
     #[arg(
         long,
         help_heading = "Index & Storage Management",
-        help = "Allow the trash ZIP command to overwrite an existing file"
+        help = "Allow a ZIP command to overwrite an existing file"
     )]
     yes: bool,
     #[arg(
@@ -483,6 +507,12 @@ impl From<CliSupersededFilter> for SupersededFilter {
 }
 
 impl Cli {
+    fn session_zip_destination(&self) -> Option<&Path> {
+        self.export_sessions
+            .as_deref()
+            .or(self.archive_sessions.as_deref())
+    }
+
     fn has_preview_option(&self, option: CliRulesPreview) -> bool {
         self.preview_rules
             .as_ref()
@@ -502,6 +532,7 @@ impl Cli {
     fn will_enter_tui(&self) -> bool {
         self.json.is_none()
             && self.export.is_none()
+            && self.session_zip_destination().is_none()
             && self.export_trash.is_none()
             && self.archive_trash.is_none()
             && !self.apply_rules
@@ -515,7 +546,7 @@ impl Cli {
 
     /// Modes that own stdout, so progress bars and other chatter must not go there.
     fn stdout_reserved(&self) -> bool {
-        self.json.is_some() || self.export.is_some()
+        self.json.is_some() || self.export.is_some() || self.session_zip_destination().is_some()
     }
 
     fn logging_mode(&self) -> LoggingMode {
@@ -566,8 +597,8 @@ fn main() -> Result<()> {
         println!("{} trash items in {}", count, destination.display());
         return Ok(());
     }
-    if cli.yes {
-        bail!("--yes requires --export-trash or --archive-trash");
+    if cli.yes && cli.session_zip_destination().is_none() {
+        bail!("--yes requires --export-trash, --archive-trash, --export-sessions, or --archive-sessions");
     }
     // Combine both option streams in their actual argv order.
     let mut ordered = Vec::new();
@@ -609,7 +640,7 @@ fn main() -> Result<()> {
         cli.antigravity_home.as_deref(),
     )?;
     validate_terminal_mode(&cli)?;
-    if cli.will_enter_tui() || cli.apply_rules {
+    if cli.will_enter_tui() || cli.apply_rules || cli.session_zip_destination().is_some() {
         aics::lifecycle::initialize_trash(&resolved_paths.roots)?;
     }
     let index_paths = aics::index::IndexPaths::discover_for_roots(&resolved_paths.roots)?;
@@ -631,19 +662,34 @@ fn main() -> Result<()> {
         eprintln!("aics: {warning}");
     }
     manager.write_profile_metadata(&resolved_paths)?;
-    let sync_outcome =
-        if let Some(draw_target) = progress_draw_target(cli.progress, cli.stdout_reserved()) {
-            let mut progress = StartupProgress::new(draw_target);
-            let outcome = manager.sync_with_roots_best_effort_and_progress(
+    let sync_outcome = if let Some(draw_target) =
+        progress_draw_target(cli.progress, cli.stdout_reserved())
+    {
+        let mut progress = StartupProgress::new(draw_target);
+        let outcome = if cli.session_zip_destination().is_some() {
+            manager
+                .sync_with_roots_and_progress(&resolved_paths.roots, cli.rebuild_index, |event| {
+                    progress.update(event)
+                })
+                .map(SyncOutcome::Completed)
+        } else {
+            manager.sync_with_roots_best_effort_and_progress(
                 &resolved_paths.roots,
                 cli.rebuild_index,
                 |event| progress.update(event),
-            );
-            progress.finish();
-            outcome?
+            )
+        };
+        progress.finish();
+        outcome?
+    } else {
+        if cli.session_zip_destination().is_some() {
+            SyncOutcome::Completed(
+                manager.sync_with_roots(&resolved_paths.roots, cli.rebuild_index)?,
+            )
         } else {
             manager.sync_with_roots_best_effort(&resolved_paths.roots, cli.rebuild_index)?
-        };
+        }
+    };
     match sync_outcome {
         SyncOutcome::Completed(_) | SyncOutcome::Busy => {}
     }
@@ -720,7 +766,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if !cli.no_apply_rules && cli.json.is_none() {
+    if !cli.no_apply_rules && cli.json.is_none() && cli.session_zip_destination().is_none() {
         let rules_path = match cli.rules.clone() {
             Some(path) => Some(path),
             None => {
@@ -818,7 +864,43 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Both non-interactive modes run before the saved startup filter is applied,
+    if let Some(destination) = cli.session_zip_destination() {
+        let hits = search_engine
+            .search_with_display_options(&request, cli.display_options(DisplayOptions::SHOW_ALL))?;
+        let report = aics::lifecycle::archive_sessions(
+            &resolved_paths.roots,
+            &hits.into_iter().map(|hit| hit.session).collect::<Vec<_>>(),
+            destination,
+            aics::lifecycle::SessionArchiveOptions {
+                remove: cli.archive_sessions.is_some(),
+                yes: cli.yes,
+                include_related: cli.include_related,
+            },
+        )?;
+        for skip in &report.skipped {
+            eprintln!("aics: skipped {}: {}", skip.path.display(), skip.reason);
+        }
+        for path in &report.included {
+            eprintln!("aics: included related session {}", path.display());
+        }
+        if report.items == 0 {
+            eprintln!("aics: no eligible sessions; nothing exported");
+        } else {
+            println!("{}", destination.display());
+            eprintln!("aics: {} {} selected session(s), {} recovery item(s), {} copied history file(s), {} skipped",
+                if cli.archive_sessions.is_some() { "archived" } else { "exported" },
+                report.selected, report.items, report.history_files, report.skipped.len());
+        }
+        if report.removed_items > 0 {
+            if let Err(error) = manager.sync_with_roots(&resolved_paths.roots, false) {
+                warn!("archive committed; index refresh failed: {error:#}");
+                eprintln!("aics: archive committed; index refresh will retry next run: {error:#}");
+            }
+        }
+        return Ok(());
+    }
+
+    // Non-interactive modes run before the saved startup filter is applied,
     // so a scripted search selects exactly what its flags asked for. Exports
     // likewise start from an all-visible baseline rather than saved display
     // options, so only an explicit `--hide` removes anything.
@@ -909,7 +991,7 @@ fn append_startup_warning(warning: &mut Option<String>, extra: String) {
 
 fn validate_terminal_mode(cli: &Cli) -> Result<()> {
     if cli.stdout_reserved() && cli.progress == CliProgress::Stdout {
-        bail!("--progress stdout conflicts with --json and --export because stdout is reserved for their output");
+        bail!("--progress stdout conflicts with --json, --export, --export-sessions, and --archive-sessions because stdout is reserved for their output");
     }
 
     if rules_mode(cli).is_some() && cli.query.is_some() {
@@ -926,6 +1008,7 @@ fn validate_terminal_mode(cli: &Cli) -> Result<()> {
     if !cli.delete_index
         && cli.json.is_none()
         && cli.export.is_none()
+        && cli.session_zip_destination().is_none()
         && rules_mode(cli).is_none()
         && !cli.manpage
         && !cli.print_skill
@@ -1097,7 +1180,13 @@ fn build_request(cli: &Cli) -> Result<SearchRequest> {
         scope,
         limit: cli
             .num_results
-            .unwrap_or(if cli.json.is_some() { 20 } else { 2000 })
+            .unwrap_or(if cli.json.is_some() {
+                20
+            } else if cli.session_zip_destination().is_some() {
+                usize::MAX
+            } else {
+                2000
+            })
             .max(1),
         sort: cli.sort_by.unwrap_or(CliSort::Time).into(),
         filters: SearchFilters {
@@ -1921,6 +2010,93 @@ mod tests {
                 Cli::try_parse_from(["aics", "--export", "./out", conflicting]).unwrap_err();
             assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
         }
+    }
+
+    #[test]
+    fn session_zip_modes_use_cli_selection_and_allow_nonterminal_output() {
+        for mode in ["--export-sessions", "--archive-sessions"] {
+            let cli = Cli::parse_from([
+                "aics",
+                mode,
+                "sessions.zip",
+                "-g",
+                "--agent",
+                "codex",
+                "--trashed",
+                "both",
+                "--yes",
+                "needle",
+            ]);
+            let request = build_request(&cli).unwrap();
+            assert_eq!(request.limit, usize::MAX);
+            assert_eq!(request.query, "needle");
+            assert!(matches!(request.scope, Scope::Global));
+            assert_eq!(request.filters.agent, Some(Agent::Codex));
+            assert_eq!(request.filters.trashed, TrashFilter::Both);
+            assert!(!cli.will_enter_tui());
+            assert!(cli.stdout_reserved());
+            validate_terminal_mode(&cli).unwrap();
+            let bounded = Cli::parse_from(["aics", mode, "sessions.zip", "-n", "5"]);
+            assert_eq!(build_request(&bounded).unwrap().limit, 5);
+            let progress = Cli::parse_from(["aics", mode, "sessions.zip", "--progress", "stdout"]);
+            assert!(validate_terminal_mode(&progress).is_err());
+        }
+    }
+
+    #[test]
+    fn session_zip_commands_reject_conflicting_modes_and_require_archive_for_related() {
+        for mode in ["--export-sessions", "--archive-sessions"] {
+            for conflicting in [
+                "--json",
+                "--preview-rules",
+                "--apply-rules",
+                "--delete-index",
+                "--write-rules-dts",
+                "--manpage",
+                "--print-skill",
+                "--print-palettes",
+            ] {
+                assert_eq!(
+                    Cli::try_parse_from(["aics", mode, "sessions.zip", conflicting])
+                        .unwrap_err()
+                        .kind(),
+                    clap::error::ErrorKind::ArgumentConflict
+                );
+            }
+            for conflicting in ["--export", "--export-trash", "--archive-trash", "--rules"] {
+                assert_eq!(
+                    Cli::try_parse_from(["aics", mode, "sessions.zip", conflicting, "other"])
+                        .unwrap_err()
+                        .kind(),
+                    clap::error::ErrorKind::ArgumentConflict
+                );
+            }
+        }
+        assert!(Cli::try_parse_from([
+            "aics",
+            "--export-sessions",
+            "sessions.zip",
+            "--archive-sessions",
+            "other.zip"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "aics",
+            "--export-sessions",
+            "sessions.zip",
+            "--include-related"
+        ])
+        .is_err());
+        assert!(
+            Cli::try_parse_from([
+                "aics",
+                "--archive-sessions",
+                "sessions.zip",
+                "--include-related"
+            ])
+            .unwrap()
+            .include_related
+        );
     }
 
     #[test]

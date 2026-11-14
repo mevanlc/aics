@@ -80,3 +80,21 @@ requested lifecycle workflow. Search does not perform that recovery itself.
 
 Use `aics --help` for flags and `aics --manpage` for the full reference. Keep
 stdout separate from stderr when parsing JSONL; no hits produce empty stdout.
+
+## Recovery ZIPs
+
+When asked to back up original session files, use `--export-sessions ZIPFILE`
+with the normal search filters. It includes all matches unless `-n` is supplied,
+ignores saved TUI filters and startup rules, and skips live/locked or uncertain
+sessions. It writes the completed ZIP path to stdout and diagnostics to stderr.
+Visibility flags affect matching only; ZIP payloads contain complete originals.
+
+`--archive-sessions ZIPFILE` also removes the archived originals after verification
+and publication. Required ancestor history is copied and retained. Additional
+dependents require explicit selection or `--include-related`, which can expand
+removal outside the filters. Use archive only when removal was requested.
+`--trashed yes/both` selects trash or mixed batches. Existing destinations require
+confirmation or `--yes`. An empty or entirely protected selection leaves the
+destination untouched. Extract a ZIP into a fresh `AICS_DATA_ROOT` for browsing
+and Undo Trash. Whole-store `--export-trash` and `--archive-trash` also preserve
+damaged items that filtered search cannot select.

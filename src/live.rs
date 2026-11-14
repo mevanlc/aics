@@ -91,7 +91,7 @@ impl LiveSessionSnapshot {
 
 /// Closing these handles releases ownership without modifying provider files.
 pub(crate) struct LiveSessionGuard {
-    _locks: Vec<File>,
+    _locks: Vec<(PathBuf, File)>,
 }
 
 impl LiveSessionTracker {
@@ -123,14 +123,25 @@ impl LiveSessionTracker {
     }
 
     pub fn snapshot(&self) -> LiveSessionSnapshot {
+        self.snapshot_with_guards(&[])
+    }
+
+    /// A held lock belongs to this operation, provided the marker still names
+    /// that exact file. New and replaced markers must still be inspected.
+    pub(crate) fn snapshot_with_guards(&self, guards: &[LiveSessionGuard]) -> LiveSessionSnapshot {
         let mut snapshot = LiveSessionSnapshot::default();
+        let held = guards
+            .iter()
+            .flat_map(|g| &g._locks)
+            .map(|(path, file)| (path.as_path(), file))
+            .collect::<HashMap<_, _>>();
         self.collect_claude(&mut snapshot);
         for (agent, root) in [
             (Agent::Codex, &self.paths.codex_writer_locks_dir),
             (Agent::Antigravity, &self.paths.antigravity_presence_dir),
         ] {
             if let Some(root) = root {
-                collect_locks(&mut snapshot, agent, root);
+                collect_locks(&mut snapshot, agent, root, &held);
             }
         }
         snapshot
@@ -261,7 +272,7 @@ impl LiveSessionTracker {
             if agent == Agent::Codex && coordinate {
                 let coordination = root.join(".coordination.lock");
                 match lock_existing(&coordination)? {
-                    Some(file) => locks.push(file),
+                    Some(file) => locks.push((coordination, file)),
                     None => match fs::metadata(root) {
                         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                         _ => {
@@ -273,8 +284,9 @@ impl LiveSessionTracker {
                     },
                 }
             }
-            if let Some(file) = lock_existing(&root.join(format!("{session_id}.lock")))? {
-                locks.push(file);
+            let path = root.join(format!("{session_id}.lock"));
+            if let Some(file) = lock_existing(&path)? {
+                locks.push((path, file));
             }
         }
         Ok(LiveSessionGuard { _locks: locks })
@@ -313,8 +325,27 @@ fn marker_paths(
     paths
 }
 
-fn collect_locks(snapshot: &mut LiveSessionSnapshot, agent: Agent, root: &Path) {
+fn collect_locks(
+    snapshot: &mut LiveSessionSnapshot,
+    agent: Agent,
+    root: &Path,
+    held: &HashMap<&Path, &File>,
+) {
     for path in marker_paths(snapshot, agent, root, "lock") {
+        if let Some(held) = held.get(path.as_path()) {
+            let same_file = (|| -> io::Result<bool> {
+                let held = crate::lifecycle::file_identity::identity_of(held)?;
+                Ok(held.is_some() && crate::lifecycle::file_identity::identity(&path)? == held)
+            })();
+            match same_file {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    snapshot.failed(agent, &path, error);
+                    continue;
+                }
+            }
+        }
         let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
             snapshot.failed(agent, &path, "lock filename is not UTF-8");
             continue;
@@ -492,6 +523,33 @@ mod tests {
             .acquire_action_guard(Agent::Codex, "missing")
             .unwrap();
         assert!(!root.join("missing.lock").exists());
+    }
+
+    #[test]
+    fn guarded_snapshots_still_detect_new_and_replaced_lock_files() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::write(root.join(".coordination.lock"), b"").unwrap();
+        let path = root.join("idle.lock");
+        fs::write(&path, b"").unwrap();
+        let tracker = LiveSessionTracker::new(LiveSessionPaths {
+            codex_writer_locks_dir: Some(root.to_path_buf()),
+            ..Default::default()
+        });
+        let guard = tracker.acquire_action_guard(Agent::Codex, "idle").unwrap();
+        let guards = [guard];
+        assert!(tracker.snapshot().is_live(Agent::Codex, "idle"));
+        assert!(!tracker
+            .snapshot_with_guards(&guards)
+            .is_live(Agent::Codex, "idle"));
+        fs::rename(&path, root.join("old-marker")).unwrap();
+        let replacement = File::create(path).unwrap();
+        replacement.lock().unwrap();
+        let new_marker = File::create(root.join("new.lock")).unwrap();
+        new_marker.lock().unwrap();
+        let snapshot = tracker.snapshot_with_guards(&guards);
+        assert!(snapshot.is_live(Agent::Codex, "idle"));
+        assert!(snapshot.is_live(Agent::Codex, "new"));
     }
 
     #[test]

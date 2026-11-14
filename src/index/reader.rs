@@ -398,7 +398,7 @@ impl SearchEngine {
             return Ok(Vec::new());
         }
 
-        let limit = request.limit.max(1);
+        let limit = request.limit.max(1).min(searcher.num_docs() as usize);
         let query_text = query_text.trim();
         let live_ids = self.live_sessions.snapshot();
         let mut session_cache = HashMap::new();
