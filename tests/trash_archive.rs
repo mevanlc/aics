@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use aics::lifecycle::{self, DependencyGraph, Operation};
+use aics::live::LiveSessionPaths;
 use aics::parse::Agent;
 use aics::scan::SessionRoots;
 use aics::summary::sidecar_path;
@@ -11,6 +12,8 @@ use anyhow::Result;
 use tempfile::TempDir;
 use zip::ZipArchive;
 
+#[path = "common/lock_holder.rs"]
+mod lock_holder;
 #[path = "support/trash.rs"]
 mod trash_fixture;
 
@@ -25,8 +28,12 @@ impl Fixture {
         let temp = TempDir::new()?;
         let trash = TrashPaths::from_data_root(temp.path().join("data"));
         let roots = SessionRoots {
-            live_sessions: Default::default(),
-            claude_projects: temp.path().join("claude"),
+            live_sessions: LiveSessionPaths {
+                claude_sessions_dir: Some(temp.path().join("claude/sessions")),
+                codex_writer_locks_dir: Some(temp.path().join("codex/thread-writer-locks")),
+                antigravity_presence_dir: Some(temp.path().join("antigravity/presence")),
+            },
+            claude_projects: temp.path().join("claude/projects"),
             codex_sessions: temp.path().join("codex/sessions"),
             antigravity_home: temp.path().join("antigravity"),
             trash: Some(trash.clone()),
@@ -44,6 +51,13 @@ impl Fixture {
             .env("AICS_CLAUDE_PROJECTS_DIR", &self.roots.claude_projects)
             .env("AICS_CODEX_SESSIONS_DIR", &self.roots.codex_sessions)
             .env("AICS_ANTIGRAVITY_HOME", &self.roots.antigravity_home)
+            .env("RUST_LOG", "off")
+            .arg("--claude-home")
+            .arg(self.temp.path().join("claude"))
+            .arg("--codex-home")
+            .arg(self.temp.path().join("codex"))
+            .arg("--antigravity-home")
+            .arg(&self.roots.antigravity_home)
             .args(args);
         if let Some(path) = destination {
             command.arg(path);
@@ -67,6 +81,18 @@ impl Fixture {
     fn store(&self) -> TrashStore {
         TrashStore::new(self.trash.clone())
     }
+
+    fn claude(&self, id: &str) -> Result<PathBuf> {
+        let path = self.roots.claude_projects.join(format!("{id}.jsonl"));
+        write(&path, format!("{{\"type\":\"user\",\"sessionId\":\"{id}\",\"message\":{{\"role\":\"user\",\"content\":\"fixture\"}}}}\n").as_bytes())?;
+        Ok(path)
+    }
+
+    fn archived(&self, zip: &Path) -> Result<Vec<aics::trash::TrashItem>> {
+        let extracted = self.temp.path().join("extracted");
+        ZipArchive::new(File::open(zip)?)?.extract(&extracted)?;
+        TrashStore::new(TrashPaths::from_data_root(extracted)).snapshot()
+    }
 }
 
 fn write(path: &Path, contents: &[u8]) -> Result<()> {
@@ -85,6 +111,44 @@ fn assert_success(output: Output) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn assert_skipped(output: &Output, count: usize) {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let warnings = stderr
+        .lines()
+        .filter(|line| line.starts_with("warning: skipped"))
+        .collect::<Vec<_>>();
+    assert_eq!(warnings, [format!("warning: skipped {count} trash entries that could not be safely removed; omitted from the archive and left in trash")]);
+}
+
+fn contents(path: &Path) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+    fn collect(
+        root: &Path,
+        path: &Path,
+        files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    ) -> Result<()> {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                collect(root, &entry.path(), files)?;
+            } else {
+                files.insert(
+                    entry.path().strip_prefix(root)?.into(),
+                    fs::read(entry.path())?,
+                );
+            }
+        }
+        Ok(())
+    }
+    let mut files = Default::default();
+    collect(path, path, &mut files)?;
+    Ok(files)
 }
 
 #[test]
@@ -154,7 +218,10 @@ fn both_zip_modes_preserve_complete_items_and_archived_items_restore() -> Result
     assert_eq!(fs::read(&zip)?, before);
     assert_eq!(f.store().snapshot()?.len(), 3);
 
-    assert_success(f.cli(&["--yes", "--archive-trash"], Some(&zip))?);
+    let output = f.cli(&["--yes", "--archive-trash"], Some(&zip))?;
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("warning: skipped"));
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("3 trash items in "));
+    assert_success(output);
     assert!(f.store().snapshot()?.is_empty());
     let restored_data = f.temp.path().join("extracted");
     ZipArchive::new(File::open(zip)?)?.extract(&restored_data)?;
@@ -193,8 +260,8 @@ fn archive_respects_active_dependents_and_export_includes_damaged_items() -> Res
     let child = f.codex("child", Some("parent"))?;
     let zip = f.temp.path().join("trash.zip");
     let blocked = f.cli(&["--archive-trash"], Some(&zip))?;
-    assert!(!blocked.status.success());
-    assert!(String::from_utf8_lossy(&blocked.stderr).contains("must be trashed first"));
+    assert_skipped(&blocked, 1);
+    assert!(blocked.stdout.is_empty());
     assert!(!zip.exists() && item.path.exists() && child.exists());
 
     fs::write(item.path.join("metadata.json"), b"broken JSON")?;
@@ -214,6 +281,187 @@ fn archive_respects_active_dependents_and_export_includes_damaged_items() -> Res
         b"broken JSON"
     );
     assert!(item.path.is_dir() && child.is_file());
+    Ok(())
+}
+
+#[test]
+fn archive_skips_dependency_blocked_items_and_preserves_their_bytes() -> Result<()> {
+    let f = Fixture::new()?;
+    let parent = f.codex("parent", None)?;
+    let parent = trash_fixture::trash_session(&f.roots, &parent, Agent::Codex, reason())?;
+    let child = f.codex("active-child", Some("parent"))?;
+    let idle = f.codex("idle", None)?;
+    let idle = trash_fixture::trash_session(&f.roots, &idle, Agent::Codex, reason())?;
+    let before = contents(&parent.path)?;
+    let zip = f.temp.path().join("partial.zip");
+    let output = f.cli(&["--archive-trash"], Some(&zip))?;
+    assert_skipped(&output, 1);
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("1 trash items in "));
+    assert_eq!(contents(&parent.path)?, before);
+    assert!(child.is_file() && !idle.path.exists());
+    let archived = f.archived(&zip)?;
+    assert_eq!(archived.len(), 1);
+    assert_eq!(archived[0].path.file_name(), idle.path.file_name());
+    Ok(())
+}
+
+#[test]
+fn archive_skips_live_locked_and_damaged_entries_but_keeps_independent_items() -> Result<()> {
+    let f = Fixture::new()?;
+    let mut protected = Vec::new();
+    for id in ["live", "damaged"] {
+        let source = f.claude(id)?;
+        protected.push(trash_fixture::trash_session(
+            &f.roots,
+            &source,
+            Agent::Claude,
+            reason(),
+        )?);
+    }
+    let parent = f.codex("parent", None)?;
+    let parent = trash_fixture::trash_session(&f.roots, &parent, Agent::Codex, reason())?;
+    let child = f.codex("child", Some("parent"))?;
+    let child = trash_fixture::trash_session(&f.roots, &child, Agent::Codex, reason())?;
+    protected.extend([parent, child]);
+    fs::write(protected[1].path.join("metadata.json"), b"broken JSON")?;
+    let idle = f.codex("idle", None)?;
+    let idle = trash_fixture::trash_session(&f.roots, &idle, Agent::Codex, reason())?;
+    write(
+        &f.temp.path().join("claude/sessions/live.json"),
+        format!("{{\"sessionId\":\"live\",\"pid\":{}}}", std::process::id()).as_bytes(),
+    )?;
+    write(
+        &f.temp
+            .path()
+            .join("codex/thread-writer-locks/.coordination.lock"),
+        b"idle coordination",
+    )?;
+    let idle_marker = f.temp.path().join("codex/thread-writer-locks/idle.lock");
+    write(&idle_marker, b"idle marker")?;
+    let _held =
+        lock_holder::HeldLock::new(&f.temp.path().join("codex/thread-writer-locks/child.lock"));
+    let before = protected
+        .iter()
+        .map(|item| contents(&item.path))
+        .collect::<Result<Vec<_>>>()?;
+    let zip = f.temp.path().join("partial.zip");
+    let output = f.cli(&["--archive-trash"], Some(&zip))?;
+    assert_skipped(&output, 4);
+    for (item, before) in protected.iter().zip(before) {
+        assert_eq!(contents(&item.path)?, before);
+    }
+    assert!(!idle.path.exists());
+    assert_eq!(fs::read(idle_marker)?, b"idle marker");
+    let archived = f.archived(&zip)?;
+    assert_eq!(archived.len(), 1);
+    assert_eq!(archived[0].path.file_name(), idle.path.file_name());
+    Ok(())
+}
+
+#[test]
+fn archive_can_remove_a_leaf_while_its_live_parent_stays_in_trash() -> Result<()> {
+    let f = Fixture::new()?;
+    let parent = f.codex("parent", None)?;
+    let parent = trash_fixture::trash_session(&f.roots, &parent, Agent::Codex, reason())?;
+    let child = f.codex("child", Some("parent"))?;
+    let child = trash_fixture::trash_session(&f.roots, &child, Agent::Codex, reason())?;
+    write(
+        &f.temp
+            .path()
+            .join("codex/thread-writer-locks/.coordination.lock"),
+        b"idle coordination",
+    )?;
+    let _held =
+        lock_holder::HeldLock::new(&f.temp.path().join("codex/thread-writer-locks/parent.lock"));
+    let zip = f.temp.path().join("leaf.zip");
+    assert_skipped(&f.cli(&["--archive-trash"], Some(&zip))?, 1);
+    assert!(parent.path.is_dir() && !child.path.exists());
+    assert_eq!(f.archived(&zip)?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn indeterminate_provider_is_skipped_without_blocking_other_providers() -> Result<()> {
+    let f = Fixture::new()?;
+    let source = f.claude("uncertain")?;
+    let uncertain = trash_fixture::trash_session(&f.roots, &source, Agent::Claude, reason())?;
+    let source = f.codex("idle", None)?;
+    let idle = trash_fixture::trash_session(&f.roots, &source, Agent::Codex, reason())?;
+    write(
+        &f.temp.path().join("claude/sessions/broken.json"),
+        b"broken marker",
+    )?;
+    let zip = f.temp.path().join("partial.zip");
+    assert_skipped(&f.cli(&["--archive-trash"], Some(&zip))?, 1);
+    assert!(uncertain.path.is_dir() && !idle.path.exists());
+    assert_eq!(f.archived(&zip)?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn same_thread_pages_stay_in_trash_when_one_page_cannot_be_verified() -> Result<()> {
+    let f = Fixture::new()?;
+    let mut pages = Vec::new();
+    for page in ["first", "second"] {
+        let path = f.roots.codex_sessions.join(format!("shared_{page}.jsonl"));
+        write(
+            &path,
+            br#"{"type":"session_meta","payload":{"id":"shared"}}"#,
+        )?;
+        pages.push(path);
+    }
+    let plan = DependencyGraph::discover(&f.roots, Agent::Codex, &pages)?
+        .plan([pages[0].clone()].into(), Operation::Trash);
+    let reasons = plan
+        .members
+        .keys()
+        .map(|path| (path.clone(), reason()))
+        .collect();
+    lifecycle::execute(&f.roots, &plan, &reasons)?;
+    let items = f.store().snapshot()?;
+    assert_eq!(items.len(), 2);
+    fs::write(items[0].path.join("metadata.json"), b"broken JSON")?;
+    let before = items
+        .iter()
+        .map(|item| contents(&item.path))
+        .collect::<Result<Vec<_>>>()?;
+    let idle = f.codex("idle", None)?;
+    let idle = trash_fixture::trash_session(&f.roots, &idle, Agent::Codex, reason())?;
+    let zip = f.temp.path().join("partial.zip");
+    assert_skipped(&f.cli(&["--archive-trash"], Some(&zip))?, 2);
+    for (item, before) in items.iter().zip(before) {
+        assert_eq!(contents(&item.path)?, before);
+    }
+    assert!(!idle.path.exists());
+    let archived = f.archived(&zip)?;
+    assert_eq!(archived.len(), 1);
+    assert_eq!(archived[0].path.file_name(), idle.path.file_name());
+    Ok(())
+}
+
+#[test]
+fn empty_or_entirely_skipped_archive_never_touches_the_destination() -> Result<()> {
+    let f = Fixture::new()?;
+    let zip = f.temp.path().join("existing.zip");
+    let empty = f.cli(&["--archive-trash"], Some(&zip))?;
+    assert!(empty.stdout.is_empty() && !zip.exists());
+    assert!(!String::from_utf8_lossy(&empty.stderr).contains("warning: skipped"));
+    assert_success(empty);
+    let source = f.codex("parent", None)?;
+    let item = trash_fixture::trash_session(&f.roots, &source, Agent::Codex, reason())?;
+    f.codex("child", Some("parent"))?;
+    let before = contents(&item.path)?;
+    for existing in [false, true] {
+        if existing {
+            fs::write(&zip, b"existing destination")?;
+        }
+        assert_skipped(&f.cli(&["--archive-trash"], Some(&zip))?, 1);
+        assert_eq!(zip.exists(), existing);
+        if existing {
+            assert_eq!(fs::read(&zip)?, b"existing destination");
+        }
+        assert_eq!(contents(&item.path)?, before);
+    }
     Ok(())
 }
 

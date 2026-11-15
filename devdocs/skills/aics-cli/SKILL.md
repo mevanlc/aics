@@ -96,5 +96,8 @@ removal outside the filters. Use archive only when removal was requested.
 `--trashed yes/both` selects trash or mixed batches. Existing destinations require
 confirmation or `--yes`. An empty or entirely protected selection leaves the
 destination untouched. Extract a ZIP into a fresh `AICS_DATA_ROOT` for browsing
-and Undo Trash. Whole-store `--export-trash` and `--archive-trash` also preserve
-damaged items that filtered search cannot select.
+and Undo Trash. Whole-store `--export-trash` copies even damaged items that
+filtered search cannot select. `--archive-trash` archives only safely removable
+entries: live, locked, dependency-blocked, or unverifiable entries stay in trash
+and are omitted from the ZIP. A stderr warning reports the skipped entry count.
+If none are eligible, it succeeds without creating or replacing the ZIP.

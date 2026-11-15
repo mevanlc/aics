@@ -57,7 +57,7 @@ transcripts, or an explicit ZIP command. Redirecting a TUI invocation is rejecte
 | `aics --export-sessions ZIPFILE [FILTERS]` | Writes a recovery ZIP of matching inactive sessions | Writes ZIP; recovers operations and migrates legacy trash if needed | Modifies filesystem (keeps originals) |
 | `aics --archive-sessions ZIPFILE [FILTERS]` | Writes a verified ZIP and removes archived originals | Writes ZIP and transactionally removes sessions | Mutates session files |
 | `aics --export-trash ZIPFILE` | Writes a ZIP of the whole trash store | Writes ZIP and migrates legacy trash if present | Modifies filesystem (keeps trash items) |
-| `aics --archive-trash ZIPFILE` | Writes a verified ZIP and removes its items | Writes ZIP and removes archived items | Mutates trash |
+| `aics --archive-trash ZIPFILE` | Archives safely removable trash and warns about skipped entries | Writes ZIP and removes archived items | Mutates trash |
 | `aics --preview-rules` | Reviews proposed JS rule actions | None (evaluates rules read-only) | **Yes** (when combined with `--json`) |
 | `aics --apply-rules` | Evaluates and executes JS rules | Mutates session files (trash, delete, tag) | **Mutating** (alters session files) |
 | `aics --rebuild-index` | Rebuilds search index and continues | Rewrites index cache files | Safe (re-indexes existing files) |
@@ -158,6 +158,10 @@ Use `--export-trash ZIPFILE` to copy trash or `--archive-trash ZIPFILE` to
 remove the items after verifying and publishing the ZIP. Pass `--yes` to
 overwrite an existing destination without an interactive prompt. Both commands
 operate on the entire store and accept the provider home overrides.
+Archive skips live, locked, dependency-blocked, and otherwise unverifiable
+entries, omits them from the ZIP, and leaves them in trash. A warning on stderr
+reports the skipped entry count. If no entries are eligible, archive succeeds
+without creating or replacing the destination or prompting for overwrite.
 Adding `-g` / `--global` prints a warning that it has no effect, then proceeds.
 Search filters such as `--dir` remain unsupported; use `--export-sessions` or
 `--archive-sessions` with `--trashed yes` for a filtered subset.
@@ -289,8 +293,9 @@ publication, with journaled rollback/recovery. A verified ZIP remains available
 if subsequent removal fails. Session ZIP modes conflict with JSON, Markdown
 export, other ZIP commands, explicit rules modes, and informational/exit commands.
 
-`--export-trash` and `--archive-trash` remain whole-store operations, including
-damaged items that are not searchable. A filtered `--trashed yes` ZIP is useful
+`--export-trash` and `--archive-trash` examine the whole store, including damaged
+items that are not searchable. Export copies them; archive skips entries whose
+removal cannot be verified as safe. A filtered `--trashed yes` ZIP is useful
 for selected sessions; it is not a complete trash-store backup.
 
 ## Hiding transcript parts

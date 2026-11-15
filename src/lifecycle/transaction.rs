@@ -19,7 +19,7 @@ use crate::trash::{self, exists, AntigravityBundlePaths, TrashMetadata, TrashRea
 mod archive;
 mod legacy;
 mod sessions;
-pub use archive::archive_trash;
+pub use archive::{archive_trash, TrashArchiveReport};
 pub use sessions::{
     archive_sessions, SessionArchiveOptions, SessionArchiveReport, SessionArchiveSkip,
 };

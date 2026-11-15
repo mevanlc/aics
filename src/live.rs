@@ -226,6 +226,31 @@ impl LiveSessionTracker {
         Ok(LiveSessionGuard { _locks: locks })
     }
 
+    /// Keep guards for idle sessions while reporting protected IDs individually.
+    /// Share Codex writer coordination across the accepted sessions.
+    pub(crate) fn acquire_available_group_guard(
+        &self,
+        agent: Agent,
+        ids: &[String],
+    ) -> (LiveSessionGuard, Vec<(String, ProtectionReason)>) {
+        let mut ids = ids.to_vec();
+        ids.sort();
+        ids.dedup();
+        let mut locks = Vec::new();
+        let mut skipped = Vec::new();
+        let mut coordinated = false;
+        for id in ids {
+            match self.acquire_action_guard_inner(agent, &id, !coordinated) {
+                Ok(guard) => {
+                    coordinated = true;
+                    locks.extend(guard._locks);
+                }
+                Err(reason) => skipped.push((id, reason)),
+            }
+        }
+        (LiveSessionGuard { _locks: locks }, skipped)
+    }
+
     fn acquire_action_guard_inner(
         &self,
         agent: Agent,
@@ -523,6 +548,40 @@ mod tests {
             .acquire_action_guard(Agent::Codex, "missing")
             .unwrap();
         assert!(!root.join("missing.lock").exists());
+    }
+
+    #[test]
+    fn available_guards_skip_a_locked_id_and_keep_shared_coordination() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::write(root.join(".coordination.lock"), b"coordination").unwrap();
+        for id in ["blocked", "idle", "second"] {
+            fs::write(root.join(format!("{id}.lock")), b"marker").unwrap();
+        }
+        let blocked = File::open(root.join("blocked.lock")).unwrap();
+        blocked.lock().unwrap();
+        let tracker = LiveSessionTracker::new(LiveSessionPaths {
+            codex_writer_locks_dir: Some(root.to_path_buf()),
+            ..Default::default()
+        });
+        let (guard, skipped) = tracker.acquire_available_group_guard(
+            Agent::Codex,
+            &[
+                "blocked".into(),
+                "idle".into(),
+                "idle".into(),
+                "second".into(),
+            ],
+        );
+        assert_eq!(skipped, [("blocked".into(), ProtectionReason::Live)]);
+        let snapshot = tracker.snapshot_with_guards(&[guard]);
+        assert!(snapshot.is_live(Agent::Codex, "blocked"));
+        assert!(snapshot.protection_reason(Agent::Codex, "idle").is_none());
+        assert!(snapshot.protection_reason(Agent::Codex, "second").is_none());
+        assert_eq!(
+            fs::read(root.join(".coordination.lock")).unwrap(),
+            b"coordination"
+        );
     }
 
     #[test]

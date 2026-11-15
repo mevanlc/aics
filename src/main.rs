@@ -314,7 +314,7 @@ struct Cli {
         value_name = "ZIPFILE",
         conflicts_with = "export_trash",
         help_heading = "Index & Storage Management",
-        help = "Write a verified ZIP of all trash, then remove the archived items"
+        help = "Archive safely removable trash in a verified ZIP, skipping unsafe items"
     )]
     archive_trash: Option<PathBuf>,
     #[arg(
@@ -599,13 +599,20 @@ fn main() -> Result<()> {
             cli.codex_home.as_deref(),
             cli.antigravity_home.as_deref(),
         )?;
-        let count = aics::lifecycle::archive_trash(
+        let report = aics::lifecycle::archive_trash(
             &paths.roots,
             destination,
             cli.archive_trash.is_some(),
             cli.yes,
         )?;
-        println!("{} trash items in {}", count, destination.display());
+        if report.skipped > 0 {
+            eprintln!("warning: skipped {} trash entries that could not be safely removed; omitted from the archive and left in trash", report.skipped);
+        }
+        if cli.archive_trash.is_some() && report.items == 0 {
+            eprintln!("aics: no eligible trash items; nothing archived");
+        } else {
+            println!("{} trash items in {}", report.items, destination.display());
+        }
         return Ok(());
     }
     if cli.yes && cli.session_zip_destination().is_none() {

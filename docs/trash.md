@@ -71,9 +71,14 @@ aics --archive-trash trash-archive.zip
 
 Export keeps the items in trash. Archive publishes and verifies the ZIP before
 removing its items. Archive uses the same dependency checks as permanent deletion.
-If any item cannot safely be removed, use export to save a copy. Either command
-prompts before overwriting an existing ZIP. Pass `--yes` to allow overwrite in a
-script. Both commands can migrate legacy trash on first use.
+Live, locked, dependency-blocked, or otherwise unverifiable items are skipped:
+they stay in trash and are omitted from the archive. A warning on stderr reports
+the number of skipped trash entries. Independent eligible entries are archived
+normally. If no entries are eligible, archive succeeds without creating or
+replacing the ZIP or prompting for overwrite. Use export to copy all items,
+including those unsafe to remove. Either command prompts before overwriting an
+existing ZIP. Pass `--yes` to allow overwrite in a script. Both commands can
+migrate legacy trash on first use.
 
 Both commands operate on all trash items regardless of the current directory.
 Adding `-g` / `--global` prints a warning explaining that it has no effect, then

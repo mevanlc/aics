@@ -19,7 +19,7 @@ pub(crate) mod file_identity;
 mod transaction;
 pub use transaction::{
     archive_sessions, archive_trash, execute, initialize_trash, recover, SessionArchiveOptions,
-    SessionArchiveReport, SessionArchiveSkip,
+    SessionArchiveReport, SessionArchiveSkip, TrashArchiveReport,
 };
 pub(crate) use transaction::{read_guard, read_trash_guard, RecoveryRequired};
 
