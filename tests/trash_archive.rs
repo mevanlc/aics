@@ -43,6 +43,15 @@ impl Fixture {
 
     fn cli(&self, args: &[&str], destination: Option<&Path>) -> Result<Output> {
         let mut command = Command::new(env!("CARGO_BIN_EXE_aics"));
+        self.configure_command(&mut command);
+        command.args(args);
+        if let Some(path) = destination {
+            command.arg(path);
+        }
+        Ok(command.output()?)
+    }
+
+    fn configure_command(&self, command: &mut Command) {
         command
             .current_dir(self.temp.path())
             .env("AICS_CONFIG_ROOT", self.temp.path().join("config"))
@@ -57,12 +66,7 @@ impl Fixture {
             .arg("--codex-home")
             .arg(self.temp.path().join("codex"))
             .arg("--antigravity-home")
-            .arg(&self.roots.antigravity_home)
-            .args(args);
-        if let Some(path) = destination {
-            command.arg(path);
-        }
-        Ok(command.output()?)
+            .arg(&self.roots.antigravity_home);
     }
 
     fn codex(&self, name: &str, history: Option<&str>) -> Result<PathBuf> {
@@ -92,6 +96,55 @@ impl Fixture {
         let extracted = self.temp.path().join("extracted");
         ZipArchive::new(File::open(zip)?)?.extract(&extracted)?;
         TrashStore::new(TrashPaths::from_data_root(extracted)).snapshot()
+    }
+
+    #[cfg(unix)]
+    fn locked_trash(&self, count: usize) -> Result<()> {
+        let mut seeds = std::collections::BTreeSet::new();
+        for i in 0..count {
+            let path = self.roots.antigravity_home.join(format!(
+                "brain/idle-{i}/.system_generated/logs/transcript.jsonl"
+            ));
+            write(&path, b"{}\n")?;
+            seeds.insert(path);
+        }
+        let paths = seeds.iter().cloned().collect::<Vec<_>>();
+        let plan = DependencyGraph::discover(&self.roots, Agent::Antigravity, &paths)?
+            .plan(seeds, Operation::Trash);
+        let reasons = plan
+            .members
+            .keys()
+            .map(|path| (path.clone(), reason()))
+            .collect();
+        lifecycle::execute(&self.roots, &plan, &reasons)?;
+        for i in 0..count {
+            write(
+                &self
+                    .roots
+                    .antigravity_home
+                    .join(format!("presence/idle-{i}.lock")),
+                b"idle marker",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn archive_with_descriptor_limit(&self, hard: bool, zip: &Path) -> Result<Output> {
+        let mut command = Command::new("/bin/sh");
+        let script = if hard {
+            "ulimit -n 64; exec \"$@\""
+        } else {
+            "ulimit -S -n 64; exec \"$@\""
+        };
+        command.args([
+            "-c",
+            script,
+            "aics-descriptor-test",
+            env!("CARGO_BIN_EXE_aics"),
+        ]);
+        self.configure_command(&mut command);
+        Ok(command.arg("--archive-trash").arg(zip).output()?)
     }
 }
 
@@ -149,6 +202,42 @@ fn contents(path: &Path) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>>
     let mut files = Default::default();
     collect(path, path, &mut files)?;
     Ok(files)
+}
+
+#[test]
+#[cfg(unix)]
+fn archive_handles_many_markers_with_a_low_soft_descriptor_limit() -> Result<()> {
+    let f = Fixture::new()?;
+    f.locked_trash(96)?;
+    let _held = lock_holder::HeldLock::new(&f.roots.antigravity_home.join("presence/idle-95.lock"));
+    let zip = f.temp.path().join("archive.zip");
+    let output = f.archive_with_descriptor_limit(false, &zip)?;
+    assert_skipped(&output, 1);
+    assert_eq!(f.archived(&zip)?.len(), 95);
+    assert_eq!(f.store().snapshot()?.len(), 1);
+    assert_eq!(
+        fs::read(f.roots.antigravity_home.join("presence/idle-0.lock"))?,
+        b"idle marker"
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn archive_keeps_io_headroom_under_a_low_hard_descriptor_limit() -> Result<()> {
+    let f = Fixture::new()?;
+    f.locked_trash(96)?;
+    let zip = f.temp.path().join("archive.zip");
+    let output = f.archive_with_descriptor_limit(true, &zip)?;
+    let remaining = f.store().snapshot()?;
+    assert_skipped(&output, remaining.len());
+    let archived = f.archived(&zip)?;
+    assert!(!archived.is_empty() && !remaining.is_empty());
+    assert_eq!(archived.len() + remaining.len(), 96);
+    for item in &remaining {
+        assert!(item.primary.as_ref().unwrap().is_file());
+    }
+    Ok(())
 }
 
 #[test]

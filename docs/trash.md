@@ -80,6 +80,11 @@ including those unsafe to remove. Either command prompts before overwriting an
 existing ZIP. Pass `--yes` to allow overwrite in a script. Both commands can
 migrate legacy trash on first use.
 
+Native session locks stay held until removal finishes. On Unix, AICS raises its
+own file descriptor soft limit when permitted and reserves capacity for archive
+I/O. If the hard limit leaves insufficient capacity, excess entries stay in
+trash and contribute to the skipped count.
+
 Both commands operate on all trash items regardless of the current directory.
 Adding `-g` / `--global` prints a warning explaining that it has no effect, then
 proceeds. Other search filters are rejected.

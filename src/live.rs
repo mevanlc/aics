@@ -10,6 +10,8 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::parse::Agent;
 
+mod file_descriptors;
+
 /// Runtime markers belong to agent homes, which can differ from indexed roots.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LiveSessionPaths {
@@ -216,12 +218,15 @@ impl LiveSessionTracker {
         let mut ids = ids.to_vec();
         ids.sort();
         ids.dedup();
+        let mut capacity = file_descriptors::lock_capacity(agent, ids.len().saturating_add(1))?;
         let mut locks = Vec::new();
         for (index, id) in ids.iter().enumerate() {
-            locks.extend(
-                self.acquire_action_guard_inner(agent, id, index == 0)?
-                    ._locks,
-            );
+            let guard = self.acquire_action_guard_inner(agent, id, index == 0)?;
+            if guard._locks.len() > capacity {
+                return Err(file_descriptors::capacity_exceeded());
+            }
+            capacity -= guard._locks.len();
+            locks.extend(guard._locks);
         }
         Ok(LiveSessionGuard { _locks: locks })
     }
@@ -236,15 +241,27 @@ impl LiveSessionTracker {
         let mut ids = ids.to_vec();
         ids.sort();
         ids.dedup();
+        let mut capacity = match file_descriptors::lock_capacity(agent, ids.len().saturating_add(1))
+        {
+            Ok(capacity) => capacity,
+            Err(reason) => {
+                return (
+                    LiveSessionGuard { _locks: Vec::new() },
+                    ids.into_iter().map(|id| (id, reason.clone())).collect(),
+                );
+            }
+        };
         let mut locks = Vec::new();
         let mut skipped = Vec::new();
         let mut coordinated = false;
         for id in ids {
             match self.acquire_action_guard_inner(agent, &id, !coordinated) {
-                Ok(guard) => {
+                Ok(guard) if guard._locks.len() <= capacity => {
                     coordinated = true;
+                    capacity -= guard._locks.len();
                     locks.extend(guard._locks);
                 }
+                Ok(_) => skipped.push((id, file_descriptors::capacity_exceeded())),
                 Err(reason) => skipped.push((id, reason)),
             }
         }

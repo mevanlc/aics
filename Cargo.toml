@@ -78,6 +78,9 @@ boa_engine = { version = "0.22.0", default-features = false, features = ["jsvalu
 [target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = { version = "3.6.1", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+rlimit = "0.11"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
