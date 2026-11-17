@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use tantivy::collector::TopDocs;
 use tantivy::query::{AllQuery, BooleanQuery, BoostQuery, Query, QueryParser};
-use tantivy::query_grammar::{UserInputAst, UserInputLeaf};
+use tantivy::query_grammar::{Delimiter, UserInputAst, UserInputLeaf};
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{
     DocAddress, DocSet, Index, IndexReader, Order, ReloadPolicy, TantivyDocument, TERMINATED,
@@ -886,6 +886,16 @@ pub(crate) fn prepare_query_ast(
     default_snippet_fields: &[String],
 ) -> bool {
     if let UserInputAst::Leaf(leaf) = ast {
+        if let UserInputLeaf::Literal(literal) = leaf.as_ref() {
+            if literal.delimiter == Delimiter::None {
+                if let Some(pattern) = wildcard_pattern(&literal.phrase) {
+                    **leaf = UserInputLeaf::Regex {
+                        field: literal.field_name.clone(),
+                        pattern,
+                    };
+                }
+            }
+        }
         if let UserInputLeaf::Regex {
             field: None,
             pattern,
@@ -975,6 +985,33 @@ pub(crate) fn prepare_query_ast(
             UserInputLeaf::All => true,
         },
     }
+}
+
+/// Wildcards match complete indexed terms, just like explicit term regexes.
+/// Normalize literal characters like LowerCaser and escape regex punctuation.
+fn wildcard_pattern(text: &str) -> Option<String> {
+    if !text.contains('*') {
+        return None;
+    }
+    let mut chars = text.chars().peekable();
+    let mut literal = String::new();
+    let mut pattern = String::new();
+    let mut has_wildcard = false;
+    while let Some(ch) = chars.next() {
+        if ch == '*' {
+            pattern.push_str(&regex::escape(&literal));
+            literal.clear();
+            pattern.push_str(".*");
+            has_wildcard = true;
+        } else if ch == '\\' && chars.peek() == Some(&'*') {
+            literal.push('*');
+            chars.next();
+        } else {
+            literal.extend(ch.to_lowercase());
+        }
+    }
+    pattern.push_str(&regex::escape(&literal));
+    has_wildcard.then_some(pattern)
 }
 
 fn record_snippet_field(fields: &mut Vec<String>, field: Option<&str>, default_fields: &[String]) {

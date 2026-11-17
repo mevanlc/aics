@@ -893,6 +893,7 @@ fn search_query_help_text() -> &'static str {
 \n\
 ## Query syntax\n\
 - Bare words are token searches. Tantivy's default tokenizer handles case and punctuation normalization.\n\
+- In unquoted terms, * matches zero or more characters within one indexed term, case-insensitively: cont*al matches continental and controversial; qui* matches quiet, quick, and quid; *s*on matches conversion and person. The whole term must match. Field restrictions work too, such as user:qui*.\n\
 - Multiple bare words are AND by default: rust serde means both terms must match.\n\
 - Use uppercase AND, OR, and NOT for explicit boolean logic. Lowercase and/or/not are ordinary words.\n\
 - Use parentheses to group boolean clauses, for example (rust OR go) parser.\n\

@@ -240,6 +240,12 @@ visible. Metadata discarded by the parser is unavailable even to All.
 Queries use Tantivy's lenient query parser:
 
 - Bare words are token searches and multiple bare words are ANDed by default.
+- In unquoted terms, `*` matches zero or more characters within one indexed
+  term, case-insensitively: `cont*al` matches `continental` and `controversial`,
+  `qui*` matches `quiet`, `quick`, and `quid`, and `*s*on` matches `conversion`
+  and `person`. The whole term must match; wildcards do not cross word boundaries.
+  Field restrictions work too, such as `user:qui*`. Quoted phrases retain their
+  usual phrase semantics. Quote wildcard queries in the shell: `aics -g 'cont*al'`.
 - Use uppercase `AND`, `OR`, and `NOT` for explicit boolean logic.
 - Use parentheses to group clauses, such as `(rust OR go) parser`.
 - Use quotes for an exact phrase, such as `"vector db"`.

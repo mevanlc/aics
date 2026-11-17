@@ -19,7 +19,7 @@ use crate::settings::DisplayOptions;
 /// The same parser/tokenizer configuration is used for index retrieval and
 /// source occurrence discovery. Working-directory literals are rewritten to
 /// substring queries; other path literals retain zero-distance prefix behavior.
-/// Transcript regexes match complete indexed terms.
+/// Transcript regexes and wildcards match complete indexed terms.
 pub(crate) fn query_parser(
     index: &Index,
     fields: &IndexSchema,
@@ -1011,6 +1011,16 @@ mod tests {
                 let (parser, defaults) = super::query_parser(&index, &schema, mode, options);
                 for query in [
                     "alpha",
+                    "alph*",
+                    "*pha*",
+                    "*ph*t",
+                    "AL**HA",
+                    "user:alph*",
+                    "agent:(alph* OR *mma)",
+                    "alpha NOT b*",
+                    "alph* gamma",
+                    "\"alph*\"",
+                    r"alph\*",
                     "alpha beta",
                     "alpha OR beta",
                     "alpha NOT beta",

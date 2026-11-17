@@ -60,6 +60,84 @@ fn search_query_returns_matching_sessions() -> Result<()> {
 }
 
 #[test]
+fn wildcard_search_matches_whole_terms_and_highlights_complete_words() -> Result<()> {
+    let temp = TempDir::new()?;
+    let roots = fixture_roots(&temp)?;
+    let cwd = temp.path().join("wildcards");
+    for (id, text) in [
+        ("continental", "continental"),
+        ("controversial", "Controversial"),
+        ("contal", "contal"),
+        ("quiet", "quiet"),
+        ("quick", "Quick"),
+        ("quid", "quid"),
+        ("qui", "qui"),
+        ("conversion", "conversion"),
+        ("person", "person"),
+        ("son", "son"),
+        (
+            "boundaries",
+            "intercontinental continentally squid personal",
+        ),
+        ("separate", "cont al qu i s on"),
+    ] {
+        write_codex_session(&temp, id, &cwd.to_string_lossy(), text)?;
+    }
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+
+    let continental = vec!["contal", "continental", "controversial"];
+    let qui = vec!["qui", "quick", "quid", "quiet"];
+    let son = vec!["conversion", "person", "son"];
+    for sort in [SortMode::Time, SortMode::Relevance] {
+        for (query, expected) in [
+            ("cont*al", continental.clone()),
+            ("CONT**AL", continental.clone()),
+            ("qui*", qui.clone()),
+            ("*s*on", son.clone()),
+            ("user:qui*", qui.clone()),
+            (
+                "user:(cont*al OR *s*on)",
+                [continental.clone(), son.clone()].concat(),
+            ),
+            ("cont*al NOT *vers*", vec!["contal", "continental"]),
+            ("cont*al qui*", vec![]),
+            ("\"cont*al\"", vec!["separate"]),
+            (r"cont\*al", vec!["separate"]),
+            ("<cont.*al>", continental.clone()),
+        ] {
+            let hits = engine.search(&SearchRequest {
+                visibility_search: aics::search_query::VisibilitySearch::All,
+                query: query.to_owned(),
+                scope: Scope::current_dir(cwd.clone()),
+                limit: 30,
+                sort,
+                filters: SearchFilters::default(),
+            })?;
+            let mut ids = hits
+                .iter()
+                .map(|hit| hit.session.session_id.as_str())
+                .collect::<Vec<_>>();
+            ids.sort_unstable();
+            let mut expected = expected;
+            expected.sort_unstable();
+            assert_eq!(ids, expected, "query={query:?}, sort={sort:?}");
+            if !matches!(query, "\"cont*al\"" | r"cont\*al") {
+                for hit in hits {
+                    assert_eq!(
+                        hit.snippet_html,
+                        format!("<b>{}</b>", hit.session.first_user_msg_content),
+                        "query={query:?}"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn unsupported_field_existence_syntax_keeps_lenient_search_behavior() -> Result<()> {
     let temp = TempDir::new()?;
     let roots = fixture_roots(&temp)?;
