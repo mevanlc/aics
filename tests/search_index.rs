@@ -241,6 +241,81 @@ fn explicit_or_operator_broadens_query() -> Result<()> {
 }
 
 #[test]
+fn working_dir_literals_match_substrings() -> Result<()> {
+    let temp = TempDir::new()?;
+    for (id, directory, content) in [
+        ("java", "my/javafx-ax", "shared marker"),
+        ("jave", "my/jave7-dizzy", "shared marker"),
+        (
+            "punctuation",
+            "pre-a.b[1]+-post/Shared Folder",
+            "shared marker",
+        ),
+        (
+            "decoy",
+            "pre-axb1-post/SharedXFolder",
+            "shared marker ve7 a.b[1]+ Shared Folder",
+        ),
+        ("unicode", "pré-CAFÉ-ΟΣ-post", "shared marker"),
+        ("unrelated", "other", "shared marker"),
+    ] {
+        let cwd = temp.path().join(directory).to_string_lossy().into_owned();
+        write_codex_session(&temp, id, &cwd, content)?;
+    }
+    let roots = SessionRoots {
+        live_sessions: Default::default(),
+        claude_projects: temp.path().join(".claude/projects"),
+        codex_sessions: temp.path().join(".codex/sessions"),
+        antigravity_home: temp.path().join(".gemini/antigravity-cli"),
+        trash: None,
+    };
+    let manager = IndexManager::with_paths(IndexPaths::from_root(temp.path().join("cache")));
+    manager.sync_with_roots(&roots, true)?;
+    let engine = manager.open_search_engine()?;
+
+    for (query, expected) in [
+        ("wd:ave7-di", vec!["jave"]),
+        ("working_dir:AVE7-DI", vec!["jave"]),
+        ("wd:ave7-diz", vec!["jave"]),
+        ("wd:afx-ax", vec!["java"]),
+        ("wd:\"e-a.b[1]+-p\"", vec!["punctuation"]),
+        ("wd:\"d Fol\"", vec!["punctuation"]),
+        ("wd:\"-post/Shared Fol\"", vec!["punctuation"]),
+        ("wd:afé", vec!["unicode"]),
+        ("wd:ΟΣ", vec!["unicode"]),
+        ("wd:(ave7-di OR afé)", vec!["jave", "unicode"]),
+        ("wd:ave7-di marker", vec!["jave"]),
+        (
+            "marker NOT wd:ave7-di",
+            vec!["decoy", "java", "punctuation", "unicode", "unrelated"],
+        ),
+        ("wd:<ave7-di>", vec![]),
+        ("wd:<.*ave7-di.*>", vec!["jave"]),
+    ] {
+        for sort in [SortMode::Relevance, SortMode::Time] {
+            let hits = engine.search(&SearchRequest {
+                visibility_search: aics::search_query::VisibilitySearch::All,
+                query: query.to_owned(),
+                scope: Scope::Global,
+                limit: 10,
+                sort,
+                filters: SearchFilters::default(),
+            })?;
+            let mut actual = hits
+                .into_iter()
+                .map(|hit| hit.session.session_id)
+                .collect::<Vec<_>>();
+            actual.sort();
+            assert_eq!(
+                actual, expected,
+                "unexpected matches for {query} / {sort:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn working_dir_field_and_wd_alias_match_component_prefixes() -> Result<()> {
     let temp = TempDir::new()?;
     let target_cwds = [

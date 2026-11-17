@@ -166,9 +166,9 @@ Field prefixes narrow a query to semantic parts of the source session:
   values can be either files or directories, such as `SearchPath`,
   `AbsolutePath`, generic sandbox paths, and similar ambiguous path properties.
 
-The three path fields use the same case-insensitive, path-component-prefix
-matching as `wd:`. They come from a semantic property allowlist; AICS does not
-guess from slashes in arbitrary text or whether a path currently exists. Bare
+The three path fields use case-insensitive, path-component-prefix matching.
+They come from a semantic property allowlist; AICS does not guess from slashes
+in arbitrary text or whether a path currently exists. Bare
 queries can match tool text according to the selected search-content mode and
 Visibility toggles.
 
@@ -243,11 +243,13 @@ Queries use Tantivy's lenient query parser:
 - Use uppercase `AND`, `OR`, and `NOT` for explicit boolean logic.
 - Use parentheses to group clauses, such as `(rust OR go) parser`.
 - Use quotes for an exact phrase, such as `"vector db"`.
-- Use `working_dir:PATH` or its `wd:PATH` alias to match a case-insensitive
-  working-directory prefix beginning at any path-component boundary. For example,
-  `wd:my/ja` matches `/Users/me/p/my/javafx-ax` and `/Users/me/p/my/jave7`.
-- The same component-prefix behavior applies to `dirs:PATH`, `files:PATH`, and
-  `paths:PATH`.
+- Use `working_dir:TEXT` or its `wd:TEXT` alias for a case-insensitive literal
+  substring anywhere in the working-directory path. For example, `wd:ave7`
+  matches `/Users/me/p/my/jave7-dizzy`, and `wd:my/ja` matches both
+  `/Users/me/p/my/javafx-ax` and `/Users/me/p/my/jave7`. Quote text containing
+  spaces, such as `wd:"Shared Folder"`.
+- `dirs:PATH`, `files:PATH`, and `paths:PATH` match case-insensitive prefixes
+  beginning at any path-component boundary.
 - Wrap a Tantivy term regex in `<` and `>`, optionally after a field name. Slashes
   are ordinary regex characters and need no query-language escaping, as in
   `wd:<.*codex/.*8ba3f7e.*>`. Regexes match whole indexed terms, so use `.*` for
@@ -292,6 +294,7 @@ Tantivy syntax, and is not present in the preview. See the
 
 Directory scopes (`--dir` and the current directory) compare complete paths
 case-insensitively by default; `--case-sensitive-dir` selects strict comparison.
-Canonical aliases are preserved. The `wd:` modifier searches indexed component
-suffixes instead. Directory restrictions apply before ranking and result limits,
-so older sessions remain discoverable with small `-n` values.
+Canonical aliases are preserved. The `wd:` modifier matches literal substrings
+anywhere in the working-directory path. Directory restrictions apply before
+ranking and result limits, so older sessions remain discoverable with small `-n`
+values.

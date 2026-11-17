@@ -17,8 +17,9 @@ use crate::search_projection::{default_search_field_names, SearchProjection};
 use crate::settings::DisplayOptions;
 
 /// The same parser/tokenizer configuration is used for index retrieval and
-/// source occurrence discovery. Path queries retain their zero-distance prefix
-/// behavior; transcript regexes match complete indexed terms.
+/// source occurrence discovery. Working-directory literals are rewritten to
+/// substring queries; other path literals retain zero-distance prefix behavior.
+/// Transcript regexes match complete indexed terms.
 pub(crate) fn query_parser(
     index: &Index,
     fields: &IndexSchema,
@@ -1033,6 +1034,12 @@ mod tests {
                     "<a.*|b.*>",
                     "NOT <beta>",
                     "wd:repo",
+                    "wd:OUR",
+                    "working_dir:our",
+                    "wd:(our OR missing)",
+                    "alpha NOT wd:our",
+                    "wd:<our>",
+                    "wd:<.*our.*>",
                     "files:src",
                     "files:\"src/a.rs\"",
                     "dirs:src",

@@ -933,6 +933,22 @@ pub(crate) fn prepare_query_ast(
                     literal.field_name.as_deref(),
                     default_snippet_fields,
                 );
+                if literal.field_name.as_deref() == Some("working_dir")
+                    && !literal.phrase.is_empty()
+                {
+                    // Match anywhere in the existing path terms, using the same
+                    // per-character lowercase normalization as Tantivy's LowerCaser.
+                    // Escape literals so path punctuation cannot become regex syntax.
+                    let normalized: String = literal
+                        .phrase
+                        .chars()
+                        .flat_map(char::to_lowercase)
+                        .collect();
+                    **leaf = UserInputLeaf::Regex {
+                        field: literal.field_name.clone(),
+                        pattern: format!("(?s:.*{}.*)", regex::escape(&normalized)),
+                    };
+                }
                 explicit
             }
             UserInputLeaf::Range { field, .. } | UserInputLeaf::Set { field, .. } => {

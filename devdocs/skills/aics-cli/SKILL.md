@@ -20,7 +20,8 @@ aics --json -g --agent claude --after 2026-07-01 'FROMAGE'
 Without `-g` or `--dir`, searches use the current directory. `--dir` selects an
 exact directory, including canonical aliases; it is case-insensitive unless
 `--case-sensitive-dir` is supplied. `wd:cpython` and `wd:my/cpython` instead
-search indexed working-directory suffixes. Quote a whole query as one argument.
+match case-insensitive literal substrings anywhere in the working-directory
+path; `wd:python` also matches `cpython`. Quote a whole query as one argument.
 
 Hits contain `session` metadata, a bounded first-user-message preview,
 `snippet` (plain text), score, and live status. These are discovery clues rather

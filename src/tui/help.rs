@@ -897,8 +897,8 @@ fn search_query_help_text() -> &'static str {
 - Use uppercase AND, OR, and NOT for explicit boolean logic. Lowercase and/or/not are ordinary words.\n\
 - Use parentheses to group boolean clauses, for example (rust OR go) parser.\n\
 - Use quotes for an exact phrase, for example \"vector db\".\n\
-- Use working_dir:PATH or wd:PATH to match a case-insensitive working-directory prefix from any path-component boundary; for example wd:my/ja.\n\
-- dirs:PATH, files:PATH, and paths:PATH use the same case-insensitive component-prefix matching.\n\
+- Use working_dir:TEXT or wd:TEXT to match a case-insensitive literal substring anywhere in the working-directory path; for example wd:ave7 matches jave7-dizzy, and wd:my/ja matches my/jave7. Quote text containing spaces.\n\
+- dirs:PATH, files:PATH, and paths:PATH match case-insensitive prefixes from any path-component boundary.\n\
 - Wrap a Tantivy term regex in < and >, optionally after a field name; for example wd:<.*codex/.*8ba3f7e.*>. Slashes need no escaping. Regexes match whole indexed terms, and \\> puts a literal > in the regex.\n\
 - AICS parses leniently, so malformed input should not open an error screen; Tantivy returns the usable parts it can parse.\n\
 \n\
